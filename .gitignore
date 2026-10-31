@@ -1,0 +1,30 @@
+# 依赖与构建产物
+node_modules/
+server/dist/
+web/dist/
+*.tsbuildinfo
+
+# 运行时数据：数据库、下载文件、封面缓存、session 密钥
+data/
+.tmpdata/
+*.log
+
+# 本地环境变量
+.env
+.env.local
+.env.*.local
+
+# 工具与编辑器
+.workbuddy/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 只收录 README 引用的截图，其余开发过程截图留在本地
+docs/shots/*
+!docs/shots/dl-active.png
+!docs/shots/dl-queued.png
+!docs/shots/dl-paused.png
+!docs/shots/manual-page.png
+!docs/shots/bot-online.png
