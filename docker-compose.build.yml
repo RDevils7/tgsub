@@ -27,9 +27,9 @@ services:
       DATA_DIR: /data
       DOWNLOAD_DIR: /downloads
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
-      BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-}
+      SESSION_SECRET: "${SESSION_SECRET:-}"
+      BASIC_AUTH_USER: "${BASIC_AUTH_USER:-}"
+      BASIC_AUTH_PASS: "${BASIC_AUTH_PASS:-}"
     volumes:
       # ① 数据持久化目录
       - "${DATA_HOST_DIR:-./data}:/data"

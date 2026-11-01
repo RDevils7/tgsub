@@ -34,10 +34,10 @@ services:
       DOWNLOAD_DIR: /downloads
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # 加密 Telegram session 的密钥；留空则首次启动自动生成并保存在 /data
-      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_SECRET: "${SESSION_SECRET:-}"
       # 可选的基础认证，暴露到公网时建议开启
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
-      BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-}
+      BASIC_AUTH_USER: "${BASIC_AUTH_USER:-}"
+      BASIC_AUTH_PASS: "${BASIC_AUTH_PASS:-}"
     volumes:
       # ① 数据持久化目录：数据库 tgsub.db、加密 session、封面缓存、临时截图
       #    换容器、重装镜像都不丢；备份这个目录即可恢复全部配置与记录
