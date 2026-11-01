@@ -4,7 +4,7 @@ import { db } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
 import { decodeMeta, encodeMeta } from "./emby";
-import { fixTelegramLink } from "./entity";
+import { fixTelegramLink, repairNfoText } from "./entity";
 import { stripLegacyIndex } from "./naming";
 
 /**
@@ -45,6 +45,8 @@ export interface RepairReport {
   renamed: number;
   /** 修正了失效链接的记录数 */
   links: number;
+  /** 修正了链接的 nfo 文件数 */
+  nfos: number;
 }
 
 /**
@@ -63,7 +65,7 @@ export function repairLegacyArtifacts(): RepairReport {
     )
     .all();
 
-  const report: RepairReport = { renamed: 0, links: 0 };
+  const report: RepairReport = { renamed: 0, links: 0, nfos: 0 };
   for (const row of rows) {
     const dir = row.save_dir ? path.join(env.downloadDir, row.save_dir) : env.downloadDir;
     const nextName = stripLegacyIndex(row.save_name);
@@ -115,21 +117,48 @@ export function repairLegacyArtifacts(): RepairReport {
       encodeMeta({ ...meta, link: fixedLink }),
       row.id,
     );
-    // 已经写好的 nfo 里也有这个链接，就地替换
-    for (const name of [row.save_name, nextName].filter(Boolean) as string[]) {
-      const nfoPath = nfoPathOf(dir, name);
-      if (!isInsideDownloadDir(nfoPath) || !fs.existsSync(nfoPath)) continue;
-      try {
-        const text = fs.readFileSync(nfoPath, "utf8");
-        if (text.includes(meta.link)) {
-          fs.writeFileSync(nfoPath, text.split(meta.link).join(fixedLink), "utf8");
-        }
-      } catch (err) {
-        logger.warn({ err: (err as Error).message, nfo: path.basename(nfoPath) }, "修正 nfo 里的消息链接失败");
-      }
-    }
     report.links += 1;
     logger.info({ id: row.id, from: meta.link, to: fixedLink }, "已修正剧集消息链接");
   }
+
+  // nfo 里的链接单独扫一遍目录：
+  // 1. tvshow.nfo 只在剧集首次落盘时生成，旧的会一直留在那里；
+  // 2. 任务入队时缓存的 emby_json 可能是修复前的快照。
+  // 所以按文本模式扫全目录，不依赖数据库里的旧值。
+  report.nfos = repairNfoLinks();
   return report;
+}
+
+/** 递归扫描下载目录，把 nfo 里失效的私有频道链接就地替换 */
+function repairNfoLinks(): number {
+  let fixed = 0;
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".nfo")) continue;
+      if (!isInsideDownloadDir(full)) continue;
+      try {
+        const text = fs.readFileSync(full, "utf8");
+        const next = repairNfoText(text);
+        if (next === text) continue;
+        fs.writeFileSync(full, next, "utf8");
+        fixed += 1;
+        logger.info({ nfo: path.basename(full) }, "已修正 nfo 里的消息链接");
+      } catch (err) {
+        logger.warn({ err: (err as Error).message, nfo: path.basename(full) }, "修正 nfo 里的消息链接失败");
+      }
+    }
+  };
+  walk(path.resolve(env.downloadDir));
+  return fixed;
 }

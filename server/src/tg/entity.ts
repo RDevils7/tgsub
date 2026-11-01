@@ -70,3 +70,17 @@ export function fixTelegramLink(link: string | null | undefined): string | null 
   if (!matched) return link;
   return `https://t.me/c/${matched[1]}/${matched[2]}`;
 }
+
+/** nfo 文本里失效的私有频道链接 */
+const BROKEN_LINK_RE = /https:\/\/t\.me\/(\d+)\/(\d+)/g;
+
+/**
+ * 把 nfo 文本里失效的私有频道链接换成能打开的 t.me/c/ 形式。
+ *
+ * tvshow.nfo 只在剧集首次落盘时生成，旧的会一直留在那里；
+ * 任务入队时缓存的 emby_json 也可能是修复前的快照 —— 所以按文本模式扫，不依赖库里的旧值。
+ */
+export function repairNfoText(text: string): string {
+  BROKEN_LINK_RE.lastIndex = 0;
+  return text.replace(BROKEN_LINK_RE, "https://t.me/c/$1/$2");
+}

@@ -20,6 +20,7 @@ import {
   fixTelegramLink,
   markedChannelId,
   normalizeEntityKey,
+  repairNfoText,
 } from "../server/src/tg/entity";
 import { Subscription } from "../server/src/types";
 
@@ -325,6 +326,20 @@ check("私有频道的失效链接改成 t.me/c/", () => {
   assert.equal(fixTelegramLink("https://t.me/4457697592/1374"), "https://t.me/c/4457697592/1374");
   assert.equal(fixTelegramLink("https://t.me/ASC2256/10500"), "https://t.me/ASC2256/10500");
   assert.equal(fixTelegramLink(null), null);
+});
+check("nfo 里的失效链接就地修正（tvshow / 剧集通用）", () => {
+  const text = [
+    '  <uniqueid type="tgsub" default="true">tgsub:我的妈妈徐秋曼</uniqueid>',
+    '  <uniqueid type="telegram">https://t.me/4457697592/1374</uniqueid>',
+  ].join("\n");
+  const fixed = repairNfoText(text);
+  assert.ok(fixed.includes("https://t.me/c/4457697592/1374"));
+  assert.equal(fixed.includes("https://t.me/4457697592/"), false);
+  // 公开频道的链接不受影响
+  assert.equal(repairNfoText('<uniqueid type="telegram">https://t.me/ASC2256/105</uniqueid>'),
+    '<uniqueid type="telegram">https://t.me/ASC2256/105</uniqueid>');
+  // 幂等
+  assert.equal(repairNfoText(fixed), fixed);
 });
 
 /** 文件类用例：需要 await，单独提供异步断言入口 */

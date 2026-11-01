@@ -5,6 +5,7 @@ import { logger } from "../logger";
 import { sanitizeSegment } from "../utils";
 import { autoCoversFromVideo } from "./autocover";
 import { markCoversFromDownload, saveCoverFromFile } from "./covers";
+import { fixTelegramLink } from "./entity";
 import { loadSharp } from "./sharp";
 
 /**
@@ -111,7 +112,8 @@ function buildEpisodeNfo(meta: EmbyMeta): string {
   lines.push(`  <premiered>${date}</premiered>`);
   lines.push(`  <year>${new Date(meta.airedAt || Date.now()).getFullYear()}</year>`);
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:${meta.series}:${tag || "movie"}`)}</uniqueid>`);
-  if (meta.link) lines.push(`  <uniqueid type="telegram">${esc(meta.link)}</uniqueid>`);
+  const link = fixTelegramLink(meta.link);
+  if (link) lines.push(`  <uniqueid type="telegram">${esc(link)}</uniqueid>`);
   lines.push("</episodedetails>", "");
   return lines.join("\n");
 }
@@ -131,7 +133,8 @@ function buildShowNfo(meta: EmbyMeta): string {
   lines.push(`  <year>${new Date(meta.airedAt || Date.now()).getFullYear()}</year>`);
   lines.push("  <status>Continuing</status>");
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:series:${meta.series}`)}</uniqueid>`);
-  if (meta.link) lines.push(`  <uniqueid type="telegram">${esc(meta.link)}</uniqueid>`);
+  const link = fixTelegramLink(meta.link);
+  if (link) lines.push(`  <uniqueid type="telegram">${esc(link)}</uniqueid>`);
   lines.push("</tvshow>", "");
   return lines.join("\n");
 }
