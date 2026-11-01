@@ -20,7 +20,6 @@
 ## 目录
 
 - [功能特性](#功能特性)
-- [界面预览](#界面预览)
 - [工作原理](#工作原理)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
@@ -134,42 +133,6 @@ React 18 + Vite + TailwindCSS，无 UI 框架，深色玻璃质感，桌面与�
 - **session 加密落盘**：AES-256-GCM 加密后存 SQLite，重启进程/重建容器无需重新登录。
 - **单实例锁**：同一机器重复启动会被拒绝，避免同一 authKey 双连导致 `AUTH_KEY_DUPLICATED` 作废。
 - **生产就绪**：Docker 多阶段构建、非 root 运行、健康检查、数据卷持久化、可选 HTTP Basic 认证、结构化日志（pino）。
-
----
-
-## 界面预览
-
-| 概览 | 下载记录 |
-| --- | --- |
-| ![概览](docs/ui-dashboard.png) | ![下载记录](docs/ui-downloads.png) |
-
-| 监控历史 | 手动下载 |
-| --- | --- |
-| ![监控历史](docs/ui-monitor.png) | ![手动下载](docs/shots/manual-page.png) |
-
-| 频道管理 | 订阅关键词 |
-| --- | --- |
-| ![频道](docs/ui-channels.png) | ![订阅](docs/ui-subscriptions.png) |
-
-| 设置 / 扫码登录 | 机器人 |
-| --- | --- |
-| ![设置](docs/ui-settings-qr.png) | ![机器人](docs/shots/bot-online.png) |
-
-**元数据编辑**
-
-| 基本信息 | 图片（含 ffmpeg 截帧） |
-| --- | --- |
-| ![元数据-基本信息](docs/shots/meta-basic.png) | ![元数据-图片](docs/shots/meta-images.png) |
-
-| 从视频截图 | NFO 原文 |
-| --- | --- |
-| ![截帧](docs/shots/meta-picker.png) | ![NFO](docs/shots/meta-nfo.png) |
-
-**队列管控（暂停 / 停止 / 继续 / 插队）**
-
-| 下载中 | 排队中 | 已暂停 |
-| --- | --- | --- |
-| ![下载中](docs/shots/dl-active.png) | ![排队中](docs/shots/dl-queued.png) | ![已暂停](docs/shots/dl-paused.png) |
 
 ---
 
@@ -498,7 +461,6 @@ tgsub/
 │       ├── api.ts / types.ts / utils.ts
 │       └── index.css           # Tailwind 主题
 ├── scripts/                    # 自检与诊断脚本（见下）
-├── docs/                       # 截图
 ├── data/                       # 运行时数据（不提交）
 ├── Dockerfile                  # 三阶段构建
 ├── docker-compose.yml
@@ -526,8 +488,6 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 | `node scripts/e2e-manual.mjs` | 手动下载接口端到端（需已登录、可联网） |
 | `node scripts/e2e-bot.mjs` | 机器人端到端 |
 | `node scripts/diag-session.js` | 解密本地 session，打印 DC / 地址 / authKey 指纹并试连（服务运行时会拒绝执行） |
-| `node scripts/shot-page.mjs "#/settings" out.png` | 用 Edge headless 截整页图 |
-| `node scripts/shot-downloads.mjs 排队中 out.png` | 截下载记录页指定标签 |
 
 ---
 

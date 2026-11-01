@@ -1,6 +1,7 @@
 // 通用整页截图：node scripts/shot-page.mjs "#/settings" docs/shots/settings-emby.png
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -78,6 +79,7 @@ const probe = await send("Runtime.evaluate", {
 });
 console.log("page:", probe.result.value);
 const shot = await send("Page.captureScreenshot", { format: "png" });
+mkdirSync(path.dirname(out), { recursive: true });
 await writeFile(out, Buffer.from(shot.data, "base64"));
 ws.close();
 proc.kill();

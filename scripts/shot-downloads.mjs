@@ -1,6 +1,7 @@
 // 下载记录页截图：node scripts/shot-downloads.mjs 排队中 docs/shots/downloads-queued.png
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -85,6 +86,7 @@ if (tab) {
 }
 
 const shot = await send("Page.captureScreenshot", { format: "png" });
+mkdirSync(path.dirname(out), { recursive: true });
 await writeFile(out, Buffer.from(shot.data, "base64"));
 ws.close();
 proc.kill();
