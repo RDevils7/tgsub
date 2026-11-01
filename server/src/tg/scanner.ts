@@ -8,6 +8,17 @@ import { channelEntityKey } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { notify } from "./notify";
 
+/**
+ * 分页拉取之间的抖动间隔。
+ *
+ * 一次性把 offsetId 一页页翻到底，在 Telegram 看来就是典型的「自动抓取历史消息」，
+ * 频道多、积压多时短时间能发出几十个 messages.getHistory。
+ * 加上 300~900ms 的随机间隔后，请求节奏接近人翻聊天记录，风控画像明显更平缓。
+ */
+function pace(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 300 + Math.random() * 600));
+}
+
 const MAX_BATCHES = 20;
 
 /** 每次扫描至少留痕的最近消息条数：频道安静时监控页也能看到"扫到了什么" */
@@ -113,6 +124,7 @@ async function fetchMessages(
       reachedCursor = true;
       break;
     }
+    await pace();
   }
   if (!reachedCursor) {
     logger.warn({ channel: channel.title, lastId }, "积压消息过多，本轮只处理最近部分");
@@ -258,7 +270,8 @@ export async function scanAll(reason = "scheduled"): Promise<ScanResult[]> {
     logger.info({ count: channels.length, reason }, "开始扫描频道");
     for (const channel of channels) {
       results.push(await scanChannel(channel.id));
-      await new Promise((r) => setTimeout(r, 1200));
+      // 频道之间留 1.5~3s 随机间隔：固定节奏（比如恒定 1200ms）本身就是机器特征
+      await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
     }
     pruneHistory();
   } finally {

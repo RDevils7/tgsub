@@ -180,8 +180,17 @@ function isFlood(err: unknown): boolean {
 
 function friendlyAuthError(err: unknown): string {
   const msg = errorText(err);
+  if (msg.includes("USER_DEACTIVATED_BAN") || msg.includes("USER_DEACTIVATED")) {
+    return (
+      "这个机器人已被 Telegram 冻结或删除（所属账号被判定可疑活动时会连带处置它创建的全部机器人）。" +
+      "冻结的机器人无法恢复，请到 @BotFather 重新创建一个，并换用新的 Token。"
+    );
+  }
   if (msg.includes("ACCESS_TOKEN_INVALID") || msg.includes("ACCESS_TOKEN_EXPIRED")) {
-    return "Bot Token 无效或已失效，请到 @BotFather 重新获取";
+    return (
+      "Bot Token 已失效。如果 Telegram 给你的账号发过「可疑活动」通知，" +
+      "它会把相关机器人的 Token 一并重置 —— 旧 Token 永久作废，必须去 @BotFather 重新获取（或用 /token 换新）。"
+    );
   }
   if (msg.includes("API_ID_INVALID") || msg.includes("API_ID_PUBLISHED_FLOOD")) {
     return "当前应用凭证无法用于机器人，请改用「自定义 API ID」";

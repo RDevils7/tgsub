@@ -172,6 +172,8 @@ export interface AuthState {
   sessionErrorCode: string | null;
   /** true=只是连接撞车，点「重试连接」即可恢复；false=服务器已作废，必须重新扫码 */
   sessionRecoverable: boolean;
+  /** true=失效原因高度指向 Telegram 风控处置（会话被重置/账号被限制），应先去申诉而不是反复重登 */
+  riskSuspect: boolean;
 }
 
 /* ------------------------------ 日志 ------------------------------ */

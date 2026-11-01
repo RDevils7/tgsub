@@ -418,6 +418,21 @@ export default function Settings() {
               {auth?.sessionState === "dead" && (
                 <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3.5 py-3">
                   <p className="text-[12.5px] font-medium text-warn">本地登录凭据已被 Telegram 判定失效</p>
+                  {auth.riskSuspect && (
+                    <div className="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.08] px-3 py-2.5">
+                      <p className="text-[12px] font-medium text-err">
+                        疑似 Telegram 风控处置，不是本站的故障
+                      </p>
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-slate-300">
+                        Telegram 已把你的全部登录会话重置（其他设备会被一起踢下线），并可能冻结相关机器人、
+                        重置它们的 Token。这是它对「账号可疑活动」的标准处置，在本地反复重新登录不会让它恢复。
+                      </p>
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">
+                        正确做法：在手机 Telegram 打开 <span className="text-slate-200">@SpamBot</span>
+                        {" "}发送 /start 查看状态并申诉，恢复前不要再反复扫码。
+                      </p>
+                    </div>
+                  )}
                   {/*
                     分两种情况给不同指引：
                     - 可自愈（AUTH_KEY_DUPLICATED）：只是重启时新旧连接短暂撞车，点重试即可；
@@ -699,13 +714,22 @@ export default function Settings() {
               使用公开的 Telegram Desktop 官方客户端应用标识（与 tdl 等工具一致），登录时手机扫码即可。
               设备指纹会自动对齐到 Desktop 平台，避免「凭证平台与设备不匹配」带来的额外风控。
             </p>
+            <div className="rounded-lg border border-rose-500/25 bg-rose-500/[0.07] px-3 py-2">
+              <p className="text-[11.5px] font-medium text-err">有账号风险，长期使用请换自定义 API</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-300">
+                公开凭证 = 官方客户端身份。用它从机房/代理 IP 做批量下载，容易被判定为
+                <span className="text-slate-100">「仿冒官方客户端」</span>：一旦触发风控，
+                Telegram 会重置该账号的全部会话（其他设备一起掉线）并冻结它创建的机器人。
+                自己的 api_id 在 my.telegram.org 免费申请，两分钟即可。
+              </p>
+            </div>
             <Field label="内置应用">
               <select
                 className="field"
                 value={draft.builtin_app}
                 onChange={(e) => patch("builtin_app", e.target.value)}
               >
-                <option value="desktop">Telegram Desktop（官方客户端，推荐）</option>
+                <option value="desktop">Telegram Desktop（官方客户端，风控最敏感）</option>
                 <option value="builtin">tdl 内置应用</option>
               </select>
             </Field>
@@ -714,10 +738,6 @@ export default function Settings() {
                 当前生效：{data.credential.label} · api_id {data.credential.apiId}
               </p>
             )}
-            <p className="text-[11px] leading-relaxed text-warn/70">
-              提示：公开凭证被大量用户共用，其账号信任度低于你自行申请的应用。若后续能申请到 api_id，
-              切换为「自定义 API」会更稳妥。
-            </p>
           </div>
         ) : (
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">

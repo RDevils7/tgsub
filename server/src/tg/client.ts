@@ -43,6 +43,8 @@ export interface AuthState {
   sessionErrorCode: string | null;
   /** true=只是连接撞车，点「重试连接」即可恢复；false=服务器已作废，必须重新扫码 */
   sessionRecoverable: boolean;
+  /** true=失效原因高度指向 Telegram 风控处置（会话被重置/账号被限制），应先去申诉而不是反复重登 */
+  riskSuspect: boolean;
 }
 
 /**
@@ -97,6 +99,12 @@ const CONNECT_RETRY_DELAYS = [1500, 4000];
  */
 const RECONNECT_GRACE_MS = 10_000;
 
+/**
+ * 登录成功后「独立重连验证」前的等待时间。
+ * 目的：给服务端回收登录时那条连接的时间，避免同一个新 authKey 上出现两条连接。
+ */
+const VERIFY_RECONNECT_DELAY_MS = 10_000;
+
 async function waitConnected(client: TelegramClient, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -122,6 +130,86 @@ let connecting: Promise<TelegramClient> | null = null;
 let cachedMe: AuthState["me"] = null;
 
 const PENDING_TTL_MS = 10 * 60 * 1000;
+
+/* ------------------------------------------------------------------ */
+/* 重新登录闸门（账号风控保护）                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 每登录一次，Telegram 的「设备 → 活动会话」列表里就多一条授权记录。
+ *
+ * 这个项目最容易踩的坑是死循环：登录失效 → 点「重新扫码」→ 几十秒后又失效 → 再点。
+ * 每点一次都在服务器侧新增一条授权，短时间内堆出十几条，恰好符合 Telegram 对
+ * 「账号被他人接管」的判定特征。于是它按安全策略一次性**重置该账号的全部会话**
+ * （手机、平板、桌面同时掉线），并冻结该账号创建的机器人、重置它们的 token。
+ *
+ * 表现就是：刚登录就失效 + 其他设备全部退出 + 机器人连不上/被删除。
+ * 这三件事不是三个 bug，而是同一个处置结果。
+ *
+ * 所以这里做硬限流：1 分钟内只允许 1 次、24 小时最多 5 次。超限直接拒绝，
+ * 并明确告诉用户「该去申诉，不该继续重登」—— 继续重登只会延长风控时间。
+ */
+const RELOGIN_COOLDOWN_MS = 60 * 1000;
+const RELOGIN_DAILY_LIMIT = 5;
+const RELOGIN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function reloginHistory(): number[] {
+  const raw = getSetting("relogin_history");
+  if (!raw) return [];
+  try {
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    const now = Date.now();
+    return arr.filter((t): t is number => typeof t === "number" && now - t < RELOGIN_WINDOW_MS);
+  } catch {
+    return [];
+  }
+}
+
+function guardRelogin(): void {
+  const history = reloginHistory();
+  const now = Date.now();
+  const last = history[history.length - 1] ?? 0;
+  if (last && now - last < RELOGIN_COOLDOWN_MS) {
+    const waited = Math.round((now - last) / 1000);
+    const wait = Math.ceil((RELOGIN_COOLDOWN_MS - (now - last)) / 1000);
+    throw new TgError(
+      "RELOGIN_TOO_FREQUENT",
+      `距上次登录只有 ${waited} 秒。短时间内反复登录会被 Telegram 判定为账号异常，` +
+        `进而重置你的全部登录会话（手机会被一起踢下线）并冻结相关机器人。请等待 ${wait} 秒后再试。`,
+    );
+  }
+  if (history.length >= RELOGIN_DAILY_LIMIT) {
+    throw new TgError(
+      "RELOGIN_DAILY_LIMIT",
+      `24 小时内已重新登录 ${history.length} 次，已达上限。继续尝试只会加重风控：` +
+        `请先在手机 Telegram 里打开 @SpamBot 查看账号状态并申诉，恢复后再登录。`,
+    );
+  }
+}
+
+function recordRelogin(): void {
+  const history = reloginHistory();
+  history.push(Date.now());
+  setSetting("relogin_history", JSON.stringify(history.slice(-20)));
+}
+
+/**
+ * 这些错误码出现在「几分钟前还正常」的会话上时，基本可以确定是
+ * Telegram 侧主动重置，而不是本地凭据自然过期。
+ */
+const RISK_SUSPECT_CODES = new Set([
+  "AUTH_KEY_UNREGISTERED",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED_BAN",
+  "AUTH_KEY_PERM_EMPTY",
+]);
+
+const RISK_HINT =
+  "如果你在手机 Telegram 里收到过官方「可疑活动」通知（Abuse Notifications），" +
+  "说明账号已被风控处置：全部会话被重置、机器人被冻结。此时反复重新登录只会延长限制，" +
+  "请先到 @SpamBot 申诉，等账号恢复后再登录。";
 
 function parseIntOrThrow(value: string, label: string): number {
   const n = Number(value);
@@ -581,13 +669,16 @@ export async function getAuthState(opts: { fresh?: boolean } = {}): Promise<Auth
   }
 
   const meta = getSessionMeta();
+  const errorCode = meta.error ? meta.error.split(":")[0].trim() : null;
+  const riskSuspect = meta.state === "dead" && errorCode !== null && RISK_SUSPECT_CODES.has(errorCode);
+
   return {
     configured,
     connected,
     authorized,
     me,
     pendingCode: Boolean(pending && Date.now() - pending.createdAt < PENDING_TTL_MS),
-    error: lastError,
+    error: riskSuspect ? `${lastError ?? "登录状态已失效"} ${RISK_HINT}` : lastError,
     sessionSavedAt: meta.savedAt,
     sessionState: meta.state,
     sessionPersisted: meta.state !== "none",
@@ -596,6 +687,7 @@ export async function getAuthState(opts: { fresh?: boolean } = {}): Promise<Auth
     sessionRecoverable:
       meta.state !== "dead" ||
       (meta.error !== null && RETRYABLE_SESSION_ERRORS.has(meta.error.split(":")[0].trim())),
+    riskSuspect,
   };
 }
 
@@ -671,6 +763,8 @@ export async function requestLoginCode(phone: string): Promise<{ phoneCodeHash: 
   const cred = requireCredentials();
   const normalized = phone.trim().replace(/[\s-]/g, "");
   if (!/^\+?\d{6,16}$/.test(normalized)) throw new TgError("BAD_PHONE", "手机号格式不正确，请包含国际区号");
+  // 手机号登录每要一次验证码也是一次新的授权入口，同样受闸门约束
+  guardRelogin();
 
   if (activeClient) {
     await activeClient.disconnect().catch(() => undefined);
@@ -765,11 +859,15 @@ function describeLoginError(err: unknown): string {
     AUTH_KEY_DUPLICATED:
       "同一个登录凭据被 Telegram 检测到在多处同时使用，已被服务器作废。请点「彻底重置并重新登录」清掉本地旧凭据后重新扫码。",
     AUTH_KEY_UNREGISTERED:
-      "本地保存的登录凭据已被 Telegram 注销，无法再使用。请点「彻底重置并重新登录」后重新扫码。",
+      "本地保存的登录凭据已被 Telegram 注销，无法再使用。请点「彻底重置并重新登录」后重新扫码。" +
+      "如果刚登录就失效、手机端其他设备也被一起踢下线，那是 Telegram 判定可疑活动后重置了全部会话，" +
+      "请先到 @SpamBot 申诉，不要反复重登。",
     AUTH_KEY_PERM_EMPTY: "登录凭据缺少权限，无法继续，请重新扫码登录。",
     SESSION_REVOKED: "这个登录会话已在手机端被注销，请重新扫码登录。",
     SESSION_EXPIRED: "登录会话已过期，请重新扫码登录。",
-    USER_DEACTIVATED_BAN: "该账号已被 Telegram 停用。",
+    USER_DEACTIVATED_BAN:
+      "该账号已被 Telegram 停用或冻结。请在手机 Telegram 里打开 @SpamBot 查看具体状态并申诉，" +
+      "申诉通过前不要反复尝试登录（每次失败都会加重风控）。",
     PHONE_CODE_EMPTY: "验证码已失效，请重新获取。",
     PHONE_CODE_INVALID: "验证码不正确，请重新输入。",
     PHONE_CODE_EXPIRED: "验证码已过期，请重新获取。",
@@ -825,6 +923,7 @@ async function finalizeLogin(client: TelegramClient, source: string): Promise<vo
   }
 
   setSession(session);
+  recordRelogin();
   activeClient = client;
   pending = null;
   lastError = null;
@@ -847,7 +946,13 @@ async function finalizeLogin(client: TelegramClient, source: string): Promise<vo
    * 所以这里断开当前连接，用刚落库的 session 重新建一个 client 握手 + getMe。
    * 只有这一步也通过，才算真的登录成功 —— 否则用户会看到「登录成功」，
    * 几十秒后又被心跳判死，白折腾一次扫码。
+   *
+   * **但断连后必须等一会儿再重连。** 刚 authorize 完的 authKey 只有一条活动连接，
+   * 立刻断开再握手时，服务器侧那条旧连接往往还没回收，短窗口内同一个 key 上
+   * 出现两条连接，就是 AUTH_KEY_DUPLICATED 的由来 —— 为了「验证登录有效」
+   * 反而把刚拿到的 key 弄作废，得不偿失。等 10 秒让服务端完成回收，代价远小于重扫一次。
    */
+  await sleep(VERIFY_RECONNECT_DELAY_MS);
   await verifyFreshSession(session, source, fp);
 }
 
@@ -1107,6 +1212,8 @@ export function cancelQrLogin(): void {
 }
 
 export async function startQrLogin(): Promise<QrState> {
+  // 先过闸门：超频直接拒绝，不能先 cancel 再报错把原有二维码也弄没了
+  guardRelogin();
   cancelQrLogin();
   const cred = requireCredentials();
 
