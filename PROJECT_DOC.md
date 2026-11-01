@@ -361,12 +361,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
 | `main` | 与 `latest` 同步 |
-| `v1.0.1` / `1.0.1` | 打 `v1.0.1` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.2` / `1.0.2` | 打 `v1.0.2` 标签时产生的固定版本（建议生产环境锁定） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.1
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.2
 docker compose up -d
 ```
 
@@ -749,14 +749,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.1
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.2
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.1 && git push origin v1.0.1    # 发布 v1.0.1 / 1.0 / latest
+git tag v1.0.2 && git push origin v1.0.2    # 发布 v1.0.2 / 1.0 / latest
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

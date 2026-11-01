@@ -8,4 +8,4 @@
  * 用它而不是各处硬编码，是为了 `/api/health`、设置页展示、镜像标签
  * 三处永远说同一个数字。
  */
-export const APP_VERSION = process.env.APP_VERSION || "1.0.1";
+export const APP_VERSION = process.env.APP_VERSION || "1.0.2";

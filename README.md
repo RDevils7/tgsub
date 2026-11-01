@@ -120,7 +120,7 @@ compose 文件里全部是真实值，**直接编辑对应那一行**即可：
 
 | 要改什么 | 改哪一行 |
 | --- | --- |
-| 换镜像版本 | `image:` → `rdevils7/tgsub:v1.0.1` |
+| 换镜像版本 | `image:` → `rdevils7/tgsub:v1.0.2` |
 | 换宿主机端口 | `ports:` → `- "8080:6789"` |
 | 换数据目录 | `volumes:` 第一条 → `- /opt/tgsub/data:/data` |
 | 换下载目录 | `volumes:` 第二条 → `- /mnt/nas/tgsub:/downloads` |
@@ -322,12 +322,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
-| `v1.0.1` / `1.0.1` | 打标签时产生的固定版本（**生产环境建议锁定**） |
+| `v1.0.2` / `1.0.2` | 打标签时产生的固定版本（**生产环境建议锁定**） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.1
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.2
 docker compose up -d
 ```
 
@@ -335,13 +335,14 @@ docker compose up -d
 
 | 版本 | 主要变更 |
 | --- | --- |
+| `1.0.2` | 修复「连接异常，延迟重连」每 66 秒刷屏：gramjs 的 `PingDelayDisconnect` 在代理环境下收不到 Pong 会误判断线，现改为以真实 `getMe` 心跳判定连接活性，心跳正常时忽略 ping 误判（真断线时告警照常保留）；重连退避重置窗口 180s → 45s，连接稳定后延迟回到 4 秒；日志页直接显示 `strikes`/`delayMs` 并在连续掉线时给出排查方向；机器人「未启用 · Token 已保存」状态区分 |
 | `1.0.1` | 内置凭证默认值由 Telegram Desktop 官方客户端（`api_id=2040`）换成 **tdl 自建应用（15055931）**，老库自动迁移；新增**重登闸门**（1 分钟冷却 + 24h 5 次上限）；登录后延迟 10 秒再独立验证，避免新 authKey 双连接被判作废；失效原因识别为风控类时直接给出申诉指引；扫描分页与频道间加随机抖动；设置页底部显示版本号 |
 | `1.0.0` | 首个版本：扫码登录、频道扫描、关键词订阅、媒体下载、Emby NFO + 封面、Telegram 机器人控制台、日志页 |
 
 ```bash
 # 查看当前运行的版本
 curl -s http://<NAS-IP>:6789/api/health
-# {"ok":true,"uptime":123,"telegram":true,"version":"1.0.1"}
+# {"ok":true,"uptime":123,"telegram":true,"version":"1.0.2"}
 ```
 
 > 镜像仓库是公开的，任何人都能 `docker pull`。若你的 fork 需保持私有，
