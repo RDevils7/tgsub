@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { DownloadItem } from "../types";
 import { Badge, Button, EmptyState, Modal, ProgressBar, Spinner, StatusDot, useToast } from "../components/ui";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
+import { Pager, pageCountOf } from "../components/Pager";
 import {
   IconDownload,
   IconFile,
@@ -173,7 +174,8 @@ export default function Downloads() {
   const [items, setItems] = useState<DownloadItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  /** 当前页（从 0 开始） */
+  const [page, setPage] = useState(0);
   /** 正在执行的动作，形如 "12:pause"，避免同一行多个按钮同时转圈 */
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [pageSize, setPageSize] = usePageSize("downloads", DEFAULT_PAGE_SIZE);
@@ -188,34 +190,37 @@ export default function Downloads() {
   queryRef.current = query;
 
   const fetchPage = useCallback(
-    async (offset: number, append: boolean) => {
+    async (target: number) => {
       const res = await api.downloads({
         status,
         q: queryRef.current.trim(),
         limit: pageSize,
-        offset,
+        offset: target * pageSize,
       });
       setTotal(res.total);
       setLiveSpeed(res.queue?.speed ?? 0);
-      setItems((prev) => (append ? [...prev, ...res.items] : res.items));
+      setItems(res.items);
+      // 页码越界（删到最后一页空了、或条数变少）退回最后一页
+      const last = pageCountOf(res.total, pageSize) - 1;
+      if (target > last) setPage(last);
     },
     [status, pageSize],
   );
 
   const reload = useCallback(async () => {
     try {
-      await fetchPage(0, false);
+      await fetchPage(page);
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
       setLoading(false);
     }
-  }, [fetchPage, toast]);
+  }, [fetchPage, page, toast]);
 
   useEffect(() => {
     setLoading(true);
     void reload();
-  }, [status, reload]);
+  }, [page, reload]);
 
   /* 有进行中的任务时自动刷新 */
   const hasActive = useMemo(
@@ -227,25 +232,18 @@ export default function Downloads() {
     if (!hasActive) return undefined;
     // 下载中的任务 1 秒刷新一次，速度与剩余时间才跟得上
     const timer = window.setInterval(() => {
-      void fetchPage(0, false).catch(() => undefined);
+      void fetchPage(page).catch(() => undefined);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [hasActive, fetchPage]);
+  }, [hasActive, fetchPage, page]);
 
   const search = () => {
     setLoading(true);
-    void reload();
-  };
-
-  const loadMore = async () => {
-    setLoadingMore(true);
-    try {
-      await fetchPage(items.length, true);
-    } catch (err) {
-      toast.push((err as Error).message, "error");
-    } finally {
-      setLoadingMore(false);
-    }
+    setPage(0);
+    void fetchPage(0).catch((err: Error) => {
+      toast.push(err.message, "error");
+      setLoading(false);
+    });
   };
 
   const retry = async (item: DownloadItem) => {
@@ -323,7 +321,8 @@ export default function Downloads() {
       if (clearScope === "all" && res.queue.active > 0) parts.push(`${res.queue.active} 个下载中的任务已保留`);
       toast.push(parts.join(" · "), res.count > 0 ? "success" : "info");
       setClearOpen(false);
-      await reload();
+      setPage(0);
+      await fetchPage(0);
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
@@ -338,7 +337,10 @@ export default function Downloads() {
           {TABS.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => setStatus(tab.key)}
+              onClick={() => {
+                setStatus(tab.key);
+                setPage(0);
+              }}
               className={`rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition ${
                 status === tab.key
                   ? "bg-white/[0.08] text-white shadow-sm"
@@ -363,7 +365,13 @@ export default function Downloads() {
               }}
             />
           </div>
-          <PageSizeControl value={pageSize} onChange={setPageSize} />
+          <PageSizeControl
+            value={pageSize}
+            onChange={(n) => {
+              setPageSize(n);
+              setPage(0);
+            }}
+          />
           <Button size="sm" onClick={search} title="刷新">
             <IconRefresh className="h-3.5 w-3.5" />
           </Button>
@@ -553,12 +561,14 @@ export default function Downloads() {
           </div>
         )}
 
-        {items.length < total && (
-          <div className="border-t border-white/[0.06] p-3 text-center">
-            <Button size="sm" onClick={() => void loadMore()} loading={loadingMore}>
-              加载更多（剩余 {total - items.length}）
-            </Button>
-          </div>
+        {total > 0 && (
+          <Pager
+            page={page}
+            pageCount={pageCountOf(total, pageSize)}
+            total={total}
+            unit="条记录"
+            onChange={(next) => setPage(next)}
+          />
         )}
       </div>
 

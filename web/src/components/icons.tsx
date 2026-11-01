@@ -169,6 +169,30 @@ export const IconX = (p: Props) => (
   </Svg>
 );
 
+export const IconChevronLeft = (p: Props) => (
+  <Svg {...p}>
+    <path d="M14.5 5.5 8 12l6.5 6.5" />
+  </Svg>
+);
+
+export const IconChevronRight = (p: Props) => (
+  <Svg {...p}>
+    <path d="M9.5 5.5 16 12l-6.5 6.5" />
+  </Svg>
+);
+
+export const IconChevronsLeft = (p: Props) => (
+  <Svg {...p}>
+    <path d="M13 5.5 6.5 12 13 18.5M19 5.5 12.5 12 19 18.5" />
+  </Svg>
+);
+
+export const IconChevronsRight = (p: Props) => (
+  <Svg {...p}>
+    <path d="M11 5.5 17.5 12 11 18.5M5 5.5 11.5 12 5 18.5" />
+  </Svg>
+);
+
 export const IconMenu = (p: Props) => (
   <Svg {...p}>
     <path d="M4 7h16M4 12h16M4 17h16" />

@@ -4,6 +4,7 @@ import { api } from "../api";
 import type { Channel, MessageLog, MessagePreview } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, StatusDot, useToast } from "../components/ui";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
+import { Pager, pageCountOf } from "../components/Pager";
 import {
   IconClock,
   IconDownload,
@@ -88,7 +89,8 @@ export default function Monitor() {
   const [counts, setCounts] = useState<Record<string, number>>({ all: 0 });
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  /** 当前页（从 0 开始） */
+  const [page, setPage] = useState(0);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -178,26 +180,32 @@ export default function Monitor() {
     [],
   );
 
-  const fetchPage = useCallback(async (offset: number, append: boolean, silent = false) => {
-    const { status: st, channelId: cid, query: q } = stateRef.current;
-    if (!silent) setLoading(!append);
-    try {
-      const res = await api.messages({
-        status: st,
-        channelId: cid,
-        q: q.trim(),
-        limit: pageSize,
-        offset,
-      });
-      setTotal(res.total);
-      setCounts(res.counts ?? { all: 0 });
-      setItems((prev) => (append ? [...prev, ...res.items] : res.items));
-    } catch (err) {
-      if (!silent) toast.push((err as Error).message, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [toast, pageSize]);
+  const fetchPage = useCallback(
+    async (target: number, silent = false) => {
+      const { status: st, channelId: cid, query: q } = stateRef.current;
+      if (!silent) setLoading(true);
+      try {
+        const res = await api.messages({
+          status: st,
+          channelId: cid,
+          q: q.trim(),
+          limit: pageSize,
+          offset: target * pageSize,
+        });
+        setTotal(res.total);
+        setCounts(res.counts ?? { all: 0 });
+        setItems(res.items);
+        // 页码越界（记录被清掉或条数变少）时退回最后一页
+        const last = pageCountOf(res.total, pageSize) - 1;
+        if (target > last) setPage(last);
+      } catch (err) {
+        if (!silent) toast.push((err as Error).message, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [toast, pageSize],
+  );
 
   useEffect(() => {
     void api
@@ -207,27 +215,18 @@ export default function Monitor() {
   }, []);
 
   useEffect(() => {
-    void fetchPage(0, false);
-  }, [status, channelId, fetchPage]);
+    void fetchPage(page, false);
+  }, [fetchPage, page, status, channelId]);
 
-  /* 静默轮询：只在停留在第一页时刷新，避免打断已展开的历史 */
+  /* 静默轮询：只在第一页刷新，翻到前面的历史页时不动 */
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      if (items.length > pageSize) return;
-      void fetchPage(0, false, true);
+      if (page !== 0) return;
+      void fetchPage(0, true);
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [fetchPage, items.length, pageSize]);
-
-  const loadMore = async () => {
-    setLoadingMore(true);
-    try {
-      await fetchPage(items.length, true);
-    } finally {
-      setLoadingMore(false);
-    }
-  };
+  }, [fetchPage, page]);
 
   const clearAll = async () => {
     setClearing(true);
@@ -240,6 +239,7 @@ export default function Monitor() {
         res.count > 0 ? "success" : "info",
       );
       setClearOpen(false);
+      setPage(0);
       await fetchPage(0, false);
     } catch (err) {
       toast.push((err as Error).message, "error");
@@ -277,7 +277,7 @@ export default function Monitor() {
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-[11px] tracking-wide text-slate-500">频道</span>
           <button
-            onClick={() => setChannelId(0)}
+            onClick={() => { setChannelId(0); setPage(0); }}
             className={`rounded-lg px-2.5 py-1 text-[12px] font-medium transition ${
               channelId === 0
                 ? "bg-white/[0.08] text-white shadow-sm"
@@ -289,7 +289,7 @@ export default function Monitor() {
           {channels.map((channel) => (
             <button
               key={channel.id}
-              onClick={() => setChannelId(channel.id)}
+              onClick={() => { setChannelId(channel.id); setPage(0); }}
               title={channel.title}
               className={`max-w-[220px] truncate rounded-lg px-2.5 py-1 text-[12px] font-medium transition ${
                 channelId === channel.id
@@ -310,7 +310,7 @@ export default function Monitor() {
               return (
                 <button
                   key={tab.key}
-                  onClick={() => setStatus(tab.key)}
+                  onClick={() => { setStatus(tab.key); setPage(0); }}
                   className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition ${
                     active
                       ? "bg-white/[0.08] text-white shadow-sm"
@@ -339,12 +339,21 @@ export default function Monitor() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") void fetchPage(0, false);
+                  if (e.key === "Enter") {
+                    setPage(0);
+                    void fetchPage(0, false);
+                  }
                 }}
               />
             </div>
-            <PageSizeControl value={pageSize} onChange={setPageSize} />
-            <Button size="sm" onClick={() => void fetchPage(0, false)} title="刷新">
+            <PageSizeControl
+              value={pageSize}
+              onChange={(n) => {
+                setPageSize(n);
+                setPage(0);
+              }}
+            />
+            <Button size="sm" onClick={() => { setPage(0); void fetchPage(0, false); }} title="刷新">
               <IconRefresh className="h-3.5 w-3.5" />
             </Button>
             <Button size="sm" variant="danger" onClick={() => setClearOpen(true)} title="清空监控记录">
@@ -362,9 +371,7 @@ export default function Monitor() {
           共 {total} 条消息
           {activeChannel && <span className="text-slate-600">· {activeChannel.title}</span>}
         </span>
-        <span>
-          当前显示 {items.length} 条（每页 {pageSize} 条）· 一条消息内的多个文件只算一条
-        </span>
+        <span>每页 {pageSize} 条 · 一条消息内的多个文件只算一条</span>
       </div>
 
       {/* 表格 */}
@@ -586,12 +593,14 @@ export default function Monitor() {
           </div>
         )}
 
-        {items.length < total && (
-          <div className="border-t border-white/[0.06] p-3 text-center">
-            <Button size="sm" onClick={() => void loadMore()} loading={loadingMore}>
-              加载更多（剩余 {total - items.length}）
-            </Button>
-          </div>
+        {total > 0 && (
+          <Pager
+            page={page}
+            pageCount={pageCountOf(total, pageSize)}
+            total={total}
+            unit="条消息"
+            onChange={(next) => setPage(next)}
+          />
         )}
       </div>
 
