@@ -564,6 +564,18 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 镜像用仓库内置的 `GITHUB_TOKEN` 登录 GHCR，无需额外配置密钥；首次推送后如果包是私有的，
 去仓库 `Settings → Packages` 把 `tgsub` 改成 Public 即可让任何人 `docker pull`。
 
+> **关于 package-lock.json**：lock 是在 Windows 上生成的，缺 Linux 平台的原生可选依赖
+> （`@rollup/rollup-linux-x64-gnu`、`@esbuild/linux-x64` 等二进制包），直接 `npm ci`
+> 会报 "Cannot find module @rollup/rollup-linux-x64-gnu"（npm/cli#4828）。
+> 因此镜像内按 `package.json` 重新解析依赖树，lock 仅用于本地 Windows 开发。
+
+校验镜像能否匿名拉取：
+
+```bash
+bash scripts/check-ghcr.sh                              # 检查 latest
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.0
+```
+
 手动触发或指定版本发布：
 
 ```bash

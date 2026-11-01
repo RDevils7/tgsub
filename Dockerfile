@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1
 
+# 说明：仓库里的 package-lock.json 是在 Windows 上生成的，里面缺少 Linux 平台的
+# 原生可选依赖（@rollup/rollup-linux-x64-gnu、@esbuild/linux-x64 等二进制包），
+# `npm ci` 只会照 lock 装，容器里就会报 "Cannot find module @rollup/rollup-linux-x64-gnu"
+# 导致 vite 构建失败（npm/cli#4828）。因此镜像内按 package.json 重新解析依赖树，
+# 让 npm 装上当前架构的二进制；lock 仍保留给本地 Windows 开发使用。
+
 ############################
-# 1. 依赖安装（含原生模块编译工具链）
+# 1. 开发依赖（含原生模块编译工具链）
 ############################
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
@@ -20,31 +26,63 @@ COPY package.json package-lock.json* ./
 COPY server/package.json ./server/package.json
 COPY web/package.json ./web/package.json
 
-RUN npm ci --no-audit --no-fund \
- || (rm -rf node_modules && npm install --no-audit --no-fund)
+RUN rm -f package-lock.json \
+ && npm install --no-audit --no-fund --include=optional
 
 # 确认原生模块可用，失败则强制源码编译（需要上面的工具链）
 RUN node -e "require('better-sqlite3')" \
  || npm_config_build_from_source=true npm rebuild better-sqlite3
 
 ############################
-# 2. 构建（前端静态资源 + 后端 TS）
+# 2. 生产依赖（运行时镜像用，不含任何 devDependency）
+############################
+FROM node:22-bookworm-slim AS prod-deps
+WORKDIR /app
+
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV npm_config_registry=${NPM_REGISTRY} \
+    npm_config_fund=false \
+    npm_config_audit=false \
+    NODE_ENV=production
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY package.json package-lock.json* ./
+COPY server/package.json ./server/package.json
+COPY web/package.json ./web/package.json
+
+RUN rm -f package-lock.json \
+ && npm install --omit=dev --no-audit --no-fund --include=optional \
+ && (node -e "require('better-sqlite3')" \
+     || npm_config_build_from_source=true npm rebuild better-sqlite3)
+
+# 关键原生依赖自检：缺一个就在构建期报错，而不是等到线上截帧/处理图片时才炸
+RUN node -e "require('better-sqlite3')" \
+ && node -e "console.log('ffmpeg:', require('@ffmpeg-installer/ffmpeg').path)" \
+ && node -e "try{require('sharp');console.log('sharp: ok')}catch(e){console.log('sharp: 缺失（图片处理降级为原图复制）')}"
+
+# 工作区软链（node_modules/server、node_modules/web）在运行镜像里是悬空的，直接清掉
+RUN rm -f node_modules/server node_modules/web
+
+############################
+# 3. 构建（前端静态资源 + 后端 TS）
 ############################
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 ENV NODE_ENV=development
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json package-lock.json* ./
+COPY package.json ./
 COPY server ./server
 COPY web ./web
 
 RUN npm -w web run build \
- && npm -w server run build \
- && npm prune --omit=dev
+ && npm -w server run build
 
 ############################
-# 3. 运行时（最小化镜像）
+# 4. 运行时（最小化镜像）
 ############################
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -61,10 +99,10 @@ RUN apt-get update \
  && mkdir -p /data/downloads \
  && chown -R node:node /data /app
 
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/server/package.json ./server/package.json
+COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
 
 USER node
