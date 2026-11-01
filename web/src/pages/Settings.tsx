@@ -958,14 +958,23 @@ export default function Settings() {
       </section>
 
       <section className="card p-5">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
-            <IconSpark className="h-4 w-4" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-semibold text-white">Emby 媒体库</h2>
-            <p className="mt-0.5 text-[12px] text-slate-500">边下边生成元信息，Emby 扫描即出海报、简介与集数</p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
+              <IconSpark className="h-4 w-4" />
+            </span>
+            <div>
+              <h2 className="text-[14px] font-semibold text-white">Emby 媒体库</h2>
+              <p className="mt-0.5 text-[12px] text-slate-500">边下边生成元信息，Emby 扫描即出海报、简介与集数</p>
+            </div>
           </div>
+          {/* 通知入库需要地址 / API Key / 路径映射，单独放在「Emby 入库」页 */}
+          <a
+            href="#/emby"
+            className="shrink-0 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11.5px] text-slate-400 transition hover:border-brand-500/30 hover:text-brand-300"
+          >
+            入库通知设置 →
+          </a>
         </div>
 
         <div className="mt-4 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">

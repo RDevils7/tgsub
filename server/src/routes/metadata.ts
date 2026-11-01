@@ -7,6 +7,7 @@ import { logger } from "../logger";
 import { Download } from "../types";
 import { sanitizeSegment } from "../utils";
 import { decodeMeta, encodeMeta, EmbyMeta } from "../tg/emby";
+import { queueEmbyUpdate } from "../tg/embyapi";
 import { listCovers } from "../tg/covers";
 import { autoCoversFromVideo } from "../tg/autocover";
 import {
@@ -887,6 +888,8 @@ metadataRouter.post(
     }
 
     logger.info({ path: target.path, nfoCount, coverCount }, "已生成元数据");
+    // 刚重写了 nfo 与封面，让 Emby 重新认一遍这个剧集目录
+    queueEmbyUpdate(target.dir, "Modified", false);
     res.json({ ok: true, nfoCount, coverCount, files: files.length });
   }),
 );

@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { db, getSession, getSettings, setBotToken, updateSettings } from "../db";
+import { db, getEmbyKeyHint, getSession, getSettings, setBotToken, setEmbyApiKey, updateSettings } from "../db";
 import { env } from "../env";
 import { disconnectClient } from "../tg/client";
 import { getBotState, restartBot } from "../tg/bot";
 import { getBuiltinApp } from "../tg/credentials";
+import { normalizeEmbyUrl } from "../tg/embyapi";
 import { withLiveProgress } from "../tg/downloader";
 import { AppSettings, Download } from "../types";
 import { asyncHandler, clampInt } from "../lib/http";
@@ -18,6 +19,7 @@ settingsRouter.get(
   asyncHandler(async (_req, res) => {
     const s = getSettings();
     const builtin = getBuiltinApp(s.builtin_app);
+    const embyKey = getEmbyKeyHint();
     res.json({
       settings: {
         ...s,
@@ -29,6 +31,8 @@ settingsRouter.get(
         s.credential_mode === "custom"
           ? { mode: "custom", label: "自定义应用", apiId: s.api_id || null }
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
+      // Emby API Key 单独加密存放，只回掩码与「有没有配置」
+      emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
       paths: { dataDir: env.dataDir, downloadDir: env.downloadDir, dbFile: env.dbFile },
       version: APP_VERSION,
       bot: getBotState(),
@@ -95,6 +99,20 @@ settingsRouter.put(
       ].join(",");
     }
     if (body.bot_notify !== undefined) patch.bot_notify = Boolean(body.bot_notify);
+    if (body.emby_notify !== undefined) patch.emby_notify = Boolean(body.emby_notify);
+    if (typeof body.emby_url === "string") patch.emby_url = normalizeEmbyUrl(body.emby_url);
+    if (typeof body.emby_path_map === "string") {
+      patch.emby_path_map = body.emby_path_map
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join("\n");
+    }
+
+    // Emby API Key 和 bot token 一样单独加密落盘；传空字符串 = 清除，传掩码 = 保持不变
+    if (typeof body.emby_api_key === "string" && body.emby_api_key !== MASK) {
+      setEmbyApiKey(body.emby_api_key);
+    }
 
     // token 单独加密落盘，不放进 AppSettings。
     // 传了 bot_token 就按传入值覆盖（传空字符串 = 清除），传掩码 = 保持不变
@@ -129,12 +147,14 @@ settingsRouter.put(
     }
 
     const builtin = getBuiltinApp(next.builtin_app);
+    const embyKey = getEmbyKeyHint();
     res.json({
       settings: { ...next, api_hash: next.api_hash ? MASK : "", has_session: Boolean(getSession()) },
       credential:
         next.credential_mode === "custom"
           ? { mode: "custom", label: "自定义应用", apiId: next.api_id || null }
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
+      emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
       bot: getBotState(),
     });
   }),

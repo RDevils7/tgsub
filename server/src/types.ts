@@ -132,6 +132,16 @@ export interface AppSettings {
   fallback_folder: boolean;
   /** 下载完成后用 ffmpeg 从视频随机截帧，生成每集缩略图与剧集目录封面 */
   auto_cover_frames: boolean;
+  /** 下载完成后通知 Emby 入库（POST /Library/Media/Updated），Emby 上立刻能看到新集 */
+  emby_notify: boolean;
+  /** Emby 服务地址，例如 http://192.168.1.10:8096；末尾的 /emby 可填可省 */
+  emby_url: string;
+  /**
+   * 路径映射：每行一条「本机路径=Emby 路径」。
+   * 容器里下载到 /downloads，而 Emby 看到的是 /volume1/media/tgsub，
+   * 不映射的话 Emby 会说「路径不存在」而拒绝入库。
+   */
+  emby_path_map: string;
   /** 启用 Telegram 机器人：给机器人发消息即可控制本程序 */
   bot_enabled: boolean;
   /** 允许操作机器人的 Telegram 用户 ID（逗号分隔）；留空则一律拒绝并回复对方 ID */
@@ -160,6 +170,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cover_images: 3,
   fallback_folder: true,
   auto_cover_frames: true,
+  emby_notify: false,
+  emby_url: "",
+  emby_path_map: "",
   bot_enabled: false,
   bot_allow_users: "",
   bot_notify: true,

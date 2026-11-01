@@ -9,6 +9,7 @@ import { getClient } from "./client";
 import { extractMedia, targetRelativePath } from "./media";
 import { channelEntityKey } from "./entity";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
+import { queueEmbyUpdate } from "./embyapi";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -404,6 +405,8 @@ class DownloadQueue {
       const info = extractMedia(message);
       const fileName = info?.fileName || row.file_name;
       const isPhoto = (info?.kind ?? row.media_kind) === "photo";
+      // 1.0.2 之前用来拼封面的临时图任务（.art-*）：它们不是媒体，别通知 Emby
+      const isArtTask = (row.save_name ?? "").startsWith(".art-");
 
       // 剧集类内容按消息正文命名：<剧名>/<剧名>S01E04.mp4，
       // 同一剧名的后续集数会自然落进同一个文件夹；其余文件仍走 file_template。
@@ -435,6 +438,8 @@ class DownloadQueue {
           );
           // 文件在但元信息可能缺（老版本下载的），顺手补齐
           await finalizeMedia(candidate, row.emby_json);
+          // 顺手让 Emby 认一下这个文件：老版本下载时没通知过入库
+          if (!isArtTask) queueEmbyUpdate(candidate, "Created");
           return;
         }
         // 上次中断留下的半截文件：就地覆盖，否则会生成「美人局S01E04 (2).mp4」
@@ -442,7 +447,7 @@ class DownloadQueue {
       }
       // 封面用的临时图（.art-N.jpg）每集都复用同一个名字，重下时直接覆盖，
       // 否则会变成「.art-1 (2).jpg」这种组装时认不出来的名字
-      if (row.save_name && row.save_name.startsWith(".art-")) {
+      if (isArtTask) {
         await fs.promises.unlink(candidate).catch(() => undefined);
         resumeInPlace = false;
       }
@@ -512,6 +517,9 @@ class DownloadQueue {
       );
       // 生成 Emby 的 .nfo / 本集缩略图 / 剧集封面（失败不影响下载结果）
       await finalizeMedia(targetPath, row.emby_json);
+      // 最后通知 Emby 入库：放在元信息写完之后，Emby 扫到文件时海报简介已经就位。
+      // 攒 2.5 秒批量提交，连着下完几集也只会触发一次增量扫描。
+      if (!isArtTask && !isPhoto) queueEmbyUpdate(targetPath, "Created");
     } catch (err) {
       // 用户手动中断：不是失败，别计入重试次数，也不要触发自动重试
       if (err instanceof CancelError) {

@@ -20,6 +20,7 @@ import { downloadsRouter } from "./routes/downloads";
 import { messagesRouter } from "./routes/messages";
 import { metadataRouter } from "./routes/metadata";
 import { settingsRouter } from "./routes/settings";
+import { embyRouter } from "./routes/emby";
 import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
 import { hydrateFromFile } from "./lib/logstore";
@@ -73,6 +74,7 @@ app.use("/api/downloads", downloadsRouter);
 app.use("/api/messages", messagesRouter);
 app.use("/api/metadata", metadataRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/emby", embyRouter);
 app.use("/api/logs", logsRouter);
 app.use("/api", systemRouter);
 

@@ -143,6 +143,19 @@
 - 缩放依赖可选的 `sharp`，装不上时退化为原图复制，不影响下载。
 - 监控历史里的悬停预览（`data/covers/`）只服务于界面回看，取自消息缩略图，与 Emby 封面无关。
 
+### Emby 入库通知
+
+下载完成的最后一件事是通知 Emby：把文件路径 POST 给 `/Library/Media/Updated`，Emby 只对这条路径做增量扫描，
+新集几十秒内出现在媒体库里 —— 不必等它的定时任务，也不用去后台手点「扫描媒体库」。
+
+- **独立配置**：地址 / API Key / 路径映射都在「Emby 入库」页，不复用 Emby 自身的看板配置，关掉开关即完全停止。
+- **路径映射必须有**：容器里是 `/downloads`，Emby 看到的是宿主目录（群晖 `/volume1/...`）。
+  不映射时 Emby 照样返回 204，只是静默忽略 —— 媒体库里始终不出新集，这是最容易误判成「通知没生效」的情况。
+- **合批**：相邻几集通常连着下完，攒 2.5 秒合并成一次请求（单次最多 50 条路径），只触发一次增量扫描。
+- **失败不牵连下载**：网络抖动或 Emby 正在重启时重试一次并记 warn 日志，下载任务本身仍然标记成功。
+- **兜底与补推**：页面上的「让 Emby 全库扫描」用于补历史文件；「补推路径」可对单个老剧集目录补一次通知。
+- **密钥安全**：API Key 与 session / bot token 一样用 `SESSION_SECRET` 加密落盘，`/api/settings` 只回掩码与是否已配置。
+
 ### 元数据编辑
 
 - **按文件夹聚合的目录树**：一个文件夹 = 一条记录，首级显示剧集信息（`tvshow.nfo` + 剧集封面），
@@ -366,12 +379,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
 | `main` | 与 `latest` 同步 |
-| `v1.0.3` / `1.0.3` | 打 `v1.0.3` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.4` / `1.0.4` | 打 `v1.0.4` 标签时产生的固定版本（建议生产环境锁定） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.3
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.4
 docker compose up -d
 ```
 
@@ -525,9 +538,12 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 自动扫描 | 开 | 关闭后只能手动扫描 |
 | 存储路径模板 | `{date}/{channel}/{name}` | 见下 |
 | 生成 Emby 元信息 | 开 | 写出 nfo 与三张封面 |
-| 封面图片数量 | 3 | 每条消息挑几张图做封面 |
 | 认不出标题一链接一文件夹 | 开 | 没有《剧名》的视频按正文首行建文件夹 |
-| 没图时截帧当封面 | 开 | 消息里没图时用 ffmpeg 随机截帧生成横/竖版封面 |
+| 视频截帧生成封面 | 开 | 每集随机截帧生成缩略图，剧集封面取自第一集 |
+| Emby 入库通知 | 关 | 下载完成后提交 `/Library/Media/Updated`，Emby 立刻增量扫描 |
+| Emby 地址 | 空 | 例如 `http://192.168.1.10:8096`，不写协议按 http，末尾 `/web` 自动去掉 |
+| Emby API Key | 空 | 管理员密钥，AES 加密落盘，接口只回末四位掩码 |
+| Emby 路径映射 | 空 | 每行「本机路径=Emby 路径」，如 `/downloads=/volume1/media/tgsub` |
 | ffmpeg 路径 | 空 | 「元数据」页截帧用；留空自动查找内置二进制或系统 PATH |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
 
@@ -610,6 +626,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | GET | `/api/metadata/extras?key=&file=` | 目录里的其它图片（只读，带后缀白名单） |
 | GET | `/api/metadata/tools/status` | ffmpeg / sharp 可用性（`refresh=1` 强制重新探测） |
 | GET / PUT | `/api/settings` | 读取 / 保存界面设置 |
+| GET | `/api/emby/status` | Emby 入库状态：是否启用、配置是否完整、最近通知记录 |
+| POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
+| POST | `/api/emby/refresh` | 让 Emby 立刻全库扫描（兜底用） |
+| POST | `/api/emby/notify` | 手动补推一个路径（相对路径按下载目录解析） |
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
 | GET | `/api/scan/state`、POST `/api/scan` | 扫描状态 / 触发扫描 |
 | GET | `/api/bot`、POST `/api/bot/start`、`stop`、`restart` | 机器人状态与开关 |
@@ -677,7 +697,7 @@ tgsub/
 │   │   │   ├── ffmpeg.ts       # ffmpeg 定位、媒体探测（ffmpeg -i 解析）、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
-│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / logs / settings / system
+│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / emby / logs / settings / system
 │   └── dist/                   # 构建产物（不提交）
 ├── web/
 │   └── src/
@@ -754,14 +774,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.3
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.4
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.3 && git push origin v1.0.3    # 发布 v1.0.3 / 1.0 / latest
+git tag v1.0.4 && git push origin v1.0.4    # 发布 v1.0.4 / 1.0 / latest
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

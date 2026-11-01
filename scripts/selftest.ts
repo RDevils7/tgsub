@@ -25,6 +25,7 @@ import {
   repairNfoText,
 } from "../server/src/tg/entity";
 import { Subscription } from "../server/src/types";
+import { mapEmbyPath, normalizeEmbyUrl, parsePathMap } from "../server/src/tg/embypath";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -676,6 +677,73 @@ async function ffmpegProbeChecks(): Promise<void> {
   });
 }
 
+console.log("\nEmby 入库：地址与路径映射");
+
+function embyNotifyChecks(): void {
+  // 地址规整：用户常见填法都要能落到同一个根地址
+  check("地址补协议并去掉末尾斜杠", () => {
+    assert.equal(normalizeEmbyUrl("192.168.1.10:8096"), "http://192.168.1.10:8096");
+    assert.equal(normalizeEmbyUrl("  http://192.168.1.10:8096/  "), "http://192.168.1.10:8096");
+    assert.equal(normalizeEmbyUrl("https://emby.example.com/"), "https://emby.example.com");
+  });
+  check("地址去掉管理页后缀 /web", () => {
+    assert.equal(normalizeEmbyUrl("http://192.168.1.10:8096/web/index.html"), "http://192.168.1.10:8096");
+    assert.equal(normalizeEmbyUrl("http://192.168.1.10:8096/web"), "http://192.168.1.10:8096");
+    // /webhooks 不是管理页，别误伤
+    assert.equal(normalizeEmbyUrl("http://h:8096/webhooks"), "http://h:8096/webhooks");
+  });
+  check("空地址返回空串", () => {
+    assert.equal(normalizeEmbyUrl("   "), "");
+  });
+
+  // 映射规则解析：空格、箭头、中文冒号都要认
+  check("解析路径映射的多种写法", () => {
+    const rules = parsePathMap("/downloads=/volume1/media/tgsub\n/tmp -> /mnt/tmp\n/data：/mnt/data\n# 注释\n无用行");
+    assert.equal(rules.length, 3);
+    assert.deepEqual(
+      rules.map((r) => r.from).sort(),
+      ["/data", "/downloads", "/tmp"],
+    );
+    assert.equal(parsePathMap("").length, 0);
+  });
+  check("长前缀优先匹配", () => {
+    const rules = parsePathMap("/media=/mnt/a\n/media/tgsub=/mnt/b");
+    assert.equal(rules[0].from, "/media/tgsub");
+  });
+
+  // 路径映射本体
+  check("映射到 Emby 视角的路径", () => {
+    const rules = parsePathMap("/downloads=/volume1/media/tgsub");
+    assert.equal(
+      mapEmbyPath("/downloads/美人局/美人局S01E04.mp4", rules),
+      "/volume1/media/tgsub/美人局/美人局S01E04.mp4",
+    );
+  });
+  check("目录本身也能映射", () => {
+    const rules = parsePathMap("/downloads=/volume1/media/tgsub");
+    assert.equal(mapEmbyPath("/downloads", rules), "/volume1/media/tgsub");
+    assert.equal(mapEmbyPath("/downloads/", rules), "/volume1/media/tgsub");
+  });
+  check("前缀相近的目录不被误判", () => {
+    const rules = parsePathMap("/downloads=/mnt/a");
+    // /downloads-old 不是 /downloads 的子目录
+    assert.equal(mapEmbyPath("/downloads-old/x.mp4", rules), "/downloads-old/x.mp4");
+  });
+  check("没配映射时原样提交", () => {
+    assert.equal(mapEmbyPath("/downloads/a/b.mp4", []), "/downloads/a/b.mp4");
+  });
+  check("Windows 盘符映射用反斜杠", () => {
+    const rules = parsePathMap("D:\\media=D:\\Emby\\media");
+    assert.equal(mapEmbyPath("D:\\media\\剧\\01.mp4", rules), "D:\\Emby\\media\\剧\\01.mp4");
+  });
+  check("密钥掩码不会被当成真密钥", () => {
+    // 前端把 •••••••• 回传时，服务端应视为「保持不变」
+    const isMask = (v: string) => /^•+$/.test(v);
+    assert.equal(isMask("••••••••"), true);
+    assert.equal(isMask("a1b2c3d4"), false);
+  });
+}
+
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
@@ -829,6 +897,12 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
     await embyChecks();
+  } catch (err) {
+    console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
+  try {
+    embyNotifyChecks();
   } catch (err) {
     console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
     process.exitCode = 1;

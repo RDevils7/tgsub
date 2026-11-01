@@ -339,3 +339,29 @@ export const IconLogs = (p: Props) => (
     <path d="M6.8 13h6M6.8 16.5h4" />
   </Svg>
 );
+
+/** Emby 入库页：显示器 + 播放三角 */
+export const IconTv = (p: Props) => (
+  <Svg {...p}>
+    <rect x="2.8" y="4.6" width="18.4" height="12.4" rx="2.4" />
+    <path d="M8.6 20.4h6.8" />
+    <path d="M12 17v3.4" />
+    <path d="m10.6 8.6 4.2 2.6-4.2 2.6z" />
+  </Svg>
+);
+
+export const IconEye = (p: Props) => (
+  <Svg {...p}>
+    <path d="M2.4 12S5.9 5.8 12 5.8 21.6 12 21.6 12 18.1 18.2 12 18.2 2.4 12 2.4 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+
+export const IconEyeOff = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4.2 4.4 19.8 19.6" />
+    <path d="M9.3 6.3A9.6 9.6 0 0 1 12 5.8c6.1 0 9.6 6.2 9.6 6.2a17 17 0 0 1-2.6 3.4" />
+    <path d="M6.4 7.3A17 17 0 0 0 2.4 12S5.9 18.2 12 18.2a9.4 9.4 0 0 0 3.5-.7" />
+    <path d="M10 10a2.8 2.8 0 0 0 3.9 3.9" />
+  </Svg>
+);

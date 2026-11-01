@@ -8,6 +8,9 @@ import type {
   DownloadItem,
   MessagePreview,
   MessageLog,
+  EmbyNotifyRecord,
+  EmbyProbeResult,
+  EmbyStatus,
   MetadataDetail,
   MetadataFolderItem,
   MetadataSource,
@@ -142,10 +145,25 @@ export const api = {
     request<{ ok: boolean; count: number; scope: string }>(`/messages?scope=${scope}`, { method: "DELETE" }),
 
   settings: () => request<SettingsResponse>("/settings"),
-  saveSettings: (patch: Partial<AppSettings> & { bot_token?: string }) =>
-    request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState }>("/settings", {
+  saveSettings: (patch: Partial<AppSettings> & { bot_token?: string; emby_api_key?: string }) =>
+    request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState; emby?: { apiKeySet: boolean; apiKeyHint: string | null } }>("/settings", {
       method: "PUT",
       body: JSON.stringify(patch),
+    }),
+
+  /* ------------------------------ Emby 入库 ------------------------------ */
+  embyStatus: () => request<EmbyStatus>("/emby/status"),
+  /** 测试连接：可带界面上尚未保存的地址与密钥 */
+  embyTest: (input: { url?: string; apiKey?: string } = {}) =>
+    request<EmbyProbeResult>("/emby/test", { method: "POST", body: JSON.stringify(input) }),
+  /** 让 Emby 立刻全库扫描 */
+  embyRefresh: () =>
+    request<{ ok: boolean; status: number | null; error: string | null }>("/emby/refresh", { method: "POST" }),
+  /** 手动补推路径（相对路径按下载目录解析） */
+  embyNotify: (path: string) =>
+    request<{ ok: boolean; record: EmbyNotifyRecord }>("/emby/notify", {
+      method: "POST",
+      body: JSON.stringify({ path }),
     }),
 
   botState: () => request<{ bot: BotState }>("/bot"),

@@ -431,3 +431,32 @@ export function setBotToken(token: string): void {
   // 换了 bot 归属 DC 可能不同，清掉旧的直连缓存，重新登录时自动探测
   setSetting("bot_dc", "");
 }
+
+/* ------------------------------------------------------------------ */
+/* Emby API Key：与 session / bot token 一样加密落盘                    */
+/* 它是 Emby 的管理员级凭据（能读能改媒体库），不该明文躺在库里，        */
+/* 也不该随 /api/settings 原样回给前端                                   */
+/* ------------------------------------------------------------------ */
+
+export function getEmbyApiKey(): string {
+  const raw = getSetting("emby_api_key");
+  if (!raw) return "";
+  try {
+    return decryptSecret(raw);
+  } catch {
+    logger.warn("无法解密 Emby API Key，可能 SESSION_SECRET 已变更");
+    return "";
+  }
+}
+
+export function setEmbyApiKey(apiKey: string): void {
+  const value = apiKey.trim();
+  setSetting("emby_api_key", value ? encryptSecret(value) : "");
+}
+
+/** 只给界面看的提示：有没有配置、末四位是什么 */
+export function getEmbyKeyHint(): { set: boolean; hint: string | null } {
+  const key = getEmbyApiKey();
+  if (!key) return { set: false, hint: null };
+  return { set: true, hint: key.length <= 6 ? "••••" : `••••${key.slice(-4)}` };
+}

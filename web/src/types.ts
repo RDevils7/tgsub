@@ -224,6 +224,12 @@ export interface AppSettings {
   fallback_folder: boolean;
   /** 下载完成后从视频随机截帧，生成每集缩略图与剧集目录封面 */
   auto_cover_frames: boolean;
+  /** 下载完成后通知 Emby 入库（POST /Library/Media/Updated） */
+  emby_notify: boolean;
+  /** Emby 服务地址，例如 http://192.168.1.10:8096 */
+  emby_url: string;
+  /** 路径映射，每行「本机路径=Emby 路径」 */
+  emby_path_map: string;
   /** Telegram 机器人开关与白名单（token 单独管理，不在这里返回） */
   bot_enabled: boolean;
   bot_allow_users: string;
@@ -258,6 +264,45 @@ export interface SettingsResponse {
   /** 后端版本号（与镜像标签、/api/health 一致） */
   version?: string;
   bot?: BotState;
+  /** Emby API Key 只回掩码 */
+  emby?: { apiKeySet: boolean; apiKeyHint: string | null };
+}
+
+/* ------------------------------ Emby 入库 ------------------------------ */
+
+/** 一条入库通知记录（服务端内存里保留最近 30 条） */
+export interface EmbyNotifyRecord {
+  at: number;
+  /** 映射后提交给 Emby 的路径 */
+  paths: string[];
+  ok: boolean;
+  status: number | null;
+  error: string | null;
+  /** true = 下载完成自动触发，false = 手动补推 / 重新生成元数据 */
+  auto: boolean;
+}
+
+export interface EmbyStatus {
+  enabled: boolean;
+  configured: boolean;
+  url: string;
+  pathMap: string[];
+  apiKeySet: boolean;
+  apiKeyHint: string | null;
+  downloadDir: string;
+  lastNotifiedAt: number | null;
+  /** 还在攒批、尚未提交的路径数 */
+  pending: number;
+  history: EmbyNotifyRecord[];
+}
+
+export interface EmbyProbeResult {
+  ok: boolean;
+  serverName: string | null;
+  version: string | null;
+  error: string | null;
+  /** 实际探测用的地址（已补全协议、去掉 /web） */
+  url?: string;
 }
 
 export type QrStatus = "idle" | "waiting" | "scanned" | "password" | "success" | "error";
