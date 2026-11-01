@@ -2,7 +2,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { createPortal } from "react-dom";
 import { api } from "../api";
 import type { Channel, MessageLog, MessagePreview } from "../types";
-import { Badge, Button, EmptyState, Spinner, StatusDot, useToast } from "../components/ui";
+import { Badge, Button, EmptyState, Modal, Spinner, StatusDot, useToast } from "../components/ui";
+import { PageSizeControl, usePageSize } from "../components/PageSize";
 import {
   IconClock,
   IconDownload,
@@ -25,7 +26,7 @@ const TABS: Array<{ key: string; label: string }> = [
   { key: "empty", label: "空消息" },
 ];
 
-const PAGE_SIZE = 50;
+const DEFAULT_PAGE_SIZE = 50;
 
 const KIND_LABEL: Record<string, string> = {
   photo: "图片",
@@ -94,6 +95,11 @@ export default function Monitor() {
   const [hover, setHover] = useState<{ item: MessageLog; rect: DOMRect } | null>(null);
   const [preview, setPreview] = useState<MessagePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [pageSize, setPageSize] = usePageSize("monitor", DEFAULT_PAGE_SIZE);
+  /** 清空弹窗：可只清未命中的记录 */
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearScope, setClearScope] = useState<"all" | "miss">("miss");
+  const [clearing, setClearing] = useState(false);
   const previewCache = useRef(new Map<number, MessagePreview>());
   const showTimer = useRef<number | null>(null);
   const hideTimer = useRef<number | null>(null);
@@ -180,7 +186,7 @@ export default function Monitor() {
         status: st,
         channelId: cid,
         q: q.trim(),
-        limit: PAGE_SIZE,
+        limit: pageSize,
         offset,
       });
       setTotal(res.total);
@@ -191,7 +197,7 @@ export default function Monitor() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [toast, pageSize]);
 
   useEffect(() => {
     void api
@@ -208,11 +214,11 @@ export default function Monitor() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      if (items.length > PAGE_SIZE) return;
+      if (items.length > pageSize) return;
       void fetchPage(0, false, true);
     }, 10_000);
     return () => window.clearInterval(timer);
-  }, [fetchPage, items.length]);
+  }, [fetchPage, items.length, pageSize]);
 
   const loadMore = async () => {
     setLoadingMore(true);
@@ -224,13 +230,21 @@ export default function Monitor() {
   };
 
   const clearAll = async () => {
-    if (!window.confirm("确定清空全部监控记录？此操作不影响已下载的文件。")) return;
+    setClearing(true);
     try {
-      const res = await api.clearMessages();
-      toast.push(`已清空 ${res.count} 条监控记录`, "success");
+      const res = await api.clearMessages(clearScope);
+      toast.push(
+        res.count > 0
+          ? `已清空 ${res.count} 条${clearScope === "miss" ? "未命中" : ""}记录`
+          : "没有可清空的记录",
+        res.count > 0 ? "success" : "info",
+      );
+      setClearOpen(false);
       await fetchPage(0, false);
     } catch (err) {
       toast.push((err as Error).message, "error");
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -329,11 +343,13 @@ export default function Monitor() {
                 }}
               />
             </div>
+            <PageSizeControl value={pageSize} onChange={setPageSize} />
             <Button size="sm" onClick={() => void fetchPage(0, false)} title="刷新">
               <IconRefresh className="h-3.5 w-3.5" />
             </Button>
-            <Button size="sm" variant="danger" onClick={() => void clearAll()} title="清空监控记录">
+            <Button size="sm" variant="danger" onClick={() => setClearOpen(true)} title="清空监控记录">
               <IconTrash className="h-3.5 w-3.5" />
+              清空
             </Button>
           </div>
         </div>
@@ -347,7 +363,7 @@ export default function Monitor() {
           {activeChannel && <span className="text-slate-600">· {activeChannel.title}</span>}
         </span>
         <span>
-          当前显示 {items.length} 条（每页 {PAGE_SIZE} 条）· 一条消息内的多个文件只算一条
+          当前显示 {items.length} 条（每页 {pageSize} 条）· 一条消息内的多个文件只算一条
         </span>
       </div>
 
@@ -578,6 +594,54 @@ export default function Monitor() {
           </div>
         )}
       </div>
+
+      <Modal
+        open={clearOpen}
+        onClose={() => setClearOpen(false)}
+        title="清空监控记录"
+        description="记录只用于回看扫描结果，清空不会影响已下载的文件或 Emby 媒体库。"
+        width="max-w-md"
+        footer={
+          <>
+            <Button size="sm" onClick={() => setClearOpen(false)}>
+              取消
+            </Button>
+            <Button size="sm" variant="danger" loading={clearing} onClick={() => void clearAll()}>
+              确定清空
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          {[
+            { key: "miss" as const, label: "只清未命中的记录", hint: "保留已命中、已过滤的记录，推荐" },
+            { key: "all" as const, label: "清空全部记录", hint: "包含已命中记录，无法恢复" },
+          ].map((opt) => (
+            <button
+              key={opt.key}
+              onClick={() => setClearScope(opt.key)}
+              className={`flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition ${
+                clearScope === opt.key
+                  ? "border-brand-500/40 bg-brand-500/10"
+                  : "border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]"
+              }`}
+            >
+              <span
+                className={`mt-1 h-3 w-3 shrink-0 rounded-full border ${
+                  clearScope === opt.key ? "border-brand-400 bg-brand-400" : "border-slate-600"
+                }`}
+              />
+              <span>
+                <span className="block text-[13px] text-slate-100">{opt.label}</span>
+                <span className="mt-0.5 block text-[11.5px] text-slate-500">{opt.hint}</span>
+              </span>
+            </button>
+          ))}
+          <p className="pt-1 text-[11.5px] text-slate-500">
+            当前筛选下共 {total} 条记录，清空后会重新加载列表。
+          </p>
+        </div>
+      </Modal>
 
       {hover &&
         createPortal(

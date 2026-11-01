@@ -101,6 +101,12 @@ export const api = {
   jumpDownload: (id: number) => request<{ ok: boolean }>(`/downloads/${id}/jump`, { method: "POST" }),
   deleteDownload: (id: number, purge = false) =>
     request<{ ok: boolean }>(`/downloads/${id}${purge ? "?purge=1" : ""}`, { method: "DELETE" }),
+  /** 批量清空：finished 只清已结束的，all 清掉除下载中以外的全部 */
+  clearDownloads: (scope: "finished" | "all" = "finished", purge = false) =>
+    request<{ ok: boolean; count: number; purged: number; queue: { active: number; waiting: number } }>(
+      `/downloads?scope=${scope}${purge ? "&purge=1" : ""}`,
+      { method: "DELETE" },
+    ),
 
   messages: (params: Record<string, string | number> = {}) => {
     const qs = new URLSearchParams(
@@ -119,7 +125,9 @@ export const api = {
   },
   /** 监控历史悬停预览：完整介绍 + 封面图 */
   messagePreview: (id: number) => request<MessagePreview>(`/messages/${id}/preview`),
-  clearMessages: () => request<{ ok: boolean; count: number }>("/messages", { method: "DELETE" }),
+  /** scope=miss 只清未命中的记录 */
+  clearMessages: (scope: "all" | "miss" = "all") =>
+    request<{ ok: boolean; count: number; scope: string }>(`/messages?scope=${scope}`, { method: "DELETE" }),
 
   settings: () => request<SettingsResponse>("/settings"),
   saveSettings: (patch: Partial<AppSettings> & { bot_token?: string }) =>

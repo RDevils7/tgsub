@@ -20,7 +20,7 @@ messagesRouter.get("/", asyncHandler(async (req, res) => {
   const status = String(req.query.status ?? "all");
   const channelId = Number(req.query.channelId ?? 0);
   const q = String(req.query.q ?? "").trim();
-  const limit = clampInt(req.query.limit, 1, 200, 50);
+  const limit = clampInt(req.query.limit, 1, 1000, 50);
   const offset = clampInt(req.query.offset, 0, 1_000_000, 0);
 
   // 基础筛选（不含状态）：频道 + 关键字，用于状态标签上的计数
@@ -149,8 +149,13 @@ messagesRouter.get(
 
 messagesRouter.delete(
   "/",
-  asyncHandler(async (_req, res) => {
-    const result = db.prepare("DELETE FROM message_logs").run();
-    res.json({ ok: true, count: result.changes });
+  asyncHandler(async (req, res) => {
+    // scope=miss 只清未命中（含无文本无媒体）的记录，保留命中过的，方便回查
+    const scope = String(req.query.scope ?? "all") === "miss" ? "miss" : "all";
+    const result =
+      scope === "miss"
+        ? db.prepare("DELETE FROM message_logs WHERE kind IN ('miss','empty')").run()
+        : db.prepare("DELETE FROM message_logs").run();
+    res.json({ ok: true, count: result.changes, scope });
   }),
 );

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { DownloadItem } from "../types";
-import { Badge, Button, EmptyState, ProgressBar, Spinner, StatusDot, useToast } from "../components/ui";
+import { Badge, Button, EmptyState, Modal, ProgressBar, Spinner, StatusDot, useToast } from "../components/ui";
+import { PageSizeControl, usePageSize } from "../components/PageSize";
 import {
   IconDownload,
   IconFile,
@@ -29,7 +30,7 @@ const TABS: Array<{ key: string; label: string }> = [
   { key: "skipped", label: "已跳过" },
 ];
 
-const PAGE_SIZE = 30;
+const DEFAULT_PAGE_SIZE = 30;
 
 function KindIcon({ kind }: { kind: string | null }) {
   const cls = "h-3.5 w-3.5";
@@ -175,6 +176,12 @@ export default function Downloads() {
   const [loadingMore, setLoadingMore] = useState(false);
   /** 正在执行的动作，形如 "12:pause"，避免同一行多个按钮同时转圈 */
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [pageSize, setPageSize] = usePageSize("downloads", DEFAULT_PAGE_SIZE);
+  /** 清空弹窗 */
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearScope, setClearScope] = useState<"finished" | "all">("finished");
+  const [clearPurge, setClearPurge] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [liveSpeed, setLiveSpeed] = useState(0);
   const toast = useToast();
   const queryRef = useRef(query);
@@ -185,14 +192,14 @@ export default function Downloads() {
       const res = await api.downloads({
         status,
         q: queryRef.current.trim(),
-        limit: PAGE_SIZE,
+        limit: pageSize,
         offset,
       });
       setTotal(res.total);
       setLiveSpeed(res.queue?.speed ?? 0);
       setItems((prev) => (append ? [...prev, ...res.items] : res.items));
     },
-    [status],
+    [status, pageSize],
   );
 
   const reload = useCallback(async () => {
@@ -307,6 +314,23 @@ export default function Downloads() {
     }
   };
 
+  const clearAll = async () => {
+    setClearing(true);
+    try {
+      const res = await api.clearDownloads(clearScope, clearPurge);
+      const parts = [`已清空 ${res.count} 条记录`];
+      if (res.purged > 0) parts.push(`删除 ${res.purged} 个文件`);
+      if (clearScope === "all" && res.queue.active > 0) parts.push(`${res.queue.active} 个下载中的任务已保留`);
+      toast.push(parts.join(" · "), res.count > 0 ? "success" : "info");
+      setClearOpen(false);
+      await reload();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -339,11 +363,16 @@ export default function Downloads() {
               }}
             />
           </div>
+          <PageSizeControl value={pageSize} onChange={setPageSize} />
           <Button size="sm" onClick={search} title="刷新">
             <IconRefresh className="h-3.5 w-3.5" />
           </Button>
           <Button size="sm" onClick={retryAll} title="重试所有失败任务">
             重试失败
+          </Button>
+          <Button size="sm" variant="danger" onClick={() => setClearOpen(true)} title="清空下载记录">
+            <IconTrash className="h-3.5 w-3.5" />
+            清空
           </Button>
         </div>
       </div>
@@ -532,6 +561,72 @@ export default function Downloads() {
           </div>
         )}
       </div>
+
+      <Modal
+        open={clearOpen}
+        onClose={() => setClearOpen(false)}
+        title="清空下载记录"
+        description="只删除记录，不会停掉正在进行的下载。选择「全部」时，正在下载的任务会自动保留。"
+        width="max-w-md"
+        footer={
+          <>
+            <Button size="sm" onClick={() => setClearOpen(false)}>
+              取消
+            </Button>
+            <Button size="sm" variant="danger" loading={clearing} onClick={() => void clearAll()}>
+              确定清空
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          {[
+            {
+              key: "finished" as const,
+              label: "只清已结束的记录",
+              hint: "完成 / 失败 / 跳过 / 已停止；排队中、暂停中、下载中的都保留",
+            },
+            { key: "all" as const, label: "清空全部记录", hint: "仅保留「下载中」的任务，其余全部删除" },
+          ].map((opt) => (
+            <button
+              key={opt.key}
+              onClick={() => setClearScope(opt.key)}
+              className={`flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition ${
+                clearScope === opt.key
+                  ? "border-brand-500/40 bg-brand-500/10"
+                  : "border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]"
+              }`}
+            >
+              <span
+                className={`mt-1 h-3 w-3 shrink-0 rounded-full border ${
+                  clearScope === opt.key ? "border-brand-400 bg-brand-400" : "border-slate-600"
+                }`}
+              />
+              <span>
+                <span className="block text-[13px] text-slate-100">{opt.label}</span>
+                <span className="mt-0.5 block text-[11.5px] text-slate-500">{opt.hint}</span>
+              </span>
+            </button>
+          ))}
+
+          <label className="mt-1 flex cursor-pointer items-start gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2.5">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-rose-500"
+              checked={clearPurge}
+              onChange={(e) => setClearPurge(e.target.checked)}
+            />
+            <span>
+              <span className="block text-[13px] text-slate-100">同时删除磁盘上的文件</span>
+              <span className="mt-0.5 block text-[11.5px] text-slate-500">
+                只删下载目录内的原文件，Emby 已生成的海报与 nfo 不受影响；无法恢复，请谨慎勾选
+              </span>
+            </span>
+          </label>
+
+          <p className="pt-1 text-[11.5px] text-slate-500">当前筛选下共 {total} 条记录。</p>
+        </div>
+      </Modal>
     </div>
   );
 }

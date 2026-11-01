@@ -18,7 +18,7 @@ downloadsRouter.get(
     const status = String(req.query.status ?? "all");
     const channelId = Number(req.query.channelId ?? 0);
     const q = String(req.query.q ?? "").trim();
-    const limit = clampInt(req.query.limit, 1, 200, 50);
+    const limit = clampInt(req.query.limit, 1, 1000, 50);
     const offset = clampInt(req.query.offset, 0, 1_000_000, 0);
 
     const where: string[] = [];
@@ -104,6 +104,54 @@ for (const [action, run] of Object.entries(QUEUE_ACTIONS)) {
     }),
   );
 }
+
+/**
+ * 批量清空。
+ * - `scope=finished`（默认）：只清已结束的记录（完成/失败/跳过/已停止），排队与下载中的保留
+ * - `scope=all`：除「正在下载」外全部清掉（下载中的任务删掉会留下无主文件，直接跳过）
+ * - `purge=1`：同时删除磁盘文件（只删 downloadDir 内的，防止误删）
+ */
+downloadsRouter.delete(
+  "/",
+  asyncHandler(async (req, res) => {
+    const scope = String(req.query.scope ?? "finished") === "all" ? "all" : "finished";
+    const purge = req.query.purge === "1";
+
+    const rows = (
+      scope === "all"
+        ? db.prepare("SELECT id, file_path FROM downloads WHERE status <> 'downloading'").all()
+        : db
+            .prepare(
+              "SELECT id, file_path FROM downloads WHERE status IN ('done','failed','skipped','stopped')",
+            )
+            .all()
+    ) as Array<{ id: number; file_path: string | null }>;
+
+    const root = path.resolve(env.downloadDir) + path.sep;
+    let purged = 0;
+    if (purge) {
+      for (const row of rows) {
+        if (!row.file_path) continue;
+        const abs = path.resolve(row.file_path);
+        if (!abs.startsWith(root)) continue;
+        try {
+          await fs.promises.unlink(abs);
+          purged += 1;
+        } catch {
+          /* 文件早已被移走或删掉，不算失败 */
+        }
+      }
+    }
+
+    const del = db.prepare("DELETE FROM downloads WHERE id = ?");
+    db.transaction((ids: number[]) => {
+      for (const id of ids) del.run(id);
+    })(rows.map((row) => row.id));
+
+    // stats() 内部会 prune，把队列里已经不存在的任务清掉
+    res.json({ ok: true, count: rows.length, purged, queue: downloader.stats() });
+  }),
+);
 
 downloadsRouter.delete(
   "/:id",

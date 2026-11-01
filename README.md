@@ -52,6 +52,7 @@
   - 同一条消息重复扫到只累加「扫描次数」并刷新「最近扫描时间」，不堆重复行。
   - 增量不足时会回看频道最近 20 条（留痕不重复入队），频道安静时页面也不会空着。
 - **按链接直接下载**：`手动下载`页粘贴 `t.me` 链接即可抓取（公开/私有频道、相册整组均可），监控历史每条记录也有「下载」按钮，机器人收到链接同样立即开始。
+- **分页与清空**：监控历史、下载记录都可切换每页条数（20 / 50 / 100 / 200，或手动输入 5–500，按页面记住上次选择）；「清空」按钮带范围选择——监控历史可只清未命中、下载记录可只清已结束，还能顺带删除磁盘上的原文件。
 
 ### 下载与队列
 
@@ -378,11 +379,12 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | POST | `/api/downloads/:id/pause`、`stop`、`resume`、`jump` | 队列管控：暂停 / 停止 / 继续 / 插队 |
 | GET | `/api/downloads/:id/meta` | 单条任务的实时进度（含速度、剩余时间） |
 | GET | `/api/downloads/:id/file` | 下载文件（仅已完成任务） |
-| DELETE | `/api/downloads/:id?purge=1` | 删除记录，`purge=1` 同时删除文件 |
-| GET | `/api/messages` | 监控历史（`kind`、`channelId`、`q`、分页） |
+| DELETE | `/api/downloads/:id?purge=1` | 删除单条记录，`purge=1` 同时删除文件 |
+| DELETE | `/api/downloads?scope=finished\|all&purge=1` | 批量清空：`finished` 只清已结束的，`all` 保留正在下载的任务 |
+| GET | `/api/messages` | 监控历史（`kind`、`channelId`、`q`、`limit`/`offset`，`limit` 上限 1000） |
 | GET | `/api/messages/:id/preview` | 悬停预览：完整正文 + 3 张封面 |
 | GET | `/api/messages/cover/:file` | 封面图（带文件名白名单校验，防目录穿越） |
-| DELETE | `/api/messages` | 清空监控历史 |
+| DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
 | GET / PUT | `/api/settings` | 读取 / 保存界面设置 |
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
 | GET | `/api/scan/state`、POST `/api/scan` | 扫描状态 / 触发扫描 |
