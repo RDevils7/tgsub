@@ -1044,8 +1044,8 @@ export interface ResolvedChannel {
  * 数字输入的频道解析。
  *
  * 用户直接填频道 ID 时，裸号会被 gramjs 当成用户 ID 去查 users.getUsers，
- * 私有频道必然失败。所以先按标记形式（-100<id>）试一次，
- * 确实不是频道（比如本来就是用户 ID）再退回原始数字。
+ * 私有频道必然失败。所以按标记形式依次试：频道 -100<id>、普通群 -<id>，
+ * 确实都不是（比如本来就是用户 ID）再退回原始数字。
  */
 async function resolveEntityInput(
   client: TelegramClient,
@@ -1053,7 +1053,10 @@ async function resolveEntityInput(
   numeric: string | null,
 ): Promise<unknown> {
   if (!numeric) return client.getEntity(target);
-  const candidates = numeric.startsWith("-") ? [numeric] : [`-100${numeric}`, numeric];
+  const digits = numeric.replace(/^-/, "");
+  const candidates = numeric.startsWith("-")
+    ? [numeric]
+    : [`-100${digits}`, `-${digits}`, numeric];
   let lastError: unknown = null;
   for (const candidate of candidates) {
     try {
