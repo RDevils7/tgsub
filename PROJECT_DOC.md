@@ -3,7 +3,7 @@
 > 这是 tgsub 的**完整技术文档**，涵盖功能细节、工作原理、全部配置项、HTTP 接口、开发自检与常见问题。
 >
 > 只想要「怎么部署起来用」→ 看 [README.md](README.md)，里面有精简版说明与开箱即用的
-> Docker Compose 部署步骤（直接从 GHCR 拉镜像，无需 clone 仓库）。
+> Docker Compose 部署步骤（直接从 Docker Hub 拉镜像，无需 clone 仓库）。
 >
 > 本文档内容以 [README.md](README.md) 指向为准，两处若有出入，以 README 的部署章节为最新。
 
@@ -30,7 +30,7 @@
 - [工作原理](#工作原理)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
-  - [方式一：Docker Compose 拉取 GHCR 镜像（推荐，免编译）](#方式一docker-compose-拉取-ghcr-镜像推荐免编译)
+  - [方式一：Docker Compose 拉取 Docker Hub 镜像（推荐，免编译）](#方式一docker-compose-拉取-docker-hub-镜像推荐免编译)
   - [方式二：Docker Compose 本地构建](#方式二docker-compose-本地构建)
   - [方式三：本地运行](#方式三本地运行)
   - [首次配置](#首次配置)
@@ -248,7 +248,7 @@ flowchart TB
 | Telegram | [gramjs](https://github.com/gram-js/gramjs)（MTProto，支持 SOCKS5 代理、扫码登录、bot 双模式） |
 | 存储 | SQLite（better-sqlite3，WAL 模式） |
 | 前端 | React 18 + Vite 6 + TailwindCSS 3（无 UI 框架） |
-| 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg + ffprobe 静态二进制（截帧与媒体探测） |
+| 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg 静态二进制（截帧；媒体探测用 `ffmpeg -i` 解析，不带 ffprobe） |
 | 日志 | pino（结构化 JSON） |
 | 部署 | Docker 多阶段构建 + docker compose（单容器，Express 同时托管前端） |
 
@@ -262,16 +262,19 @@ flowchart TB
 - Docker 部署：Docker 20.10+ 与 docker compose v2
 - 本地运行：Node.js ≥ 20（推荐 22）、Python 3 与 C++ 构建工具（`better-sqlite3` 原生模块）
 
-### 方式一：Docker Compose 拉取 GHCR 镜像（推荐，免编译）
+### 方式一：Docker Compose 拉取 Docker Hub 镜像（推荐，免编译）
 
 > **只想部署起来用？** [README.md](README.md) 的「快速部署」章节给了一份**开箱即用、不需要 clone 仓库**
 > 的精简流程：只要一个 `docker-compose.yml` 文件 + `docker compose up -d`，镜像直接从
-> `ghcr.io/rdevils7/tgsub:latest` 拉取。本节是同一套方案的完整版（含配置项对照、镜像标签、
+> `rdevils7/tgsub:latest` 拉取。本节是同一套方案的完整版（含配置项对照、镜像标签、
 > 迁移步骤与 docker run 备选）。
 
 项目每次推送到 `main` 或打 `v*` 标签，GitHub Actions 会自动构建 **amd64 + arm64** 双架构镜像并发布到
-GitHub Container Registry。服务器上不用装 Node、不用编译，也**不需要 clone 仓库**——
+**Docker Hub**（`rdevils7/tgsub`）与 GitHub Container Registry（`ghcr.io/rdevils7/tgsub`）。
+服务器上不用装 Node、不用编译，也**不需要 clone 仓库**——
 把仓库里的 `docker-compose.yml` 内容复制到服务器（或用 `curl` 从 raw.githubusercontent.com 下载同一份文件）即可。
+
+> 两个仓库内容完全一致，**国内优先用 Docker Hub**，拉不动再换 GHCR。
 
 > compose 文件里**全部使用真实值，不做 `${}` 变量插值**，也**不读取 `.env`**。
 > 要改镜像版本、端口、目录、认证，直接编辑 compose 里对应的那一行。
@@ -304,7 +307,7 @@ curl -fsSL -o docker-compose.yml \
   https://raw.githubusercontent.com/RDevils7/tgsub/main/docker-compose.yml
 # 网络受限的环境：直接照抄 README.md「快速部署」章节里的 yaml 内容新建文件
 
-docker compose up -d                # 默认就是拉 ghcr.io/rdevils7/tgsub:latest
+docker compose up -d                # 默认就是拉 rdevils7/tgsub:latest
 docker compose logs -f
 ```
 
@@ -344,12 +347,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 > 如果不用 compose，也可以直接 `docker run`：
 >
 > ```bash
-> docker pull ghcr.io/rdevils7/tgsub:latest
+> docker pull rdevils7/tgsub:latest
 > docker run -d --name tgsub -p 6789:6789 \
 >   -v "$(pwd)/data:/data" \
 >   -v "$(pwd)/downloads:/downloads" \
 >   -e DATA_DIR=/data -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
->   --restart unless-stopped ghcr.io/rdevils7/tgsub:latest
+>   --restart unless-stopped rdevils7/tgsub:latest
 > ```
 
 **可用标签**
@@ -363,7 +366,7 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 ghcr.io/rdevils7/tgsub:v1.0.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.0
 docker compose up -d
 ```
 
@@ -662,7 +665,7 @@ tgsub/
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
 │   │   │   ├── emby.ts         # nfo 生成、三张封面裁剪合成
 │   │   │   ├── nfo.ts          # NFO 解析与就地改写（只替换目标标签）
-│   │   │   ├── ffmpeg.ts       # ffmpeg/ffprobe 定位、媒体探测、截帧
+│   │   │   ├── ffmpeg.ts       # ffmpeg 定位、媒体探测（ffmpeg -i 解析）、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
 │   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / logs / settings / system
@@ -677,9 +680,9 @@ tgsub/
 ├── scripts/                    # 自检与诊断脚本（见下）
 ├── data/                       # 运行时数据（不提交）：数据库、session、封面缓存、日志
 ├── downloads/                  # 运行时下载目录（不提交）：视频 / 图片 / nfo / 封面
-├── .github/workflows/docker.yml # CI：构建镜像并发布到 GHCR
+├── .github/workflows/docker.yml # CI：构建镜像并发布到 GHCR + Docker Hub
 ├── Dockerfile                  # 四阶段构建
-├── docker-compose.yml          # 拉取 GHCR 镜像部署（默认，数据 / 下载目录分开挂载）
+├── docker-compose.yml          # 拉取 Docker Hub 镜像部署（默认，数据 / 下载目录分开挂载）
 ├── docker-compose.build.yml    # 本地构建镜像后部署
 ├── .env.example
 ├── README.md                   # 精简版说明与快速部署（面向使用者）
@@ -708,18 +711,30 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 | `node scripts/e2e-bot.mjs` | 机器人端到端 |
 | `node scripts/diag-session.js` | 解密本地 session，打印 DC / 地址 / authKey 指纹并试连（服务运行时会拒绝执行） |
 | `bash scripts/watch-ci.sh <run_id>` | 轮询 GitHub Actions run 直到结束，打印各 job 状态 |
+| `node scripts/check-workflow.cjs` | 校验 CI workflow 的 YAML 结构、表达式配对与关键字段 |
 
 ### 镜像发布（CI/CD）
 
 `.github/workflows/docker.yml` 在每次推送 `main`、打 `v*` 标签、提 PR 时自动运行：
 
 1. **test 任务**：在 `linux/amd64` 上构建镜像 → 启动容器 → 轮询 `/api/health` → 请求首页，
-   任一步失败就不发布（PR 只跑这一步）；
+   任一步失败就不发布（PR 只跑这一步）；同时验证 NAS 场景（root 属主挂载目录）与内置 ffmpeg 可用；
 2. **publish 任务**：test 通过后，用 buildx 同时构建 `linux/amd64` 与 `linux/arm64`
-   （arm64 走 QEMU 模拟），推送到 `ghcr.io/rdevils7/tgsub`，标签见[「可用标签」](#方式一docker-compose-拉取-ghcr-镜像推荐免编译)。
+   （arm64 走 QEMU 模拟），推送到 `ghcr.io/rdevils7/tgsub` 与 Docker Hub `rdevils7/tgsub`，
+   标签见[「可用标签」](#方式一docker-compose-拉取-docker-hub-镜像推荐免编译)。
 
-镜像用仓库内置的 `GITHUB_TOKEN` 登录 GHCR，无需额外配置密钥；首次推送后如果包是私有的，
+**GHCR** 用仓库内置的 `GITHUB_TOKEN` 登录，无需额外配置密钥；首次推送后如果包是私有的，
 去仓库 `Settings → Packages` 把 `tgsub` 改成 Public 即可让任何人 `docker pull`。
+
+**Docker Hub** 需要两个仓库 Secret（在 `Settings → Secrets and variables → Actions` 里添加）：
+
+| Secret 名 | 值 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名（小写），例如 `rdevils7` |
+| `DOCKERHUB_TOKEN` | Docker Hub 的 **Access Token**（不是账号密码），在 Account settings → Personal access tokens 生成，权限 Read & Write |
+
+> 没配这两个 Secret 也不会让流水线失败 —— CI 会跳过 Docker Hub 登录，
+> 只发布到 GHCR 并打一条 `::notice::` 提示日志。
 
 > **关于 package-lock.json**：lock 是在 Windows 上生成的，缺 Linux 平台的原生可选依赖
 > （`@rollup/rollup-linux-x64-gnu`、`@esbuild/linux-x64` 等二进制包），直接 `npm ci`
@@ -763,9 +778,14 @@ curl http://127.0.0.1:6789/api/health
 另外先回 my.telegram.org 首页看应用列表——建过的话直接复用已有 `api_id` / `api_hash`，不用新建。填表时 URL 可留空，平台选 **Desktop**。
 
 **元数据页点「抽帧」提示未找到 ffmpeg**
-项目依赖里已经带了 `@ffmpeg-installer/ffmpeg` 与 `@ffprobe-installer/ffprobe` 的静态二进制，正常安装无需额外配置。
+项目依赖里已经带了 `@ffmpeg-installer/ffmpeg` 的静态二进制，正常安装无需额外配置。
 若提示找不到，按顺序检查：`node_modules/@ffmpeg-installer` 是否完整（`npm ci` 可修复）；Docker 部署时是否用了自定义镜像把 devDependencies 之外的东西裁掉；
 再不行到「设置 → Emby 媒体库 → ffmpeg 路径」手动填一个绝对路径，保存后回元数据页点右上角刷新即可。
+
+> **关于 ffprobe**：镜像里**不再内置** `@ffprobe-installer`（它单独就占 75MB，是镜像体积最大的一层，
+> 也是从慢速镜像站拉取时卡在 99% 的直接原因）。媒体探测（时长 / 分辨率 / 编码 / 码率 / 帧率）
+> 改由 `server/src/tg/ffmpeg.ts` 的 `parseFfmpegProbe()` 解析 `ffmpeg -i` 的 stderr 输出，
+> 字段与 ffprobe 完全一致。若用户自备 ffprobe，程序仍会优先使用它。
 
 **重启后提示未登录 / 每次重启都要重新扫码**
 正常情况下**只需扫码一次**：session 加密写入数据库（另有一份备份），重启进程、重建容器都会自动复用。为此有五层保护：

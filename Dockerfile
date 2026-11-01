@@ -59,6 +59,11 @@ RUN rm -f package-lock.json \
      || npm_config_build_from_source=true npm rebuild better-sqlite3)
 
 # 关键原生依赖自检：缺一个就在构建期报错，而不是等到线上截帧/处理图片时才炸
+#
+# 注意：这里**不校验 ffprobe**。@ffprobe-installer 的二进制单独就占 75MB
+# （amd64），是镜像体积最大的一层，也是从慢速镜像站拉取时卡住的直接原因。
+# 现在由 server/src/tg/ffmpeg.ts 用 `ffmpeg -i` 的 stderr 解析替代，
+# 用户若自备 ffprobe 仍会被优先使用。
 RUN node -e "require('better-sqlite3')" \
  && node -e "console.log('ffmpeg:', require('@ffmpeg-installer/ffmpeg').path)" \
  && node -e "try{require('sharp');console.log('sharp: ok')}catch(e){console.log('sharp: 缺失（图片处理降级为原图复制）')}"

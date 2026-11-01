@@ -35,13 +35,16 @@
 
 ## 快速部署（Docker Compose）
 
-**无需 clone 仓库、无需在服务器上编译** —— 直接从 GitHub Container Registry 拉取已构建好的镜像：
+**无需 clone 仓库、无需在服务器上编译** —— 直接从 Docker Hub 拉取已构建好的镜像：
 
 ```
-ghcr.io/rdevils7/tgsub:latest
+rdevils7/tgsub:latest
 ```
 
 镜像为 `linux/amd64` 与 `linux/arm64` 双架构，服务器上只要有 Docker 20.10+ 与 docker compose v2 即可。
+
+> 备用仓库是 GitHub Container Registry：`ghcr.io/rdevils7/tgsub:latest`。
+> 两者内容完全一致，**国内优先用 Docker Hub**，拉不动再换 GHCR。
 
 ### 1. 准备目录
 
@@ -66,7 +69,7 @@ sudo chown -R 1000:1000 data downloads
 ```yaml
 services:
   tgsub:
-    image: ghcr.io/rdevils7/tgsub:latest
+    image: rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
     ports:
@@ -117,7 +120,7 @@ compose 文件里全部是真实值，**直接编辑对应那一行**即可：
 
 | 要改什么 | 改哪一行 |
 | --- | --- |
-| 换镜像版本 | `image:` → `ghcr.io/rdevils7/tgsub:v1.0.0` |
+| 换镜像版本 | `image:` → `rdevils7/tgsub:v1.0.0` |
 | 换宿主机端口 | `ports:` → `- "8080:6789"` |
 | 换数据目录 | `volumes:` 第一条 → `- /opt/tgsub/data:/data` |
 | 换下载目录 | `volumes:` 第二条 → `- /mnt/nas/tgsub:/downloads` |
@@ -152,6 +155,24 @@ Error: EACCES: permission denied, open '/data/.session-secret'
 
 > `PUID`/`PGID` 就是「容器内用哪个账号读写文件」。默认 `1000:1000`（镜像里的 `node` 用户）。
 > 改成 NAS 上你自己的账号 uid/gid，下载的视频在你 NAS 的文件管理器里就直接属于你的账号了。
+
+#### 拉取镜像卡在某个百分比不动？
+
+`docker compose pull` 卡在 `78.55MB / 78.57MB` 这类「差一点点就完成」的位置，
+是**镜像站回源失败或限速**导致的，不是镜像有问题 —— 那一层传到 99% 时连接被切断，
+Docker 会从头重传，于是永远出不来。
+
+按下面顺序处理：
+
+| 做法 | 说明 |
+| --- | --- |
+| 换 Docker Hub 加速器 | NAS「设置 → 常规 → 镜像加速」里填 `https://docker.1ms.run`（或 `docker.xuanyuan.me` / `dockerpull.org`），保存后重新拉取 |
+| 换镜像仓库 | 把 compose 的 `image:` 改成 `ghcr.io/rdevils7/tgsub:latest` 再试 |
+| 多拉几次 | 限速是随机的，重试往往能挤进去 |
+| 手动分步拉取 | `docker pull rdevils7/tgsub:latest` 观察卡在哪一层，再 `docker compose up -d` |
+
+> 镜像体积已从 151MB 优化到约 113MB（剥离了 ffmpeg 之外的 ffprobe 静态二进制，
+> 单层从 71MB 降到约 33MB），卡住的概率和等待时间都明显下降。
 
 ### 5. 启动
 
@@ -195,6 +216,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 
 ### 可用镜像标签
 
+镜像同时发布到 **Docker Hub** 与 **GitHub Container Registry**，两个仓库的标签完全一致：
+
+| 仓库 | 镜像地址 |
+| --- | --- |
+| Docker Hub（推荐） | `rdevils7/tgsub:latest` |
+| GHCR（备用） | `ghcr.io/rdevils7/tgsub:latest` |
+
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
@@ -203,26 +231,51 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 ghcr.io/rdevils7/tgsub:v1.0.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.0
 docker compose up -d
 ```
 
-> 镜像仓库是公开的，任何人都能 `docker pull`。若你的 fork 需保持私有，去 GitHub 仓库
-> `Settings → Packages` 改为 Private，拉取前先 `docker login ghcr.io -u <用户名>`（密码用 PAT，勾选 `read:packages`）。
+> 镜像仓库是公开的，任何人都能 `docker pull`。若你的 fork 需保持私有，
+> 去 GitHub 仓库 `Settings → Packages` 改为 Private，拉取前先
+> `docker login ghcr.io -u <用户名>`（密码用 PAT，勾选 `read:packages`）。
 
 ### 不用 compose？
 
 ```bash
-docker pull ghcr.io/rdevils7/tgsub:latest
+docker pull rdevils7/tgsub:latest
 docker run -d --name tgsub -p 6789:6789 \
   -v "$(pwd)/data:/data" -v "$(pwd)/downloads:/downloads" \
   -e DATA_DIR=/data -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
-  --restart unless-stopped ghcr.io/rdevils7/tgsub:latest
+  --restart unless-stopped rdevils7/tgsub:latest
 ```
 
 ### 其他部署方式
 
 需要改代码或本地开发时，见 [PROJECT_DOC.md](PROJECT_DOC.md) 的「快速开始」章节（含本地构建镜像、本地运行）。
+
+### 镜像是怎么发布到 Docker Hub 的？
+
+CI（`.github/workflows/docker.yml`）在 `main` 分支推送后自动构建并推送，**不需要手动操作**。
+想在 Docker Hub 网页上看到镜像，只需先配置两个 GitHub Secret：
+
+| Secret 名 | 值 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名（小写），例如 `rdevils7` |
+| `DOCKERHUB_TOKEN` | Docker Hub 的 **Access Token**（不是账号密码） |
+
+配置步骤：
+
+1. 登录 [hub.docker.com](https://hub.docker.com/) → 右上角头像 → **Account settings**
+2. 左侧 **Personal access tokens** → **Generate new token**
+3. `AccessToken` 权限勾选 **Read & Write**（只读也能拉，但推不了）
+4. 复制生成的 token（形如 `dckr_pat_...`，**只显示一次**）
+5. 打开 GitHub 仓库 `RDevils7/tgsub` → **Settings → Secrets and variables → Actions**
+6. 点 **New repository secret**，分别添加上面两个 Secret
+7. 回到仓库点 **Actions** → 手动触发一次 `Docker 镜像` 工作流
+
+之后每次推送 `main` 都会自动同步到 Docker Hub，标签与 GHCR 完全一致。
+
+> 没配 Secret 也不会报错 —— CI 会只发布到 GHCR 并打一条提示日志。
 
 ---
 
@@ -301,6 +354,11 @@ compose 里多写了一行 `init: true`，和镜像自带的 tini 重复了。�
 
 **点「继续」后进度回到 0**
 gramjs 的 `downloadMedia` 不支持断点续传，暂停/停止/让位后都会从头下载。
+
+**元数据页显示不出视频时长/分辨率**
+镜像里内置了 `ffmpeg` 但**没有内置 `ffprobe`**（ffprobe 单独就占 75MB，是镜像体积大头）。
+时长、分辨率、编码等字段改由 `ffmpeg -i` 的输出解析，功能不受影响。
+若连 `ffmpeg` 也没有，在「设置 → Emby 与封面」里填 `ffmpeg 路径` 指向宿主机上的 ffmpeg 可执行文件即可。
 
 **磁盘涨得快**
 在设置里配好最小/最大文件大小、封面数量，或给订阅限定频道；下载记录页可按状态筛选后批量删除。

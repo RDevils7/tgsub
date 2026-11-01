@@ -1,9 +1,12 @@
-# tgsub 部署配置 —— 直接拉取 GHCR 镜像，不在本机编译
+# tgsub 部署配置 —— 直接拉取 Docker Hub 镜像，不在本机编译
 #
 #   docker compose up -d
 #
-# 镜像地址：ghcr.io/rdevils7/tgsub:latest
-# 需要固定版本时，把下面 image 改成 ghcr.io/rdevils7/tgsub:v1.0.0
+# 镜像地址：rdevils7/tgsub:latest
+# 需要固定版本时，把下面 image 改成 rdevils7/tgsub:v1.0.0
+#
+# 备用仓库（GHCR，国内拉取可能较慢，拉不动时再换）：
+#   image: ghcr.io/rdevils7/tgsub:latest
 #
 # 本文件全部使用真实值，不做变量插值。直接改下面的字段即可：
 #   image        → 换镜像版本
@@ -29,12 +32,17 @@
 #       PUID: "1026"
 #       PGID: "100"
 #
+# 国内拉取慢时，用 Docker Hub 镜像加速器（在 NAS 的「设置 → 常规 → 镜像加速」里填）：
+#   https://docker.1ms.run
+#   https://docker.xuanyuan.me
+#   https://dockerpull.org
+#
 # 从旧版本（下载文件在 ./data/downloads 内）升级：
 #   mv data/downloads/* downloads/ && rmdir data/downloads
 
 services:
   tgsub:
-    image: ghcr.io/rdevils7/tgsub:latest
+    image: rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
     # 不要加 init: true —— 镜像的 ENTRYPOINT 已经用 tini 做 PID 1，

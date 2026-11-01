@@ -10,6 +10,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # Docker Hub 仓库名（用户名/仓库）。用户名来自 Secrets，仓库名固定为 tgsub。
+  DOCKERHUB_IMAGE: rdevils7/tgsub
 
 permissions:
   contents: read
@@ -145,9 +147,30 @@ jobs:
           echo "NAS 场景（root 属主挂载目录）校验通过"
           docker rm -f tgsub-nas
 
-  # 2) 测试通过后再发布多架构镜像（amd64 + arm64）到 GHCR
+      - name: 验证镜像内置 ffmpeg 可用（已剥离 ffprobe，探测走 ffmpeg -i 解析）
+        run: |
+          # 镜像不再内置 ffprobe 二进制（省 75MB），元数据探测改用 ffmpeg -i 解析。
+          # 这里确认 ffmpeg 仍在、且 -i 能正常输出媒体信息。
+          docker run --rm --entrypoint sh tgsub:smoke -c '
+            set -e
+            FFMPEG=$(node -e "console.log(require(\"@ffmpeg-installer/ffmpeg\").path)")
+            echo "ffmpeg 路径: $FFMPEG"
+            "$FFMPEG" -version | head -1
+            # 造一个 2 秒测试视频，确认 -i 能输出 Duration / Stream
+            "$FFMPEG" -hide_banner -loglevel error -y \
+              -f lavfi -i testsrc=duration=2:size=320x240:rate=25 \
+              -c:v libx264 -preset ultrafast -pix_fmt yuv420p /tmp/t.mp4
+            "$FFMPEG" -hide_banner -i /tmp/t.mp4 2>&1 | grep -E "Duration|Video:" || true
+          ' | tee /tmp/ffmpeg-check.txt
+
+          # 关键断言：-i 必须能输出 Duration 与 Video 流信息
+          grep -q "Duration:" /tmp/ffmpeg-check.txt || { echo "ffmpeg -i 未输出 Duration，媒体信息探测会失效"; exit 1; }
+          grep -q "Video:" /tmp/ffmpeg-check.txt || { echo "ffmpeg -i 未输出 Video 流信息"; exit 1; }
+          echo "ffmpeg 内置二进制校验通过"
+
+  # 2) 测试通过后再发布多架构镜像（amd64 + arm64）到 GHCR 与 Docker Hub
   publish:
-    name: 发布到 GHCR（amd64 + arm64）
+    name: 发布到 GHCR + Docker Hub（amd64 + arm64）
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -165,15 +188,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker Hub 用 Access Token 登录（不是账号密码）。
+      # Secret 缺失时跳过登录，GHCR 仍然照常发布，不至于整条流水线挂掉。
+      - name: 登录 Docker Hub
+        id: dockerhub_login
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: 计算镜像名（GHCR 要求全小写）
         id: slug
         run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # 组装要推送的镜像地址列表。
+      # Docker Hub 只在配了 Secret 时才加入 —— 否则标签里带着未登录的
+      # registry 地址，push 阶段会直接失败，把整条流水线带崩。
+      - name: 组装镜像地址列表
+        id: images
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "${REGISTRY}/${GITHUB_REPOSITORY,,}"
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "${DOCKERHUB_IMAGE}"
+            else
+              echo "::notice::未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，本次仅发布到 GHCR"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: 生成标签
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}
+          images: ${{ steps.images.outputs.list }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -196,5 +249,9 @@ jobs:
 
       - name: 输出拉取命令
         run: |
-          echo "镜像：${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}:${{ steps.meta.outputs.version }}"
+          echo "=== Docker Hub（推荐，国内拉取更快）==="
+          echo "拉取：docker pull ${{ env.DOCKERHUB_IMAGE }}:${{ steps.meta.outputs.version }}"
+          echo "拉取：docker pull ${{ env.DOCKERHUB_IMAGE }}:latest"
+          echo ""
+          echo "=== GHCR（备用）==="
           echo "拉取：docker pull ${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}:${{ steps.meta.outputs.version }}"

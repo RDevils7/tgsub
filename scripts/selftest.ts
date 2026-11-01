@@ -602,6 +602,67 @@ async function logStoreChecks(): Promise<void> {
   clearMemory();
 }
 
+/**
+ * ffmpeg -i 解析器：镜像里不再内置 ffprobe 二进制（省 75MB），
+ * 元数据探测改走 `ffmpeg -i` 的 stderr 解析，这里验证解析结果与 ffprobe 一致。
+ */
+async function ffmpegProbeChecks(): Promise<void> {
+  const { parseFfmpegProbe } = await import("../server/src/tg/ffmpeg");
+
+  // 真实 `ffmpeg -i` 输出样本（5 秒 1280x720 25fps h264 + aac）
+  const stderr = [
+    "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'C:/tmp/sample.mp4':",
+    "  Metadata:",
+    "    encoder         : Lavf58.24.101",
+    "  Duration: 00:00:05.02, start: 0.000000, bitrate: 396 kb/s",
+    "    Stream #0:0(und): Video: h264 (Constrained Baseline) (avc1 / 0x31637661), yuv420p, 1280x720 [SAR 1:1 DAR 16:9], 316 kb/s, 25 fps, 25 tbr, 12800 tbn, 50 tbc (default)",
+    "    Metadata:",
+    "      handler_name    : VideoHandler",
+    "    Stream #0:1(und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 74 kb/s (default)",
+    "At least one output file must be specified",
+  ].join("\n");
+
+  await acheck("ffmpeg -i 能解析出时长/分辨率/编码", async () => {
+    const probe = parseFfmpegProbe(stderr);
+    assert.ok(probe, "解析结果不应为 null");
+    assert.equal(probe.width, 1280);
+    assert.equal(probe.height, 720);
+    assert.equal(probe.videoCodec, "h264");
+    assert.equal(probe.audioCodec, "aac");
+    assert.equal(probe.fps, 25);
+    assert.equal(probe.container, "mov,mp4,m4a,3gp,3g2,mj2");
+    // 时长 00:00:05.02 → 5.02 秒
+    assert.ok(Math.abs((probe.duration ?? 0) - 5.02) < 0.01, `duration=${probe.duration}`);
+  });
+
+  await acheck("ffmpeg 解析的码率换算成 bit/s（与 ffprobe 同量纲）", async () => {
+    const probe = parseFfmpegProbe(stderr);
+    // ffmpeg 报 396 kb/s → 396000 bit/s；ffprobe 报 398201（整数 kb/s 舍入误差内）
+    assert.equal(probe?.bitrate, 396000);
+  });
+
+  await acheck("只有视频流没有音频流时也能解析", async () => {
+    const only = [
+      "Input #0, matroska,webm, from 'a.mkv':",
+      "  Duration: 00:02:00.00, start: 0.000000, bitrate: 1200 kb/s",
+      "    Stream #0:0: Video: hevc (Main), yuv420p(tv), 3840x2160 [SAR 1:1 DAR 16:9], 60 fps, 60 tbr",
+    ].join("\n");
+    const probe = parseFfmpegProbe(only);
+    assert.ok(probe);
+    assert.equal(probe.videoCodec, "hevc");
+    assert.equal(probe.width, 3840);
+    assert.equal(probe.height, 2160);
+    assert.equal(probe.fps, 60);
+    assert.equal(probe.audioCodec, null);
+    assert.equal(probe.duration, 120);
+  });
+
+  await acheck("非媒体文件解析为 null 而不是抛错", async () => {
+    assert.equal(parseFfmpegProbe(""), null);
+    assert.equal(parseFfmpegProbe("Invalid data found when processing input"), null);
+  });
+}
+
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
@@ -689,6 +750,12 @@ async function main(): Promise<void> {
     await embyChecks();
   } catch (err) {
     console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
+  try {
+    await ffmpegProbeChecks();
+  } catch (err) {
+    console.error(`  \u2717 ffmpeg 解析用例异常: ${(err as Error).message}`);
     process.exitCode = 1;
   }
   console.log(`\n通过 ${passed} 项自检${process.exitCode ? "（存在失败）" : "，全部正常"}\n`);
