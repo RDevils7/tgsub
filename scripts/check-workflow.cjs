@@ -37,6 +37,31 @@ lines.forEach((l, i) => {
 });
 console.log("secrets-in-if 检查:", problems.some((p) => p.includes("if 里引用")) ? "✗ 存在违规" : "✓ 无违规");
 
+// 写入 GITHUB_OUTPUT 的多行列表里，每一行都会被下游当成数据使用。
+// 「组装镜像地址列表」这一段若混进提示语（::notice:: 等），
+// metadata-action 会把它当镜像名，报 "invalid reference format"。
+const listBlock = text.match(/echo "list<<EOF"([\s\S]*?)echo "EOF"/);
+if (listBlock) {
+  listBlock[1]
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .forEach((l) => {
+      const m = l.match(/^echo "(.*)"\s*(.*)$/);
+      if (!m) return;
+      const value = m[1];
+      // 写往 stderr 的行不会进 GITHUB_OUTPUT，可以放提示语
+      if (/>&2/.test(m[2])) return;
+      // 含变量的行无法静态判断，交给运行时；只检查字面量
+      if (value.includes("${")) return;
+      // 镜像地址应形如 registry.tld/namespace/name
+      if (!/^[\w.-]+\/[\w.\-/]+$/.test(value)) {
+        problems.push(`镜像地址列表里混入了非地址内容（且未写往 stderr）: ${value.slice(0, 60)}`);
+      }
+    });
+}
+console.log("镜像列表内容检查:", problems.some((p) => p.includes("混入")) ? "✗ 存在混入" : "✓ 干净");
+
 console.log("\n--- jobs ---");
 lines.forEach((l) => {
   const m = l.match(/^  ([a-z-]+):$/);

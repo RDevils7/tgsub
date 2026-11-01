@@ -215,6 +215,10 @@ jobs:
       # 组装要推送的镜像地址列表。
       # Docker Hub 只在配了 Secret 时才加入 —— 否则标签里带着未登录的
       # registry 地址，push 阶段会直接失败，把整条流水线带崩。
+      #
+      # 注意：列表里**只能放镜像地址**。metadata-action 会把每一行都当成
+      # 镜像名处理，混入提示语会报 "invalid reference format"。
+      # 提示信息写到 stderr（不进 GITHUB_OUTPUT），日志里照样能看到。
       - name: 组装镜像地址列表
         id: images
         run: |
@@ -224,7 +228,7 @@ jobs:
             if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
               echo "${DOCKERHUB_IMAGE}"
             else
-              echo "::notice::未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，本次仅发布到 GHCR"
+              echo "::notice::未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，本次仅发布到 GHCR" >&2
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
