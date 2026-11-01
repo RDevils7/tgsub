@@ -31,6 +31,8 @@ const SEASON_EPISODE_RE = /\bS(\d{1,2})\s*[._-]?\s*E(?:P)?\s*(\d{1,4})\b/i;
 const EPISODE_RE = /\b(?:EP|E)\s*(\d{1,4})\b/i;
 /** 正文里的“简介：”之后是剧情描述，可能混进别的“第X集”，截断掉再解析 */
 const PLOT_SPLIT_RE = /(?:简介|剧情|内容简介|文案)\s*[:：]/;
+/** 兜底文件夹名的长度上限：太长在文件管理器里看不全 */
+const LOOSE_NAME_MAX = 50;
 
 const CN_DIGITS: Record<string, number> = {
   零: 0,
@@ -154,6 +156,8 @@ export interface NamedFile {
   episode?: number | null;
   season?: number;
   isVideo?: boolean;
+  /** true = 正文里没解析出剧名，这个文件夹是按「一链接一文件夹」兜底起的名 */
+  loose?: boolean;
 }
 
 export interface MediaLike {
@@ -213,53 +217,109 @@ export function parseCaptionMeta(raw: string): CaptionMeta {
 }
 
 /**
+ * 正文里解析不出剧名时，用「一个链接一个文件夹」兜底：
+ * 文件夹名取正文首行（去掉链接、@提及、#标签），太长就截断。
+ * 首行太短（如「01/12」这种序号行）时继续往下找，实在没有就用全文。
+ */
+export function fallbackFolderName(raw: string): string {
+  const text = (raw || "").replace(/\r\n?/g, "\n");
+  const clean = (value: string): string =>
+    value
+      .replace(/https?:\/\/\S+/gi, " ")
+      .replace(/\bwww\.\S+/gi, " ")
+      .replace(/@[A-Za-z0-9_]{2,}/g, " ")
+      .replace(/#[^\s#]+/g, " ")
+      .replace(/[|｜]{2,}/g, " | ")
+      .replace(/[\u200b-\u200f\ufeff]/g, "")
+      .replace(/\s+/g, " ")
+      .replace(/^[\s|｜·•\-—:,，。]+|[\s|｜·•\-—:,，。]+$/g, "")
+      .trim();
+
+  let name = "";
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const candidate = clean(line);
+    if (candidate.length >= 3) {
+      name = candidate;
+      break;
+    }
+  }
+  if (!name) name = clean(text);
+  if (!name) return "";
+
+  const cut = name.length > LOOSE_NAME_MAX ? name.slice(0, LOOSE_NAME_MAX) : name;
+  const safe = sanitizeSegment(cut, LOOSE_NAME_MAX);
+  return safe === "untitled" ? "" : safe;
+}
+
+const isVideoLike = (item: MediaLike): boolean => item.kind === "video" || item.kind === "gif";
+
+/** 剧集命名（解析到剧名）或兜底命名（一链接一文件夹）共用的视频文件名 */
+function videoFileName(dir: string, tag: string, order: number, count: number, ext: string): string {
+  if (count > 1) return `${dir}${tag}-${pad2(order + 1)}${ext}`;
+  return `${dir}${tag}${ext}`;
+}
+
+/**
  * 为一条消息内的所有文件规划最终落盘名。
  *
  * - 视频：`剧名S01E04.mp4`，同一条消息里的多个视频按顺序对应第 1-7 集
+ * - 解析不到剧名但有视频：一个链接一个文件夹，文件夹与文件同名（正文首行），
+ *   同一条消息里的多个视频加 `-01` 后缀区分
  * - 图片：只挑 3 张当封面（Emby 的 poster / landscape / fanart），其余标记 skip 不下载；
  *   没有视频的消息（纯图集）保持原来的 `剧名S01E04-p1.jpg` 全量下载
- * - 一条消息里有多个文件时，都放进 `剧名/` 这一个文件夹
+ * - 一条消息里有多个文件时，都放进同一个文件夹
  *
- * 解析不到剧名时全部返回 null，走原有命名逻辑。
+ * 解析不到剧名且没有视频（文档、音乐、纯图片）时全部返回 null，走原有命名逻辑。
  */
 export function planFileNames(
   text: string,
   media: MediaLike[],
-  options: { artCount?: number; artPrefix?: string; artPrefer?: number[] } = {},
+  options: {
+    artCount?: number;
+    artPrefix?: string;
+    artPrefer?: number[];
+    /** 是否启用「无法识别标题 → 一个链接一个文件夹」的兜底命名 */
+    looseFolder?: boolean;
+    /** 兜底文件夹名重名时改名（同一个链接重下要保持原名） */
+    uniqueLooseDir?: (base: string) => string;
+  } = {},
 ): NamedFile[] {
   const info = parseSeriesCaption(text);
-  if (!info) return media.map(() => ({ dir: null, name: null }));
+  const looseBase = info ? "" : fallbackFolderName(text);
+  const loose = !info && (options.looseFolder ?? true) && Boolean(looseBase) && media.some(isVideoLike);
+  if (!info && !loose) return media.map(() => ({ dir: null, name: null }));
 
-  const plan: NamedFile[] = media.map(() => ({ dir: info.series, name: null }));
+  const looseDir = loose ? (options.uniqueLooseDir?.(looseBase) ?? looseBase) : "";
+  const dir = info ? info.series : looseDir;
+
+  const plan: NamedFile[] = media.map(() => ({ dir, name: null }));
   const videoIndexes = media
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.kind === "video" || item.kind === "gif");
+    .filter(({ item }) => isVideoLike(item));
 
   const episodesPerVideo: Array<number | null> = videoIndexes.map((_entry, order) =>
-    episodeAt(info, order, videoIndexes.length),
+    info ? episodeAt(info, order, videoIndexes.length) : null,
   );
 
   videoIndexes.forEach(({ item, index }, order) => {
     const episode = episodesPerVideo[order];
+    const tag = info ? episodeTag(info, episode) : "";
     const ext = extensionOf(item);
     plan[index] = {
-      dir: info.series,
+      dir,
       // 没有集数时退化为「剧名-01」/「剧名」，保证同一条消息内不重名
-      name:
-        episode !== null
-          ? `${info.series}${episodeTag(info, episode)}${ext}`
-          : videoIndexes.length > 1
-            ? `${info.series}-${pad2(order + 1)}${ext}`
-            : `${info.series}${ext}`,
+      name: videoFileName(dir, tag, order, videoIndexes.length, ext),
       episode,
-      season: info.season,
+      season: info?.season ?? 1,
       isVideo: true,
+      loose: loose || undefined,
     };
   });
 
   const attachmentIndexes = media
     .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.kind !== "video" && item.kind !== "gif");
+    .filter(({ item }) => !isVideoLike(item));
 
   // 有视频 = 这是一集短剧：图片只留 3 张做封面，其余不下载
   const artCount = Math.max(0, options.artCount ?? 0);
@@ -276,31 +336,32 @@ export function planFileNames(
     let artNo = 0;
     for (const { item, index } of attachmentIndexes) {
       if (!chosenSet.has(index)) {
-        plan[index] = { dir: info.series, name: null, skip: true };
+        plan[index] = { dir, name: null, skip: true };
         continue;
       }
       artNo += 1;
       // 名字带上消息 id：同一集的不同图片、以及不同集之间都不会撞名
       const prefix = options.artPrefix ? `${options.artPrefix}-` : "";
-      plan[index] = { dir: info.series, name: `.art-${prefix}${artNo}${extensionOf(item)}` };
+      plan[index] = { dir, name: `.art-${prefix}${artNo}${extensionOf(item)}` };
     }
     return plan;
   }
 
   // 附属文件（剧照/封面/文档）挂到这条消息第一集的编号下
-  const anchorEpisode = episodesPerVideo.length ? episodesPerVideo[0] : (info.episodes[0] ?? null);
-  const anchorTag = episodeTag(info, anchorEpisode);
+  const anchorEpisode = episodesPerVideo.length ? episodesPerVideo[0] : (info?.episodes[0] ?? null);
+  const anchorTag = info ? episodeTag(info, anchorEpisode) : "";
   let attachmentNo = 0;
   for (const { item, index } of attachmentIndexes) {
     attachmentNo += 1;
     const ext = extensionOf(item);
     plan[index] = {
-      dir: info.series,
+      dir,
       name: anchorTag
-        ? `${info.series}${anchorTag}-p${attachmentNo}${ext}`
-        : `${info.series}-p${attachmentNo}${ext}`,
+        ? `${dir}${anchorTag}-p${attachmentNo}${ext}`
+        : `${dir}-p${attachmentNo}${ext}`,
       episode: anchorEpisode,
-      season: info.season,
+      season: info?.season ?? 1,
+      loose: loose || undefined,
     };
   }
 

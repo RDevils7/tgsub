@@ -299,3 +299,10 @@ export const IconImage = (p: Props) => (
     <circle cx="8.4" cy="9.4" r="1.4" />
   </Svg>
 );
+
+export const IconCrop = (p: Props) => (
+  <Svg {...p}>
+    <path d="M6.5 2.5v15h15" />
+    <path d="M2.5 6.5h15v15" />
+  </Svg>
+);

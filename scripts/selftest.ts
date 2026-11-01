@@ -7,7 +7,7 @@ import path from "node:path";
 import { matchText } from "../server/src/match";
 import { extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
 import { sanitizeSegment, splitKeywords, toNumber } from "../server/src/utils";
-import { parseCaptionMeta, parseSeriesCaption, planFileNames } from "../server/src/tg/naming";
+import { fallbackFolderName, parseCaptionMeta, parseSeriesCaption, planFileNames } from "../server/src/tg/naming";
 import { Subscription } from "../server/src/types";
 
 let passed = 0;
@@ -223,12 +223,38 @@ check("纯图集不做封面裁剪", () => {  const plan = planFileNames(caption
   assert.equal(plan[0].name, "美人局S01E04-p1.jpg");
   assert.equal(plan[7].name, "美人局S01E04-p8.jpg");
 });
+
+const looseText = "老板今天又发飙了，速看 #日常 完整版 https://t.me/abc/123";
+const oneVideo = [{ kind: "video" as const, fileName: "VID_002.mp4", mimeType: "video/mp4" }];
+
+check("认不出剧名：一个链接一个文件夹，名字取正文", () => {
+  const plan = planFileNames(looseText, oneVideo, { artCount: 0 });
+  assert.equal(plan[0].dir, "老板今天又发飙了，速看 完整版");
+  assert.equal(plan[0].name, "老板今天又发飙了，速看 完整版.mp4");
+  assert.equal(plan[0].loose, true);
+});
+check("兜底文件夹重名时加消息 id 后缀", () => {
+  const plan = planFileNames(looseText, oneVideo, { artCount: 0, uniqueLooseDir: (b) => `${b}-9001` });
+  assert.equal(plan[0].dir, "老板今天又发飙了，速看 完整版-9001");
+  assert.equal(plan[0].name, "老板今天又发飙了，速看 完整版-9001.mp4");
+});
+check("同一链接多个视频按序号区分", () => {
+  const plan = planFileNames("两个片段合集", [oneVideo[0], { ...oneVideo[0], fileName: "b.mp4" }], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.name), ["两个片段合集-01.mp4", "两个片段合集-02.mp4"]);
+});
+check("关掉兜底命名 / 没有视频 / 空正文时不建文件夹", () => {
+  assert.equal(planFileNames(looseText, oneVideo, { looseFolder: false })[0].dir, null);
+  assert.equal(planFileNames("今天的照片", [{ kind: "photo", fileName: "a.jpg", mimeType: "image/jpeg" }])[0].dir, null);
+  assert.equal(planFileNames("", oneVideo)[0].dir, null);
+});
+check("兜底名字去掉链接、@提及与 #标签", () => {
+  assert.equal(fallbackFolderName("#标签 标题在这里 https://t.me/x/1 @someone"), "标题在这里");
+});
 check("简介与标签提取", () => {
   const meta = parseCaptionMeta(caption);
   assert.ok(meta.plot.includes("老板娘"));
   assert.equal(meta.plot.includes("#"), false);
-  assert.deepEqual(meta.tags, ["ai成人短剧", "美人局"]);
-});
+  assert.deepEqual(meta.tags, ["ai成人短剧", "美人局"]);});
 
 /** 文件类用例：需要 await，单独提供异步断言入口 */
 async function acheck(name: string, fn: () => Promise<void>): Promise<void> {

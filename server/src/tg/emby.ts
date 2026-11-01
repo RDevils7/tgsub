@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { db } from "../db";
+import { db, getSettings } from "../db";
 import { logger } from "../logger";
 import { sanitizeSegment } from "../utils";
+import { autoCoversFromVideo } from "./autocover";
 import { markCoversFromDownload, saveCoverFromFile } from "./covers";
+import { loadSharp } from "./sharp";
 
 /**
  * 生成 Emby 可直接识别的本地媒体信息。
@@ -134,30 +136,6 @@ function buildShowNfo(meta: EmbyMeta): string {
   return lines.join("\n");
 }
 
-type SharpLike = {
-  (input: string): {
-    metadata(): Promise<{ width?: number; height?: number }>;
-    resize(opts: { width: number; height: number; fit: string; position: string }): {
-      jpeg(opts: { quality: number }): { toFile(target: string): Promise<unknown> };
-    };
-  };
-};
-
-let sharpCache: SharpLike | null | undefined;
-
-/** sharp 是可选依赖：装不上（如裁剪过的容器镜像）就退化成原图复制 */
-async function getSharp(): Promise<SharpLike | null> {
-  if (sharpCache !== undefined) return sharpCache;
-  try {
-    const mod = (await import("sharp")) as unknown as { default?: SharpLike } & SharpLike;
-    sharpCache = (mod.default ?? mod) as SharpLike;
-  } catch (err) {
-    logger.warn({ err: (err as Error).message }, "sharp 不可用，封面将直接复制原图");
-    sharpCache = null;
-  }
-  return sharpCache;
-}
-
 const assembling = new Set<string>();
 const assemblePending = new Set<string>();
 
@@ -175,22 +153,29 @@ function hasPendingArt(dir: string): boolean {
   return (row?.n ?? 0) > 0;
 }
 
-/** 把目录里下载好的 .art-<消息id>-N.* 转成 poster/landscape/fanart 三张图 */
-export async function assembleArt(dir: string): Promise<void> {
+/**
+ * 把目录里下载好的 .art-<消息id>-N.* 转成 poster/landscape/fanart 三张图。
+ *
+ * 返回：
+ *  - "art"     已用消息图片生成
+ *  - "pending" 还有封面图在下载，等它们下完再来
+ *  - "none"    目录里没有封面图（调用方可以改用视频截帧兜底）
+ */
+export async function assembleArt(dir: string): Promise<"art" | "pending" | "none"> {
   if (assembling.has(dir)) {
     // 正在拼图时又有新图落地：记一笔，结束后再跑一遍，避免漏掉后到的封面
     assemblePending.add(dir);
-    return;
+    return "pending";
   }
   assembling.add(dir);
   try {
-    if (hasPendingArt(dir)) return;
+    if (hasPendingArt(dir)) return "pending";
     const entries = await fs.promises.readdir(dir).catch(() => [] as string[]);
     const arts = entries.filter((name) => /^\.art-[A-Za-z0-9-]+\.(jpe?g|png|webp)$/i.test(name)).sort();
-    if (arts.length === 0) return;
+    if (arts.length === 0) return "none";
 
     const sources = arts.map((name) => path.join(dir, name));
-    const sharp = await getSharp();
+    const sharp = await loadSharp();
 
     // 按宽高比排序：最瘦的当竖版海报，最宽的当横版图与背景图
     const sized = await Promise.all(
@@ -252,6 +237,7 @@ export async function assembleArt(dir: string): Promise<void> {
     for (const row of owners.values()) await markCoversFromDownload(row.channel_id, row.message_id);
     for (const file of sources) await fs.promises.unlink(file).catch(() => undefined);
     logger.info({ dir: path.basename(dir), art: arts.length }, "已生成 Emby 封面图");
+    return "art";
   } finally {
     assembling.delete(dir);
     if (assemblePending.delete(dir)) void assembleArt(dir);
@@ -277,7 +263,17 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
       logger.info({ nfo: path.basename(nfoPath) }, "已写入 Emby 媒体信息");
     }
 
-    await assembleArt(dir);
+    const art = await assembleArt(dir);
+    // 消息里没有可用图片（或图片还没下完且压根没有）→ 用视频随机截帧兜底
+    if (meta.kind !== "art" && art === "none") {
+      let enabled = true;
+      try {
+        enabled = getSettings().auto_cover_frames && getSettings().emby_meta;
+      } catch {
+        enabled = false;
+      }
+      if (enabled) await autoCoversFromVideo(filePath, dir);
+    }
   } catch (err) {
     logger.warn({ err: (err as Error).message, dir }, "生成 Emby 媒体信息失败");
   }

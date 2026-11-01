@@ -94,6 +94,13 @@ const stmtFindBySaveName = db.prepare<[number, string | null, string], { id: num
 const stmtRequeue = db.prepare(
   "UPDATE downloads SET status = 'queued', progress = 0, downloaded_bytes = 0, error = NULL, started_at = NULL, finished_at = NULL WHERE id = ?",
 );
+/**
+ * 兜底命名（一链接一文件夹）重名检测：同一个正文前缀已经被别的消息占用时，
+ * 新链接加 `-<消息id>` 后缀，避免两条不同链接挤进同一个文件夹。
+ */
+const stmtLooseDirOwner = db.prepare<[string, number], { id: number }>(
+  "SELECT id FROM downloads WHERE save_dir = ? AND message_id <> ? AND status <> 'skipped' LIMIT 1",
+);
 const stmtSubs = db.prepare<[], Subscription>("SELECT * FROM subscriptions WHERE enabled = 1");
 
 /** 消息内文件以哪种类型为主（相册常常视频+图片混排，取数量最多的那种） */
@@ -171,7 +178,15 @@ const runGroup = db.transaction(
     const naming = planFileNames(
       sourceText,
       media.map((entry) => entry.info),
-      { artCount, artPrefix: String(messageId), artPrefer: artPrefer ?? undefined },
+      {
+        artCount,
+        artPrefix: String(messageId),
+        artPrefer: artPrefer ?? undefined,
+        // 认不出剧名时：一个链接一个文件夹，名字取正文
+        looseFolder: settings.fallback_folder,
+        uniqueLooseDir: (base) =>
+          stmtLooseDirOwner.get(base, messageId) ? `${base}-${messageId}` : base,
+      },
     );
     const caption = parseCaptionMeta(sourceText);
     const airedAt = Number((messages[0] as { date?: number }).date ?? 0) * 1000 || now;

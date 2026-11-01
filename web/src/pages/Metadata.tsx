@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type {
+  CropRect,
   FrameCandidate,
   ImageName,
   ImageScope,
@@ -9,6 +10,7 @@ import type {
   NfoFields,
 } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
+import { CropDialog } from "../components/CropDialog";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
 import {
   IconAlert,
@@ -17,6 +19,7 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconCode,
+  IconCrop,
   IconDownload,
   IconEdit,
   IconImage,
@@ -32,12 +35,12 @@ import { formatBytes, formatDateTime, formatDuration } from "../utils";
 
 /* ------------------------------ 常量 ------------------------------ */
 
-const IMAGE_SLOTS: Array<{ name: ImageName; label: string; ratio: string; hint: string }> = [
-  { name: "poster", label: "海报 poster", ratio: "aspect-[2/3]", hint: "2:3 · 1000×1500" },
-  { name: "landscape", label: "横版 landscape", ratio: "aspect-video", hint: "16:9 · 1920×1080" },
-  { name: "fanart", label: "背景 fanart", ratio: "aspect-video", hint: "16:9 · 1920×1080" },
-  { name: "thumb", label: "缩略图 thumb", ratio: "aspect-video", hint: "16:9 · 1280×720" },
-  { name: "banner", label: "横幅 banner", ratio: "aspect-[1000/185]", hint: "1000×185" },
+const IMAGE_SLOTS: Array<{ name: ImageName; label: string; ratio: string; aspect: number; hint: string }> = [
+  { name: "poster", label: "海报 poster", ratio: "aspect-[2/3]", aspect: 2 / 3, hint: "2:3 · 1000×1500" },
+  { name: "landscape", label: "横版 landscape", ratio: "aspect-video", aspect: 16 / 9, hint: "16:9 · 1920×1080" },
+  { name: "fanart", label: "背景 fanart", ratio: "aspect-video", aspect: 16 / 9, hint: "16:9 · 1920×1080" },
+  { name: "thumb", label: "缩略图 thumb", ratio: "aspect-video", aspect: 16 / 9, hint: "16:9 · 1280×720" },
+  { name: "banner", label: "横幅 banner", ratio: "aspect-[1000/185]", aspect: 1000 / 185, hint: "1000×185" },
 ];
 
 const EMPTY_FIELDS: NfoFields = {
@@ -887,6 +890,18 @@ function ImagePicker({
   // 上传
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  // 手动框选：src 是要框的画面，apply 决定框完拿这张图做什么
+  const [cropper, setCropper] = useState<{ src: string; apply: (crop: CropRect | null) => void } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const openCropper = (src: string, apply: (crop: CropRect | null) => void) => {
+    setCropper({ src, apply });
+  };
+  const closeCropper = () => {
+    if (cropper?.src.startsWith("blob:")) URL.revokeObjectURL(cropper.src);
+    setCropper(null);
+  };
+
   const run = async (fn: () => Promise<unknown>, message: string) => {
     setBusy(true);
     try {
@@ -930,10 +945,30 @@ function ImagePicker({
     }
   };
 
+  /** 先取当前时间点的原始画面，让用户框选，再按框选范围截图落盘 */
+  const cropFrame = async () => {
+    setPreviewing(true);
+    try {
+      const res = await api.framePreview(detail.item.id, at);
+      openCropper(res.url, (crop) => {
+        setCropper(null);
+        void run(
+          () => api.captureFrame(detail.item.id, { at, scope, name, fit, crop }),
+          crop ? "已按框选范围截取封面" : "已从视频截取并写入封面",
+        );
+      });
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   const otherImages = detail.images.filter((img) => !(img.scope === scope && img.name === name));
 
   return (
-    <Modal
+    <>
+      <Modal
       open
       onClose={onClose}
       title={`更换 ${scopeLabel(scope)} · ${slot.label}`}
@@ -945,20 +980,26 @@ function ImagePicker({
             取消
           </Button>
           {tab === "frame" && (
-            <Button
-              size="sm"
-              variant="primary"
-              loading={busy}
-              onClick={() =>
-                void run(
-                  () => api.captureFrame(detail.item.id, { at, scope, name, fit }),
-                  "已从视频截取并写入封面",
-                )
-              }
-            >
-              <IconCamera className="h-3.5 w-3.5" />
-              用 {at.toFixed(1)}s 这一帧
-            </Button>
+            <>
+              <Button size="sm" loading={previewing} onClick={() => void cropFrame()} title="拖动选框指定要截取的画面范围">
+                <IconCrop className="h-3.5 w-3.5" />
+                框选这一帧
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                loading={busy}
+                onClick={() =>
+                  void run(
+                    () => api.captureFrame(detail.item.id, { at, scope, name, fit }),
+                    "已从视频截取并写入封面",
+                  )
+                }
+              >
+                <IconCamera className="h-3.5 w-3.5" />
+                用 {at.toFixed(1)}s 这一帧
+              </Button>
+            </>
           )}
         </>
       }
@@ -1085,9 +1126,18 @@ function ImagePicker({
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (!file) return;
-                void run(() => api.uploadImage(detail.item.id, scope, name, file, fit), "图片已上传并写入封面");
                 e.target.value = "";
+                if (!file) return;
+                // 选完图先让用户框选（比例锁定当前封面类型），再上传
+                const url = URL.createObjectURL(file);
+                openCropper(url, (crop) => {
+                  setCropper(null);
+                  URL.revokeObjectURL(url);
+                  void run(
+                    () => api.uploadImage(detail.item.id, scope, name, file, { fit, crop }),
+                    "图片已上传并写入封面",
+                  );
+                });
               }}
             />
             <button
@@ -1098,7 +1148,7 @@ function ImagePicker({
               {busy ? <Spinner /> : <IconUpload className="h-6 w-6" />}
               <span className="text-[12.5px]">点击选择本地图片（jpg / png / webp，≤ 30MB）</span>
               <span className="text-[11px] text-slate-600">
-                会按 {slot.hint} 缩放，比例不符时
+                选完可以框选画面，比例锁定 {slot.hint.replace(/^([^·]*)·.*$/, "$1").trim()}；不框则按
                 {fit === "contain" ? "留黑边（默认）" : fit === "cover" ? "裁剪" : "拉伸"}
               </span>
             </button>
@@ -1118,12 +1168,17 @@ function ImagePicker({
                       key={cover.file}
                       disabled={busy}
                       onClick={() =>
-                        void run(
-                          () => api.useCoverImage(detail.item.id, { file: cover.file, scope, name, fit }),
-                          "已使用消息原图",
-                        )
+                        openCropper(`/api/messages/cover/${cover.file}`, (crop) => {
+                          setCropper(null);
+                          void run(
+                            () =>
+                              api.useCoverImage(detail.item.id, { file: cover.file, scope, name, fit, crop }),
+                            "已使用消息原图",
+                          );
+                        })
                       }
                       className="overflow-hidden rounded-lg border border-white/10 transition hover:border-brand-400/50 disabled:opacity-50"
+                      title="点一下可以框选画面"
                     >
                       <img
                         src={`/api/messages/cover/${cover.file}`}
@@ -1175,7 +1230,20 @@ function ImagePicker({
           </div>
         )}
       </div>
-    </Modal>
+      </Modal>
+
+      {cropper && (
+        <CropDialog
+          open
+          src={cropper.src}
+          ratio={slot.aspect}
+          targetLabel={slot.hint.replace(/^([^·]*)·.*$/, "$1").trim()}
+          onCancel={closeCropper}
+          onApply={(crop) => cropper.apply(crop)}
+          onUseFull={() => cropper.apply(null)}
+        />
+      )}
+    </>
   );
 }
 

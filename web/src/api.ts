@@ -11,6 +11,7 @@ import type {
   MetadataDetail,
   MetadataListItem,
   FrameCandidate,
+  CropRect,
   NfoFields,
   ImageName,
   ImageScope,
@@ -209,7 +210,14 @@ export const api = {
     }),
   copyImage: (
     id: number,
-    input: { fromScope: ImageScope; fromName: ImageName; toScope: ImageScope; toName: ImageName; fit?: string },
+    input: {
+      fromScope: ImageScope;
+      fromName: ImageName;
+      toScope: ImageScope;
+      toName: ImageName;
+      fit?: string;
+      crop?: CropRect | null;
+    },
   ) =>
     request<{ ok: boolean; url: string }>(`/metadata/${id}/image/copy`, {
       method: "POST",
@@ -217,7 +225,7 @@ export const api = {
     }),
   useCoverImage: (
     id: number,
-    input: { file: string; scope: ImageScope; name: ImageName; fit?: string },
+    input: { file: string; scope: ImageScope; name: ImageName; fit?: string; crop?: CropRect | null },
   ) =>
     request<{ ok: boolean; url: string }>(`/metadata/${id}/image/from-cover`, {
       method: "POST",
@@ -225,20 +233,37 @@ export const api = {
     }),
   captureFrame: (
     id: number,
-    input: { at: number; scope: ImageScope; name: ImageName; fit?: string },
+    input: { at: number; scope: ImageScope; name: ImageName; fit?: string; crop?: CropRect | null },
   ) =>
     request<{ ok: boolean; at: number; url: string }>(`/metadata/${id}/frame`, {
       method: "POST",
       body: JSON.stringify(input),
     }),
+  /** 取某一时间点的原始画面，供「框选画面」预览 */
+  framePreview: (id: number, at: number) =>
+    request<{ ok: boolean; at: number; width: number | null; height: number | null; url: string }>(
+      `/metadata/${id}/frame/preview`,
+      { method: "POST", body: JSON.stringify({ at }) },
+    ),
   frameCandidates: (id: number, count = 8) =>
     request<{ items: FrameCandidate[]; duration: number }>(`/metadata/${id}/frames`, {
       method: "POST",
       body: JSON.stringify({ count }),
     }),
   /** 上传图片：直接以二进制 body 提交，服务端按规格缩放写入（默认留黑边，不裁图） */
-  uploadImage: async (id: number, scope: ImageScope, name: ImageName, file: File, fit = "contain") => {
-    const res = await fetch(`/api/metadata/${id}/image?scope=${scope}&name=${name}&fit=${encodeURIComponent(fit)}`, {
+  uploadImage: async (
+    id: number,
+    scope: ImageScope,
+    name: ImageName,
+    file: File,
+    opts: { fit?: string; crop?: CropRect | null } = {},
+  ) => {
+    const params = new URLSearchParams({ scope, name, fit: opts.fit ?? "contain" });
+    if (opts.crop) {
+      const { x, y, width, height } = opts.crop;
+      params.set("crop", [x, y, width, height].map((n) => n.toFixed(6)).join(","));
+    }
+    const res = await fetch(`/api/metadata/${id}/image?${params.toString()}`, {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: file,

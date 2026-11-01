@@ -8,7 +8,17 @@ import { Download } from "../types";
 import { sanitizeSegment } from "../utils";
 import { decodeMeta, encodeMeta, EmbyMeta } from "../tg/emby";
 import { listCovers } from "../tg/covers";
-import { captureCandidates, captureFrame, ffmpegInfo, probeVideo, type FitMode } from "../tg/ffmpeg";
+import {
+  captureCandidates,
+  captureFrame,
+  captureStill,
+  ffmpegInfo,
+  normalizeCrop,
+  probeVideo,
+  type CropRect,
+  type FitMode,
+} from "../tg/ffmpeg";
+import { loadSharp } from "../tg/sharp";
 import {
   applyFields,
   buildNfo,
@@ -74,6 +84,16 @@ function normalizeFit(value: unknown, fallback: FitMode = DEFAULT_FIT): FitMode 
   return text === "cover" || text === "contain" || text === "stretch" ? (text as FitMode) : fallback;
 }
 
+/** 裁剪框：上传接口用 query 传 "x,y,w,h"，其它接口用 JSON 对象 */
+function parseCropParam(value: unknown): CropRect | null {
+  if (typeof value === "string" && value.trim()) {
+    const parts = value.split(",").map((v) => Number(v.trim()));
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+    return normalizeCrop({ x: parts[0], y: parts[1], width: parts[2], height: parts[3] });
+  }
+  return normalizeCrop(value);
+}
+
 function isImageName(value: unknown): value is ImageName {
   return typeof value === "string" && (IMAGE_NAMES as string[]).includes(value);
 }
@@ -98,28 +118,6 @@ async function listImageFiles(dir: string): Promise<string[]> {
     .sort();
 }
 
-type SharpLike = {
-  (input: string | Buffer): {
-    metadata(): Promise<{ width?: number; height?: number }>;
-    resize(opts: { width: number; height: number; fit: string; position?: string; background?: string }): {
-      jpeg(opts: { quality: number }): { toFile(target: string): Promise<unknown> };
-    };
-  };
-};
-
-let sharpCache: SharpLike | null | undefined;
-
-async function loadSharp(): Promise<SharpLike | null> {
-  if (sharpCache !== undefined) return sharpCache;
-  try {
-    const mod = (await import("sharp")) as unknown as { default?: SharpLike } & SharpLike;
-    sharpCache = (mod.default ?? mod) as SharpLike;
-  } catch {
-    sharpCache = null;
-  }
-  return sharpCache;
-}
-
 async function imageSize(file: string): Promise<{ width: number | null; height: number | null }> {
   const sharp = await loadSharp();
   if (!sharp) return { width: null, height: null };
@@ -136,15 +134,42 @@ async function statFile(file: string) {
   return st && st.isFile() ? { size: st.size, updatedAt: Math.round(st.mtimeMs) } : null;
 }
 
-async function saveBuffer(buffer: Buffer, dest: string, spec: { width: number; height: number }, fit: FitMode) {
+/**
+ * 写一张封面图：先按框选范围裁（如果框了），再缩放到规格尺寸。
+ * 没框选时按 fit 处理（默认留黑边），保证比例不符也不丢画面。
+ */
+async function renderImage(
+  input: string | Buffer,
+  dest: string,
+  spec: { width: number; height: number },
+  fit: FitMode,
+  crop?: CropRect | null,
+): Promise<void> {
   const sharp = await loadSharp();
   await fs.promises.mkdir(path.dirname(dest), { recursive: true });
   if (!sharp) {
-    await fs.promises.writeFile(dest, buffer);
+    if (Buffer.isBuffer(input)) await fs.promises.writeFile(dest, input);
+    else await fs.promises.copyFile(input, dest);
     return;
   }
-  const fitMode = fit === "stretch" ? "fill" : fit;
-  await sharp(buffer)
+
+  let image = sharp(input);
+  if (crop) {
+    // 归一化框选 → 像素矩形，顺手夹到图像范围内，避免 sharp 直接报错
+    const meta = await image.metadata().catch(() => ({ width: 0, height: 0 }));
+    const raw = meta.width ?? 0;
+    const rawHeight = meta.height ?? 0;
+    if (raw > 0 && rawHeight > 0) {
+      const left = Math.min(raw - 1, Math.max(0, Math.round(crop.x * raw)));
+      const top = Math.min(rawHeight - 1, Math.max(0, Math.round(crop.y * rawHeight)));
+      const width = Math.max(1, Math.min(raw - left, Math.round(crop.width * raw)));
+      const height = Math.max(1, Math.min(rawHeight - top, Math.round(crop.height * rawHeight)));
+      image = image.extract({ left, top, width, height });
+    }
+  }
+
+  const fitMode = crop ? "cover" : fit === "stretch" ? "fill" : fit;
+  await image
     .resize({ width: spec.width, height: spec.height, fit: fitMode, position: "attention", background: "#000000" })
     .jpeg({ quality: 92 })
     .toFile(dest);
@@ -585,11 +610,12 @@ metadataRouter.post(
     const target = resolveTarget(row);
     const scope = normalizeScope(req.query.scope);
     const fit = normalizeFit(req.query.fit);
+    const crop = parseCropParam(req.query.crop);
     const file = imagePath(target, scope, name as ImageName);
-    await saveBuffer(buffer, file, IMAGE_SPECS[name], fit);
+    await renderImage(buffer, file, IMAGE_SPECS[name], fit, crop);
     await fs.promises.unlink(`${file}.tmp`).catch(() => undefined);
 
-    logger.info({ id, name, scope, bytes: buffer.length }, "已上传封面图");
+    logger.info({ id, name, scope, bytes: buffer.length, crop: crop ?? undefined }, "已上传封面图");
     res.json({ ok: true, url: `/api/metadata/${id}/image/${scope}/${name}?v=${Date.now()}` });
   }),
 );
@@ -610,29 +636,10 @@ metadataRouter.post(
     const src = imagePath(target, fromScope, fromName);
     assert(fs.existsSync(src), 404, "源图片不存在");
     const dest = imagePath(target, toScope, toName);
-    await writeImageFile(src, dest, IMAGE_SPECS[toName], normalizeFit(req.body?.fit));
+    await renderImage(src, dest, IMAGE_SPECS[toName], normalizeFit(req.body?.fit), parseCropParam(req.body?.crop));
     res.json({ ok: true, url: `/api/metadata/${id}/image/${toScope}/${toName}?v=${Date.now()}` });
   }),
 );
-
-async function writeImageFile(
-  src: string,
-  dest: string,
-  spec: { width: number; height: number },
-  fit: FitMode,
-): Promise<void> {
-  const sharp = await loadSharp();
-  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-  if (!sharp) {
-    await fs.promises.copyFile(src, dest);
-    return;
-  }
-  const fitMode = fit === "stretch" ? "fill" : fit;
-  await sharp(src)
-    .resize({ width: spec.width, height: spec.height, fit: fitMode, position: "attention", background: "#000000" })
-    .jpeg({ quality: 92 })
-    .toFile(dest);
-}
 
 /** 用消息里的图片（data/covers 里的缓存）当封面 */
 metadataRouter.post(
@@ -650,7 +657,7 @@ metadataRouter.post(
     assert(isImageName(name), 400, "未知图片类型");
     const scope = normalizeScope(req.body?.scope);
     const dest = imagePath(target, scope, name);
-    await writeImageFile(src, dest, IMAGE_SPECS[name], normalizeFit(req.body?.fit));
+    await renderImage(src, dest, IMAGE_SPECS[name], normalizeFit(req.body?.fit), parseCropParam(req.body?.crop));
     res.json({ ok: true, url: `/api/metadata/${id}/image/${scope}/${name}?v=${Date.now()}` });
   }),
 );
@@ -724,16 +731,63 @@ metadataRouter.post(
 
     const spec = IMAGE_SPECS[name];
     const dest = imagePath(target, scope, name);
+    const crop = parseCropParam(req.body?.crop);
     await captureFrame(target.video, {
       at,
       out: dest,
       width: spec.width,
       height: spec.height,
       fit: normalizeFit(req.body?.fit),
+      crop,
     });
 
-    logger.info({ id, at, name, scope }, "已从视频截帧生成封面");
+    logger.info({ id, at, name, scope, crop: crop ?? undefined }, "已从视频截帧生成封面");
     res.json({ ok: true, at, url: `/api/metadata/${id}/image/${scope}/${name}?v=${Date.now()}` });
+  }),
+);
+
+/**
+ * 取某一时间点的原始画面（保留原比例），给界面上的「框选画面」用。
+ * 不落地成封面，只是预览，所以放在 data/frames/<id>/preview.jpg，每次覆盖。
+ */
+metadataRouter.post(
+  "/:id/frame/preview",
+  asyncHandler(async (req, res) => {
+    const id = parseId(req.params.id);
+    const row = stmtGet.get(id);
+    assert(row, 404, "记录不存在");
+    const target = resolveTarget(row);
+    assert(fs.existsSync(target.video), 410, "视频文件不在了");
+
+    const probe = await probeVideo(target.video);
+    const duration = probe?.duration ?? null;
+    let at = Number(req.body?.at);
+    if (!Number.isFinite(at) || at < 0) at = duration ? duration * 0.25 : 5;
+    if (duration && at > duration) at = Math.max(0, duration - 0.5);
+
+    const dir = await framesDirOf(id);
+    const file = path.join(dir, "preview.jpg");
+    await captureStill(target.video, at, file, 1280);
+
+    res.json({
+      ok: true,
+      at,
+      width: probe?.width ?? null,
+      height: probe?.height ?? null,
+      url: `/api/metadata/${id}/frame/preview.jpg?v=${Date.now()}`,
+    });
+  }),
+);
+
+metadataRouter.get(
+  "/:id/frame/preview.jpg",
+  asyncHandler(async (req, res) => {
+    const id = parseId(req.params.id);
+    const file = path.join(framesRoot, String(id), "preview.jpg");
+    assert(fs.existsSync(file), 404, "预览帧还没生成");
+    res.setHeader("Cache-Control", "no-cache");
+    res.type("image/jpeg");
+    res.sendFile(file);
   }),
 );
 

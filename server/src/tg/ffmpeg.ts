@@ -218,7 +218,42 @@ export type FitMode = "cover" | "contain" | "stretch";
 /** 默认留黑边：视频比例和封面规格不一致时保住完整画面，不裁掉内容 */
 export const DEFAULT_FIT: FitMode = "contain";
 
-function scaleFilter(width: number, height: number, fit: FitMode): string {
+/** 归一化裁剪框（0~1，相对整帧左上角），来自界面上的手动框选 */
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function clamp01(n: number): number {
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+/** 把界面传来的裁剪框收敛到合法范围（越界、反向、NaN 都兜住） */
+export function normalizeCrop(input: unknown): CropRect | null {
+  if (!input || typeof input !== "object") return null;
+  const raw = input as Record<string, unknown>;
+  const x = clamp01(Number(raw.x));
+  const y = clamp01(Number(raw.y));
+  let width = clamp01(Number(raw.width));
+  let height = clamp01(Number(raw.height));
+  if (width <= 0.001 || height <= 0.001) return null;
+  width = Math.min(width, 1 - x);
+  height = Math.min(height, 1 - y);
+  if (width <= 0.001 || height <= 0.001) return null;
+  return { x, y, width, height };
+}
+
+function scaleFilter(width: number, height: number, fit: FitMode, crop?: CropRect | null): string {
+  if (crop) {
+    // 框选比例本来就等于目标比例，裁完直接缩放到规格尺寸即可
+    const w = crop.width.toFixed(6);
+    const h = crop.height.toFixed(6);
+    const x = crop.x.toFixed(6);
+    const y = crop.y.toFixed(6);
+    return `crop=iw*${w}:ih*${h}:iw*${x}:ih*${y},scale=${width}:${height},setsar=1`;
+  }
   if (fit === "stretch") return `scale=${width}:${height}`;
   if (fit === "contain") {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`;
@@ -226,10 +261,17 @@ function scaleFilter(width: number, height: number, fit: FitMode): string {
   return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
 }
 
-/** 取一帧存成 jpg；at 单位秒 */
+/** 取一帧存成 jpg；at 单位秒，crop 为归一化框选范围 */
 export async function captureFrame(
   file: string,
-  opts: { at: number; out: string; width: number; height: number; fit?: FitMode },
+  opts: {
+    at: number;
+    out: string;
+    width: number;
+    height: number;
+    fit?: FitMode;
+    crop?: CropRect | null;
+  },
 ): Promise<void> {
   const info = await requireFfmpeg();
   const at = Math.max(0, Number(opts.at) || 0);
@@ -248,7 +290,7 @@ export async function captureFrame(
       "-frames:v",
       "1",
       "-vf",
-      scaleFilter(opts.width, opts.height, opts.fit ?? DEFAULT_FIT),
+      scaleFilter(opts.width, opts.height, opts.fit ?? DEFAULT_FIT, opts.crop),
       "-q:v",
       "2",
       opts.out,
@@ -257,6 +299,39 @@ export async function captureFrame(
   );
   const st = await fs.promises.stat(opts.out).catch(() => null);
   if (!st || st.size === 0) throw new Error("截图失败：输出文件为空（该时间点可能没有画面）");
+}
+
+/**
+ * 取一帧原始画面（保留原比例，只限制最大宽度），用于界面上的框选预览。
+ * 交给 sharp 再做裁剪/缩放，比在 ffmpeg 里一次算完更灵活。
+ */
+export async function captureStill(file: string, at: number, out: string, maxWidth = 1280): Promise<void> {
+  const info = await requireFfmpeg();
+  const seconds = Math.max(0, Number(at) || 0);
+  await fs.promises.mkdir(path.dirname(out), { recursive: true });
+  await run(
+    info.ffmpeg as string,
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-ss",
+      seconds.toFixed(3),
+      "-i",
+      file,
+      "-frames:v",
+      "1",
+      "-vf",
+      `scale='min(${maxWidth},iw)':-2`,
+      "-q:v",
+      "3",
+      out,
+    ],
+    60_000,
+  );
+  const st = await fs.promises.stat(out).catch(() => null);
+  if (!st || st.size === 0) throw new Error("截图失败：该时间点没有画面");
 }
 
 /** 均匀抽 count 张候选帧，返回生成的绝对路径与对应时间点 */
@@ -294,7 +369,8 @@ export async function captureCandidates(
           "-frames:v",
           "1",
           "-vf",
-          scaleFilter(320, 180, "cover"),
+          // 候选帧保留原始比例（缩到 320 宽），页面上按原比例显示，方便判断哪一帧能当封面
+          "scale='min(320,iw)':-2",
           "-q:v",
           "4",
           target,

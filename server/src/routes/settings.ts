@@ -76,6 +76,8 @@ settingsRouter.put(
     if (body.cover_images !== undefined) {
       patch.cover_images = clampInt(body.cover_images, 0, 9, current.cover_images);
     }
+    if (body.fallback_folder !== undefined) patch.fallback_folder = Boolean(body.fallback_folder);
+    if (body.auto_cover_frames !== undefined) patch.auto_cover_frames = Boolean(body.auto_cover_frames);
     if (body.bot_enabled !== undefined) patch.bot_enabled = Boolean(body.bot_enabled);
     if (typeof body.ffmpeg_path === "string") patch.ffmpeg_path = body.ffmpeg_path.trim();
     if (typeof body.bot_allow_users === "string") {

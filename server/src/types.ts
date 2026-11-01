@@ -125,6 +125,10 @@ export interface AppSettings {
   emby_meta: boolean;
   /** 每条消息保留几张图片做封面（poster / landscape / fanart） */
   cover_images: number;
+  /** 正文里认不出剧名时，一条链接建一个文件夹，文件夹名取正文内容 */
+  fallback_folder: boolean;
+  /** 消息里没有可用图片时，用 ffmpeg 随机截帧自动生成横版/竖版封面 */
+  auto_cover_frames: boolean;
   /** 启用 Telegram 机器人：给机器人发消息即可控制本程序 */
   bot_enabled: boolean;
   /** 允许操作机器人的 Telegram 用户 ID（逗号分隔）；留空则一律拒绝并回复对方 ID */
@@ -151,6 +155,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   file_template: "{date}/{channel}/{name}",
   emby_meta: true,
   cover_images: 3,
+  fallback_folder: true,
+  auto_cover_frames: true,
   bot_enabled: false,
   bot_allow_users: "",
   bot_notify: true,

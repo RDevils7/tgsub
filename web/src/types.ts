@@ -199,6 +199,10 @@ export interface AppSettings {
   /** 为 Emby 生成 nfo / 封面；开启时图片只留 cover_images 张 */
   emby_meta: boolean;
   cover_images: number;
+  /** 认不出剧名时：一条链接一个文件夹，名字取正文 */
+  fallback_folder: boolean;
+  /** 消息里没图时用 ffmpeg 随机截帧生成封面 */
+  auto_cover_frames: boolean;
   /** Telegram 机器人开关与白名单（token 单独管理，不在这里返回） */
   bot_enabled: boolean;
   bot_allow_users: string;
@@ -352,4 +356,12 @@ export interface FrameCandidate {
   index: number;
   at: number;
   url: string;
+}
+
+/** 归一化裁剪框（0~1，相对整帧左上角），由界面框选得出 */
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }

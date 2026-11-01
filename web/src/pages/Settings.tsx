@@ -861,6 +861,26 @@ export default function Settings() {
           <Toggle checked={draft.emby_meta} onChange={(next) => patch("emby_meta", next)} />
         </div>
 
+        <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
+          <div className="pr-4">
+            <p className="text-[13px] text-slate-200">认不出标题时一链接一文件夹</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
+              正文里没有《剧名》这类标题的视频，单独建一个文件夹，名字取正文首行；关掉则退回按频道建的模板路径
+            </p>
+          </div>
+          <Toggle checked={draft.fallback_folder} onChange={(next) => patch("fallback_folder", next)} />
+        </div>
+
+        <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
+          <div className="pr-4">
+            <p className="text-[13px] text-slate-200">没图时用视频随机截帧当封面</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
+              消息里没有可用图片时，下载完成后用 ffmpeg 随机截几帧，自动挑横版、竖版画面生成 poster / landscape / fanart
+            </p>
+          </div>
+          <Toggle checked={draft.auto_cover_frames} onChange={(next) => patch("auto_cover_frames", next)} />
+        </div>
+
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Field
             label="每条消息保留封面图"
@@ -901,7 +921,15 @@ export default function Settings() {
           <Button
             variant="primary"
             size="sm"
-            onClick={() => void saveSection("emby", ["emby_meta", "cover_images", "ffmpeg_path"])}
+            onClick={() =>
+              void saveSection("emby", [
+                "emby_meta",
+                "cover_images",
+                "fallback_folder",
+                "auto_cover_frames",
+                "ffmpeg_path",
+              ])
+            }
             loading={savingSection === "emby"}
           >
             保存设置
