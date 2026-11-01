@@ -62,6 +62,15 @@ export interface MediaFolderEntry {
   fileCount: number;
   totalSize: number;
   source: "download" | "manual" | "mixed";
+  /**
+   * 这个文件夹由哪些手动来源贡献。
+   *
+   * 手动添加一个上级目录（比如 D:\短剧）时，会按剧集文件夹拆成多条，
+   * 这些条目的 sourceId 都指向同一个来源，删除按钮据此回溯删除。
+   */
+  sourceIds: number[];
+  /** 贡献该文件夹的手动来源路径（去重后） */
+  sourcePaths: string[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -186,6 +195,75 @@ export function scanVideoFiles(dir: string, depth = 0): string[] {
   return out;
 }
 
+/**
+ * 找出目录树里的剧集文件夹，并带上它们各自的视频。
+ *
+ * 手动添加一个上级目录（比如 D:\短剧）时，用户想看到的是里面每一剧一目录，
+ * 而不是把所有视频平铺成一条。所以这里逐层往下找：
+ *
+ * - 目录里直接有视频 → 自己就是剧集文件夹
+ * - 目录下的子目录全是「季目录」（Season 01 / S01 / 第1季）→ 自己仍是剧集文件夹，
+ *   视频收季目录里的（Emby 常见的 剧名/Season 01/ep.mkv 结构）
+ * - 其余情况 → 继续往子目录里找
+ *
+ * 返回值按层级从浅到深排序。
+ */
+export function collectSeriesDirs(root: string, depth = 0): Array<{ dir: string; files: string[] }> {
+  if (depth > MAX_SCAN_DEPTH) return [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const subDirs: string[] = [];
+  const directVideos: string[] = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      subDirs.push(path.join(root, entry.name));
+      continue;
+    }
+    if (entry.isFile() && isVideoFile(entry.name)) directVideos.push(path.join(root, entry.name));
+  }
+
+  // 子目录里还有视频的，先看看是不是「季目录」
+  const subResults = subDirs.map((sub) => ({ sub, result: collectSeriesDirs(sub, depth + 1) }));
+  const seasonSubs = subResults.filter((r) => r.result.length > 0 && isSeasonDir(path.basename(r.sub)));
+
+  // 自己就装着视频 → 自己是一个剧集文件夹
+  if (directVideos.length > 0) {
+    const out: Array<{ dir: string; files: string[] }> = [{ dir: root, files: directVideos }];
+    // 季目录归到自己名下，其余子目录另起一条
+    const seasonSet = new Set(seasonSubs.map((r) => r.sub));
+    for (const r of subResults) {
+      if (seasonSet.has(r.sub)) continue;
+      out.push(...r.result);
+    }
+    return out;
+  }
+
+  // 自己没视频，但子目录全是季目录 → 整季归到自己名下
+  if (seasonSubs.length > 0 && seasonSubs.length === subResults.filter((r) => r.result.length > 0).length) {
+    const files: string[] = [];
+    for (const r of seasonSubs) for (const item of r.result) files.push(...item.files);
+    return [{ dir: root, files }];
+  }
+
+  // 其余情况：展开子目录里找到的剧集文件夹
+  const out: Array<{ dir: string; files: string[] }> = [];
+  for (const r of subResults) out.push(...r.result);
+  return out;
+}
+
+/** 季目录名：Season 01 / Season1 / S01 / 第1季 */
+const SEASON_DIR_RE = /^(?:season|s)[\s._-]*\d{1,2}$|^第\s*\d{1,2}\s*季$/i;
+
+export function isSeasonDir(name: string): boolean {
+  return SEASON_DIR_RE.test(String(name ?? "").trim());
+}
+
 function statSize(file: string): number {
   try {
     return fs.statSync(file).size;
@@ -202,8 +280,11 @@ const stmtDoneVideos = db.prepare<[], Download>(
  * 汇总所有可见的文件夹。
  *
  * - 项目下载的：按 file_path 所在目录聚合
- * - 手动添加的目录：递归扫描目录里的视频
+ * - 手动添加的目录：按剧集文件夹拆开（里面的每一剧各成一条）
  * - 手动添加的文件：并入它所在的目录
+ *
+ * 手动来源的归属记在 folder.sourceIds / sourcePaths 上，
+ * 供前端显示「删除」按钮——删的是来源，不是磁盘文件。
  */
 export function collectFolders(): MediaFolderEntry[] {
   const folders = new Map<string, MediaFolderEntry>();
@@ -221,6 +302,8 @@ export function collectFolders(): MediaFolderEntry[] {
         fileCount: 0,
         totalSize: 0,
         source: "manual",
+        sourceIds: [],
+        sourcePaths: [],
       };
       folders.set(key, folder);
     }
@@ -252,6 +335,15 @@ export function collectFolders(): MediaFolderEntry[] {
     folder.totalSize += size;
   };
 
+  /** 记住这个文件夹是被哪些手动来源带出来的 */
+  const linkSource = (folder: MediaFolderEntry, source: MediaSourceRow): void => {
+    if (!folder.sourceIds.includes(source.id)) folder.sourceIds.push(source.id);
+    if (!folder.sourcePaths.includes(source.path)) folder.sourcePaths.push(source.path);
+    // 手动来源只带出「文件」时，整条都是手动来源
+    if (folder.source === "download") folder.source = "mixed";
+    else folder.source = "manual";
+  };
+
   // 1) 项目下载的文件
   for (const row of stmtDoneVideos.all()) {
     if (!row.file_path) continue;
@@ -265,13 +357,23 @@ export function collectFolders(): MediaFolderEntry[] {
   for (const source of stmtSources.all()) {
     const abs = path.resolve(source.path);
     if (source.kind === "dir") {
-      const folder = ensureFolder(abs);
-      if (folder.source === "download") folder.source = "mixed";
-      for (const file of scanVideoFiles(abs)) addFile(folder, file);
+      // 上级目录 → 拆成里面每一剧（剧集文件夹）
+      const seriesDirs = collectSeriesDirs(abs);
+      if (seriesDirs.length === 0) {
+        // 一层都没拆出来（目录里没有视频），仍然登记一条，方便用户看到来源
+        const folder = ensureFolder(abs);
+        linkSource(folder, source);
+        continue;
+      }
+      for (const item of seriesDirs) {
+        const folder = ensureFolder(item.dir);
+        linkSource(folder, source);
+        for (const file of item.files) addFile(folder, file);
+      }
     } else {
       const dir = path.dirname(abs);
       const folder = ensureFolder(dir);
-      if (folder.source === "download") folder.source = "mixed";
+      linkSource(folder, source);
       addFile(folder, abs);
     }
   }

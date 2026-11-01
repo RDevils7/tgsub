@@ -127,6 +127,9 @@ export default function Metadata() {
   const [picker, setPicker] = useState<{ scope: ImageScope; name: ImageName } | null>(null);
   const [imageScope, setImageScope] = useState<ImageScope>("series");
   const [addOpen, setAddOpen] = useState(false);
+  /** 待删除的手动来源（文件夹行上的删除按钮） */
+  const [removeTarget, setRemoveTarget] = useState<{ folder: MetadataFolderItem; ids: number[] } | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -261,6 +264,32 @@ export default function Metadata() {
     });
   };
 
+  /**
+   * 移除手动来源。
+   *
+   * 删的是「来源」而不是磁盘文件 —— 手动添加一个上级目录会被拆成多个剧集文件夹，
+   * 它们都指向同一个来源，删掉之后这些条目就不再出现。
+   */
+  const removeSources = async (ids: number[]) => {
+    setRemoving(true);
+    try {
+      for (const id of ids) {
+        try {
+          await api.removeMetadataSource(id);
+        } catch {
+          // 单个失败不影响其余来源的移除
+        }
+      }
+      toast.push("已移除手动来源（磁盘文件未改动）", "success");
+      setRemoveTarget(null);
+      await fetchList(page, true);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const isFolderTarget = detail?.target.kind === "folder";
   const scopes: ImageScope[] = isFolderTarget ? ["series"] : ["series", "episode"];
 
@@ -370,8 +399,30 @@ export default function Metadata() {
                           <span>· {folder.imageCount} 图</span>
                           <span>· {formatBytes(folder.totalSize)}</span>
                         </span>
+                        {folder.sourcePaths.length > 0 && (
+                          <span
+                            className="mt-1 block truncate font-mono text-[10px] text-slate-600"
+                            title={folder.sourcePaths.join("\n")}
+                          >
+                            来自 {folder.sourcePaths[0]}
+                            {folder.sourcePaths.length > 1 ? ` 等 ${folder.sourcePaths.length} 个来源` : ""}
+                          </span>
+                        )}
                       </span>
                     </button>
+
+                    {/* 手动来源可以移除（只删登记，不动磁盘文件） */}
+                    {folder.sourceIds.length > 0 && (
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        className="mt-0.5 shrink-0 !px-1.5 !py-1"
+                        onClick={() => setRemoveTarget({ folder, ids: folder.sourceIds })}
+                        title="移除手动来源（不删除磁盘文件）"
+                      >
+                        <IconTrash className="h-3 w-3" />
+                      </Button>
+                    )}
                   </div>
 
                   {/* 子级：文件夹里的每个视频 */}
@@ -645,6 +696,50 @@ export default function Metadata() {
           await fetchList(page, true);
         }}
       />
+
+      {/* 移除手动来源的二次确认 */}
+      <Modal
+        open={Boolean(removeTarget)}
+        onClose={() => setRemoveTarget(null)}
+        title="移除手动来源"
+        width="max-w-md"
+        footer={
+          <>
+            <Button size="sm" onClick={() => setRemoveTarget(null)} disabled={removing}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              loading={removing}
+              onClick={() => void removeSources(removeTarget?.ids ?? [])}
+            >
+              <IconTrash className="h-3.5 w-3.5" />
+              移除
+            </Button>
+          </>
+        }
+      >
+        {removeTarget && (
+          <div className="space-y-2 text-[12.5px] leading-relaxed text-slate-400">
+            <p>
+              将从元数据页移除「
+              <span className="text-slate-200">{removeTarget.folder.name}</span>
+              」这条记录及其来源。
+            </p>
+            <ul className="space-y-1 rounded-lg border border-white/[0.07] bg-white/[0.02] p-2 font-mono text-[11px] text-slate-500">
+              {removeTarget.folder.sourcePaths.map((p) => (
+                <li key={p} className="truncate" title={p}>
+                  {p}
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11.5px] text-slate-500">
+              只移除登记，磁盘上的视频、NFO 与封面都不会被删除。
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -1126,11 +1221,21 @@ function AddSourceDialog({
                   className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5"
                 >
                   <IconFolder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                  <span
-                    className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-slate-300"
-                    title={source.path}
-                  >
-                    {source.path}
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className="block truncate font-mono text-[11.5px] text-slate-300"
+                      title={source.path}
+                    >
+                      {source.path}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[10.5px] text-slate-500">
+                      {source.kind === "dir" ? "目录" : "文件"}
+                      {source.fileCount > 0 && ` · ${source.fileCount} 个视频`}
+                      {source.folderCount > 1 &&
+                        ` · 展开为 ${source.folderCount} 个剧集：${source.folderNames.join("、")}`}
+                      {source.folderCount === 1 && source.folderNames[0] &&
+                        ` · 剧集「${source.folderNames[0]}」`}
+                    </span>
                   </span>
                   <Badge className="shrink-0 border-white/10 bg-white/[0.04] text-slate-400">
                     {source.kind === "dir" ? "目录" : "文件"}
@@ -1147,6 +1252,11 @@ function AddSourceDialog({
                 </li>
               ))}
             </ul>
+          )}
+          {sources.length > 0 && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+              添加一个上级目录时，会自动按里面的剧集文件夹拆开显示；移除来源不会删除磁盘文件。
+            </p>
           )}
         </div>
 

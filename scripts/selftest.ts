@@ -355,6 +355,61 @@ async function acheck(name: string, fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** 剧集目录拆分：手动添加上级目录时按剧集文件夹展开 */
+async function seriesDirChecks(): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const { collectSeriesDirs, isSeasonDir } = await import("../server/src/tg/mediatree");
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-tree-"));
+  const touch = async (rel: string): Promise<void> => {
+    const full = path.join(root, rel);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, "x");
+  };
+
+  // 短剧/美人局/S01E01.mp4、短剧/美人局/S01E02.mp4、短剧/我的妈妈徐秋曼/S01E01.mp4
+  await touch("短剧/美人局/美人局S01E01.mp4");
+  await touch("短剧/美人局/美人局S01E02.mp4");
+  await touch("短剧/我的妈妈徐秋曼/我的妈妈徐秋曼S01E01.mp4");
+  // 季目录结构：剧名/Season 01/ep.mkv
+  await touch("季结构/我的剧/Season 01/我的剧S01E01.mp4");
+  await touch("季结构/我的剧/Season 01/我的剧S01E02.mp4");
+
+  await acheck("手动目录按剧集文件夹拆开", async () => {
+    const series = collectSeriesDirs(path.join(root, "短剧"));
+    const names = series.map((s) => path.basename(s.dir)).sort();
+    assert.deepEqual(names, ["我的妈妈徐秋曼", "美人局"]);
+    // 每部剧只收自己的视频，不串味
+    const mei = series.find((s) => path.basename(s.dir) === "美人局");
+    assert.equal(mei?.files.length, 2);
+  });
+
+  await acheck("剧集目录本身有视频时不再往下拆", async () => {
+    const series = collectSeriesDirs(path.join(root, "短剧", "美人局"));
+    assert.equal(series.length, 1);
+    assert.equal(series[0].dir, path.join(root, "短剧", "美人局"));
+    assert.equal(series[0].files.length, 2);
+  });
+
+  await acheck("季目录结构归到剧名目录下", async () => {
+    const series = collectSeriesDirs(path.join(root, "季结构", "我的剧"));
+    assert.equal(series.length, 1);
+    assert.equal(series[0].dir, path.join(root, "季结构", "我的剧"));
+    assert.equal(series[0].files.length, 2);
+  });
+
+  check("季目录名识别", () => {
+    assert.equal(isSeasonDir("Season 01"), true);
+    assert.equal(isSeasonDir("S01"), true);
+    assert.equal(isSeasonDir("第1季"), true);
+    assert.equal(isSeasonDir("美人局"), false);
+    assert.equal(isSeasonDir("Season"), false);
+  });
+
+  await fs.rm(root, { recursive: true, force: true });
+}
+
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
@@ -362,8 +417,7 @@ async function embyChecks(): Promise<void> {
   const { encodeMeta, finalizeMedia } = await import("../server/src/tg/emby");
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-emby-"));
-  for (const item of [
-    { file: ".art-1.jpg", width: 1920, height: 1080 },
+  for (const item of [    { file: ".art-1.jpg", width: 1920, height: 1080 },
     { file: ".art-2.jpg", width: 1080, height: 1920 },
     { file: ".art-3.jpg", width: 1280, height: 720 },
   ]) {
@@ -421,6 +475,12 @@ async function embyChecks(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  try {
+    await seriesDirChecks();
+  } catch (err) {
+    console.error(`  \u2717 剧集目录用例异常: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
   try {
     await embyChecks();
   } catch (err) {

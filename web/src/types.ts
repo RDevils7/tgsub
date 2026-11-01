@@ -286,6 +286,10 @@ export interface MetadataFolderItem {
   fileCount: number;
   totalSize: number;
   source: "download" | "manual" | "mixed";
+  /** 贡献该文件夹的手动来源 id（删除按钮据此回溯移除来源） */
+  sourceIds: number[];
+  /** 贡献该文件夹的手动来源路径 */
+  sourcePaths: string[];
   /** tvshow.nfo 是否存在 */
   nfoExists: boolean;
   /** 剧集封面是否存在 */
@@ -303,6 +307,12 @@ export interface MetadataSource {
   title: string | null;
   created_at: number;
   key: string;
+  /** 这个来源展开成几个剧集文件夹 */
+  folderCount: number;
+  /** 展开后的剧集文件夹名 */
+  folderNames: string[];
+  /** 覆盖的视频数 */
+  fileCount: number;
 }
 
 /** 服务端目录浏览结果 */

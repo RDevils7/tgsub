@@ -434,6 +434,9 @@ metadataRouter.get(
           fileCount: folder.fileCount,
           totalSize: folder.totalSize,
           source: folder.source,
+          /** 贡献该文件夹的手动来源（删除按钮据此回溯移除来源） */
+          sourceIds: folder.sourceIds,
+          sourcePaths: folder.sourcePaths,
           nfoExists: showNfo,
           posterExists: poster,
           imageCount,
@@ -468,14 +471,25 @@ metadataRouter.get(
 metadataRouter.get(
   "/sources",
   asyncHandler(async (_req, res) => {
-    const items = listSources().map((source) => ({
-      id: source.id,
-      path: source.path,
-      kind: source.kind,
-      title: source.title,
-      created_at: source.created_at,
-      key: encodePath(source.path),
-    }));
+    // 一个上级目录会按剧集文件夹拆成多条，展开数量告诉用户他将看到什么
+    const folders = collectFolders();
+    const items = listSources().map((source) => {
+      const matched = folders.filter((f) => f.sourceIds.includes(source.id));
+      return {
+        id: source.id,
+        path: source.path,
+        kind: source.kind,
+        title: source.title,
+        created_at: source.created_at,
+        key: encodePath(source.path),
+        /** 这个来源展开成几个剧集文件夹 */
+        folderCount: matched.length,
+        /** 展开后的剧集文件夹名 */
+        folderNames: matched.map((f) => f.name),
+        /** 覆盖的视频数 */
+        fileCount: matched.reduce((sum, f) => sum + f.fileCount, 0),
+      };
+    });
     res.json({ items });
   }),
 );
