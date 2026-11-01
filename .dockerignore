@@ -3,6 +3,7 @@ node_modules
 server/dist
 web/dist
 data
+downloads
 .tmpdata
 docs
 .git
@@ -14,7 +15,7 @@ docs
 !.env.example
 README.md
 docker-compose.yml
-docker-compose.ghcr.yml
+docker-compose.build.yml
 Dockerfile
 .dockerignore
 .DS_Store

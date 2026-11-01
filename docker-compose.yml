@@ -1,20 +1,37 @@
+# tgsub 部署配置 —— 直接拉取 GHCR 镜像，不在本机编译
+#
+#   docker compose up -d
+#
+# 镜像地址：ghcr.io/rdevils7/tgsub:latest
+# 锁定版本：IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
+#
+# 本文件用「宿主机的两个目录」持久化：
+#   ① DATA_HOST_DIR     → 容器 /data      数据库、加密 session、封面缓存、临时截图
+#   ② DOWNLOAD_HOST_DIR → 容器 /downloads 实际下载的视频 / 图片 / 剧集目录
+# 两个目录可以在不同磁盘上（下载目录通常占空间，建议指向大容量盘）。
+#
+# 首次部署（Linux）：
+#   mkdir -p data downloads && sudo chown -R 1000:1000 data downloads
+#   # 容器内以 node(1000) 运行，宿主机目录属主必须是 1000:1000，否则写入失败
+#
+# 从旧版本（下载文件在 ./data/downloads 内）升级：
+#   mv data/downloads/* downloads/ && rmdir data/downloads
+
 services:
   tgsub:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        # 国内网络可改为 https://registry.npmmirror.com
-        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
-    image: tgsub:1.0.0
+    image: ${IMAGE:-ghcr.io/rdevils7/tgsub:latest}
     container_name: tgsub
     restart: unless-stopped
     init: true
     ports:
+      # 宿主机端口 → 容器 3000
       - "${APP_PORT:-3000}:3000"
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      # ① 数据持久化目录（容器内）
       DATA_DIR: /data
+      # ② 下载目录（容器内）
+      DOWNLOAD_DIR: /downloads
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # 加密 Telegram session 的密钥；留空则首次启动自动生成并保存在 /data
       SESSION_SECRET: ${SESSION_SECRET:-}
@@ -22,9 +39,12 @@ services:
       BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
       BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-}
     volumes:
-      # 宿主机 ./data 下同时存放数据库与下载的文件
-      # Linux 首次部署请先执行：mkdir -p data && sudo chown -R 1000:1000 data
-      - ./data:/data
+      # ① 数据持久化目录：数据库 tgsub.db、加密 session、封面缓存、临时截图
+      #    换容器、重装镜像都不丢；备份这个目录即可恢复全部配置与记录
+      - "${DATA_HOST_DIR:-./data}:/data"
+      # ② 下载目录：实际下载的媒体文件（视频 / 图片 / nfo / 封面）
+      #    可单独挂到另一块大盘上，容器删除后文件仍在
+      - "${DOWNLOAD_HOST_DIR:-./downloads}:/downloads"
     healthcheck:
       test:
         [
@@ -46,6 +66,3 @@ services:
       resources:
         limits:
           memory: 1G
-
-  # 可选：需要走 SOCKS5 代理访问 Telegram 时，可复用宿主机上的代理服务
-  # 在设置页填写 socks5://host.docker.internal:7897 即可

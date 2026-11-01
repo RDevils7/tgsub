@@ -1,0 +1,58 @@
+# 本地构建镜像后部署（会在这台机器上跑一遍依赖安装 + 前端打包，耗时较长）
+#
+#   docker compose -f docker-compose.build.yml up -d --build
+#
+# 只想用现成镜像？请改用默认的 docker-compose.yml（拉取 ghcr.io/rdevils7/tgsub:latest）。
+#
+# 持久化目录与默认 compose 完全一致：
+#   ① DATA_HOST_DIR     → 容器 /data      数据库、加密 session、封面缓存、临时截图
+#   ② DOWNLOAD_HOST_DIR → 容器 /downloads 实际下载的视频 / 图片 / 剧集目录
+
+services:
+  tgsub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内网络可改为 https://registry.npmmirror.com
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    image: tgsub:local
+    container_name: tgsub
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATA_DIR: /data
+      DOWNLOAD_DIR: /downloads
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
+      BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-}
+    volumes:
+      # ① 数据持久化目录
+      - "${DATA_HOST_DIR:-./data}:/data"
+      # ② 下载目录
+      - "${DOWNLOAD_HOST_DIR:-./downloads}:/downloads"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G

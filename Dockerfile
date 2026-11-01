@@ -91,13 +91,14 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     DATA_DIR=/data \
+    DOWNLOAD_DIR=/downloads \
     TZ=Asia/Shanghai
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /data/downloads \
- && chown -R node:node /data /app
+ && mkdir -p /data /downloads \
+ && chown -R node:node /data /downloads /app
 
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json
@@ -107,7 +108,10 @@ COPY --from=build --chown=node:node /app/web/dist ./web/dist
 
 USER node
 EXPOSE 3000
-VOLUME ["/data"]
+
+# ① 数据持久化目录：数据库、加密 session、封面缓存、临时截图
+# ② 下载目录：实际下载的视频 / 图片 / 剧集目录
+VOLUME ["/data", "/downloads"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

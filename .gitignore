@@ -6,6 +6,7 @@ web/dist/
 
 # 运行时数据：数据库、下载文件、封面缓存、session 密钥
 data/
+downloads/
 .tmpdata/
 *.log
 

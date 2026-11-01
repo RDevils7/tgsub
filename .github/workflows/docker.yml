@@ -56,6 +56,31 @@ jobs:
           curl -fsS -o /dev/null -w "首页 HTTP %{http_code}\n" http://127.0.0.1:3000/
           docker rm -f tgsub-smoke
 
+      - name: 验证两个持久化目录都能写（数据 / 下载分离）
+        run: |
+          mkdir -p "$RUNNER_TEMP/tgsub-data" "$RUNNER_TEMP/tgsub-downloads"
+          chmod -R 777 "$RUNNER_TEMP/tgsub-data" "$RUNNER_TEMP/tgsub-downloads"
+          docker run -d --name tgsub-vol \
+            -v "$RUNNER_TEMP/tgsub-data:/data" \
+            -v "$RUNNER_TEMP/tgsub-downloads:/downloads" \
+            tgsub:smoke
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          # 容器内以 node(1000) 运行，必须能往两个挂载点写
+          docker exec tgsub-vol node -e "
+            const fs = require('fs');
+            fs.writeFileSync('/data/.probe', 'x');
+            fs.writeFileSync('/downloads/.probe', 'x');
+            console.log('dataDir/downloadDir 写入正常');
+          " || { docker logs tgsub-vol; exit 1; }
+          # 宿主机侧应能看到容器写入的文件，确认挂载生效
+          test -f "$RUNNER_TEMP/tgsub-data/.probe" || { echo "数据目录未挂载生效"; exit 1; }
+          test -f "$RUNNER_TEMP/tgsub-downloads/.probe" || { echo "下载目录未挂载生效"; exit 1; }
+          echo "持久化目录校验通过"
+          docker rm -f tgsub-vol
+
   # 2) 测试通过后再发布多架构镜像（amd64 + arm64）到 GHCR
   publish:
     name: 发布到 GHCR（amd64 + arm64）

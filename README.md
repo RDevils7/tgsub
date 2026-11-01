@@ -23,7 +23,7 @@
 - [工作原理](#工作原理)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
-  - [方式一：从 GHCR 拉取镜像（推荐，免编译）](#方式一从-ghcr-拉取镜像推荐免编译)
+  - [方式一：Docker Compose 拉取 GHCR 镜像（推荐，免编译）](#方式一docker-compose-拉取-ghcr-镜像推荐免编译)
   - [方式二：Docker Compose 本地构建](#方式二docker-compose-本地构建)
   - [方式三：本地运行](#方式三本地运行)
   - [首次配置](#首次配置)
@@ -157,9 +157,9 @@ flowchart TB
   BOT[Telegram Bot] --> SVC
   API --> SVC[扫描 · 下载 · 命名 · Emby]
   SVC --> TG[gramjs MTProto<br/>可选 SOCKS5]
-  SVC --> DB[(SQLite WAL)]
-  SVC --> FS[(data/downloads)]
-  SVC --> CV[(data/covers<br/>封面缓存)]
+  SVC --> DB[(SQLite WAL<br/>DATA_DIR)]
+  SVC --> FS[(DOWNLOAD_DIR<br/>下载目录)]
+  SVC --> CV[(DATA_DIR/covers<br/>封面缓存)]
 ```
 
 关键设计：
@@ -194,44 +194,62 @@ flowchart TB
 - Docker 部署：Docker 20.10+ 与 docker compose v2
 - 本地运行：Node.js ≥ 20（推荐 22）、Python 3 与 C++ 构建工具（`better-sqlite3` 原生模块）
 
-### 方式一：从 GHCR 拉取镜像（推荐，免编译）
+### 方式一：Docker Compose 拉取 GHCR 镜像（推荐，免编译）
 
 项目每次推送到 `main` 或打 `v*` 标签，GitHub Actions 会自动构建 **amd64 + arm64** 双架构镜像并发布到
-GitHub Container Registry，服务器上不用装 Node、不用编译，直接拉取运行：
+GitHub Container Registry。服务器上不用装 Node、不用编译，仓库自带的 `docker-compose.yml` 直接
+拉 `ghcr.io/rdevils7/tgsub:latest` 就能跑。
+
+**持久化目录（compose 里已配好，两个目录可分别指向不同磁盘）**
+
+| 宿主机目录 | 容器内路径 | 存放内容 | 说明 |
+| --- | --- | --- | --- |
+| `./data` | `/data` | SQLite 数据库 `tgsub.db`、加密后的 Telegram session、会话密钥 `.session-secret`、封面缓存 `covers/`、临时截图 `frames/`、运行日志 | **数据持久化目录**。换容器、重装镜像都不丢；备份它即可恢复全部配置与记录 |
+| `./downloads` | `/downloads` | 实际下载的媒体文件：视频 / 图片 / nfo / 封面，按 `{date}/{channel}/{name}` 归档 | **下载目录**。体积大，可单独挂到另一块大容量磁盘 |
+
+两个路径都写在 `.env` 里，想换位置直接改：
 
 ```bash
-mkdir -p tgsub && cd tgsub
-mkdir -p data && sudo chown -R 1000:1000 data   # Linux 必需：容器内以 node(1000) 运行
-
-docker pull ghcr.io/rdevils7/tgsub:latest
-docker run -d --name tgsub \
-  -p 3000:3000 \
-  -v "$(pwd)/data:/data" \
-  -e TZ=Asia/Shanghai \
-  --restart unless-stopped \
-  ghcr.io/rdevils7/tgsub:latest
+DATA_HOST_DIR=/opt/tgsub/data        # 数据持久化目录
+DOWNLOAD_HOST_DIR=/mnt/nas/tgsub     # 下载目录（可指向 NAS / 大容量盘）
 ```
 
-或者用仓库里现成的 compose 文件（端口、认证、密钥都读 `.env`）：
+**部署步骤**
 
 ```bash
 git clone https://github.com/RDevils7/tgsub.git
 cd tgsub
-cp .env.example .env
-mkdir -p data && sudo chown -R 1000:1000 data
+cp .env.example .env                # 按需改端口、认证、密钥、两个持久化目录
 
-docker compose -f docker-compose.ghcr.yml up -d
-docker compose -f docker-compose.ghcr.yml logs -f
+# 建目录并把属主交给容器内的 node(1000) 用户；Linux 上不做这步会写入失败
+mkdir -p data downloads
+sudo chown -R 1000:1000 data downloads
+
+docker compose up -d                # 默认就是拉 ghcr.io/rdevils7/tgsub:latest
+docker compose logs -f
 ```
+
+启动后访问 `http://<服务器IP>:3000`。
 
 常用运维命令：
 
 ```bash
-docker compose -f docker-compose.ghcr.yml pull     # 拉取最新镜像
-docker compose -f docker-compose.ghcr.yml up -d     # 用新镜像重建容器
-docker compose -f docker-compose.ghcr.yml logs -f --tail=200
-docker compose -f docker-compose.ghcr.yml down      # 停止，数据保留在 ./data
+docker compose pull                 # 拉取最新镜像
+docker compose up -d                # 用新镜像重建容器（数据保留）
+docker compose logs -f --tail=200
+docker compose down                 # 停止容器，数据保留在 ./data 与 ./downloads
 ```
+
+> 如果不用 compose，也可以直接 `docker run`：
+>
+> ```bash
+> docker pull ghcr.io/rdevils7/tgsub:latest
+> docker run -d --name tgsub -p 3000:3000 \
+>   -v "$(pwd)/data:/data" \
+>   -v "$(pwd)/downloads:/downloads" \
+>   -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
+>   --restart unless-stopped ghcr.io/rdevils7/tgsub:latest
+> ```
 
 **可用标签**
 
@@ -244,8 +262,8 @@ docker compose -f docker-compose.ghcr.yml down      # 停止，数据保留在 .
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署
-IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose -f docker-compose.ghcr.yml up -d
+# 锁定版本部署：改 .env 里的 IMAGE，或临时用环境变量覆盖
+IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
 ```
 
 > **镜像仓库是公开的**，任何人都能 `docker pull`；如果你的 fork 想保持私有，需要在
@@ -254,21 +272,23 @@ IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose -f docker-compose.ghcr.yml up
 
 ### 方式二：Docker Compose 本地构建
 
-想改代码、或需要自定义镜像时用这个（会在本机跑一遍 `npm ci` + 前端打包，耗时较长）：
+想改代码、或需要自定义镜像时用这个（会在本机跑一遍依赖安装 + 前端打包，耗时较长）。
+compose 文件是 `docker-compose.build.yml`，持久化目录与方式一完全一致：
 
 ```bash
 git clone https://github.com/RDevils7/tgsub.git
 cd tgsub
 
-cp .env.example .env          # 按需修改端口、认证、密钥
-mkdir -p data
-sudo chown -R 1000:1000 data  # Linux 必需：容器内以 node(1000) 运行
+cp .env.example .env          # 按需修改端口、认证、密钥、两个持久化目录
+mkdir -p data downloads
+sudo chown -R 1000:1000 data downloads   # Linux 必需：容器内以 node(1000) 运行
 
-docker compose up -d --build
-docker compose logs -f
+docker compose -f docker-compose.build.yml up -d --build
+docker compose -f docker-compose.build.yml logs -f
 ```
 
-打开 `http://<服务器IP>:3000` 即可。容器内数据目录固定为 `/data`，映射到宿主机 `./data`。
+打开 `http://<服务器IP>:3000` 即可。容器内数据目录固定为 `/data`，下载目录固定为 `/downloads`，
+分别映射到宿主机 `./data` 与 `./downloads`（可在 `.env` 里改）。
 
 > 国内构建慢：在 `.env` 里把 `NPM_REGISTRY` 改为 `https://registry.npmmirror.com`。
 > 若 `better-sqlite3` 预编译包下载失败，Dockerfile 会自动回退源码编译（镜像内置工具链）。
@@ -279,7 +299,7 @@ docker compose logs -f
 docker compose ps
 docker compose restart          # 优雅重启（SIGTERM，会先断开 Telegram）
 docker compose logs -f --tail=200
-docker compose down             # 停止，数据保留在 ./data
+docker compose down             # 停止，数据保留在 ./data 与 ./downloads
 ```
 
 ### 方式三：本地运行
@@ -296,7 +316,7 @@ npm start                       # 生产模式，默认 http://127.0.0.1:3000
 npm run dev
 ```
 
-本地运行时数据默认写入 `./data`，可用 `DATA_DIR`、`DOWNLOAD_DIR`、`DB_FILE` 覆盖。
+本地运行时数据默认写入 `./data`（下载文件在 `./data/downloads`），可用 `DATA_DIR`、`DOWNLOAD_DIR`、`DB_FILE` 覆盖。
 
 > **Windows 用户注意**：直接关终端或 `taskkill` 不会触发 SIGTERM，Telegram 连接被硬切断可能让 session 失效。
 > 请用内置优雅退出接口，等端口释放后再启动新进程：
@@ -364,14 +384,17 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | --- | --- | --- |
 | `PORT` | `3000` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
-| `DATA_DIR` | `./data` | 数据目录（数据库、下载文件、封面缓存、密钥） |
-| `DOWNLOAD_DIR` | `$DATA_DIR/downloads` | 下载根目录 |
+| `DATA_DIR` | `./data` | 数据目录（数据库、session、封面缓存、密钥）；Docker 里为 `/data` |
+| `DOWNLOAD_DIR` | `$DATA_DIR/downloads` | 下载根目录；Docker 里为 `/downloads`，与数据目录分开挂载 |
 | `DB_FILE` | `$DATA_DIR/tgsub.db` | SQLite 文件路径 |
 | `WEB_DIST` | `./web/dist` | 前端静态资源目录 |
 | `SESSION_SECRET` | 自动生成 | 加密 session 的密钥（≥16 位）；更换后需重新登录 |
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置后启用 HTTP Basic 认证 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `TZ` | `Asia/Shanghai` | 时区，影响日志与按天分目录 |
+| `IMAGE` | `ghcr.io/rdevils7/tgsub:latest` | **仅 compose**：要拉取的镜像地址（可换成 `v1.0.0` 等固定版本） |
+| `DATA_HOST_DIR` | `./data` | **仅 compose**：宿主机数据持久化目录 → 容器 `/data` |
+| `DOWNLOAD_HOST_DIR` | `./downloads` | **仅 compose**：宿主机下载目录 → 容器 `/downloads` |
 | `NPM_REGISTRY` | 官方源 | **仅构建期**，Docker 构建时的 npm 源 |
 
 ### 界面设置项
@@ -475,16 +498,25 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 ## 数据、备份与迁移
 
-| 路径 | 内容 |
-| --- | --- |
-| `data/tgsub.db`（+ `-wal` / `-shm`） | 频道、订阅、下载记录、监控历史、设置、加密 session |
-| `data/downloads/` | 实际下载的文件（按模板或剧集目录归档） |
-| `data/covers/` | 悬停预览与下载共用的封面缓存 |
-| `data/.session-secret` | 自动生成的加密密钥（未设置 `SESSION_SECRET` 时） |
+Docker 部署时目录被拆成两处（可在 `.env` 里改）：
 
-- **备份**：直接打包整个 `data` 目录（建议先 `POST /api/shutdown` 或 `docker compose stop`，让 WAL 落盘）。
-- **恢复**：还原 `data` 并保持 `SESSION_SECRET`（或 `.session-secret`）不变，否则 session 解不开，需要重新扫码。
-- **容量**：单个 4K 影片可能几十 GB，`data` 建议放在空间充足的分区；Docker 部署时把 `./data` 指向大容量磁盘即可。
+| 宿主机目录（compose 默认） | 容器内路径 | 内容 |
+| --- | --- | --- |
+| `./data` | `/data` | `tgsub.db`（+ `-wal`/`-shm`）：频道、订阅、下载记录、监控历史、设置、加密 session；`.session-secret` 自动生成的密钥；`covers/` 悬停预览与下载共用的封面缓存；`frames/` 截帧临时文件；`app.log` 运行日志 |
+| `./downloads` | `/downloads` | 实际下载的文件（按 `{date}/{channel}/{name}` 模板或剧集目录归档），含视频、图片、nfo、封面 |
+
+本地运行时两者都在 `data/` 下：`data/` 为数据目录，`data/downloads/` 为下载目录（由 `DOWNLOAD_DIR` 控制）。
+
+- **备份**：打包数据目录（Docker 部署即 `./data`）即可恢复全部配置与记录；下载文件在 `./downloads`，可按需单独备份。建议先 `POST /api/shutdown` 或 `docker compose stop`，让 SQLite 的 WAL 落盘。
+- **恢复**：还原数据目录并保持 `SESSION_SECRET`（或 `.session-secret`）不变，否则 session 解不开，需要重新扫码。
+- **容量**：单个 4K 影片可能几十 GB，下载目录务必放在空间充足的分区；Docker 部署时把 `DOWNLOAD_HOST_DIR` 指向大容量磁盘（甚至 NAS）即可，数据目录单独留在本机。
+- **迁移到新目录布局**（从旧版 `./data/downloads` 改成独立下载目录）：
+  ```bash
+  docker compose down
+  mkdir -p downloads && mv data/downloads/* downloads/ && rmdir data/downloads
+  sudo chown -R 1000:1000 data downloads
+  docker compose up -d
+  ```
 
 ---
 
@@ -522,11 +554,12 @@ tgsub/
 │       ├── api.ts / types.ts / utils.ts
 │       └── index.css           # Tailwind 主题
 ├── scripts/                    # 自检与诊断脚本（见下）
-├── data/                       # 运行时数据（不提交）
+├── data/                       # 运行时数据（不提交）：数据库、session、封面缓存、日志
+├── downloads/                  # 运行时下载目录（不提交）：视频 / 图片 / nfo / 封面
 ├── .github/workflows/docker.yml # CI：构建镜像并发布到 GHCR
-├── Dockerfile                  # 三阶段构建
-├── docker-compose.yml          # 本地构建部署
-├── docker-compose.ghcr.yml     # 直接拉取 GHCR 镜像部署
+├── Dockerfile                  # 四阶段构建
+├── docker-compose.yml          # 拉取 GHCR 镜像部署（默认，数据 / 下载目录分开挂载）
+├── docker-compose.build.yml    # 本地构建镜像后部署
 └── .env.example
 ```
 
