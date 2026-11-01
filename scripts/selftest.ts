@@ -17,6 +17,7 @@ import {
 import {
   channelEntityKey,
   channelMessageLink,
+  fixTelegramLink,
   markedChannelId,
   normalizeEntityKey,
 } from "../server/src/tg/entity";
@@ -319,6 +320,11 @@ check("旧版多出来的 -NN 序号被去掉", () => {
   assert.equal(stripLegacyIndex("我的妈妈徐秋曼S01E01.mp4"), null);
   assert.equal(stripLegacyIndex(".art-1373-1.jpg"), null);
   assert.equal(stripLegacyIndex("老板今天又发飙了-01.mp4"), null);
+});
+check("私有频道的失效链接改成 t.me/c/", () => {
+  assert.equal(fixTelegramLink("https://t.me/4457697592/1374"), "https://t.me/c/4457697592/1374");
+  assert.equal(fixTelegramLink("https://t.me/ASC2256/10500"), "https://t.me/ASC2256/10500");
+  assert.equal(fixTelegramLink(null), null);
 });
 
 /** 文件类用例：需要 await，单独提供异步断言入口 */

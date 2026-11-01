@@ -10,7 +10,7 @@ import { acquireInstanceLock } from "./lib/instance";
 import { onShutdown } from "./lib/lifecycle";
 import { TgError, disconnectClient, handleDeadSessionError, isConfigured, startAuthWatchdog } from "./tg/client";
 import { downloader } from "./tg/downloader";
-import { repairLegacySeriesNames } from "./tg/legacy";
+import { repairLegacyArtifacts } from "./tg/legacy";
 import { startScheduler } from "./tg/scanner";
 import { startBot, stopBot } from "./tg/bot";
 import { authRouter } from "./routes/auth";
@@ -139,13 +139,15 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 // 先拿单实例锁：并发连接会让 Telegram 直接作废 authKey，代价是重新扫码
 acquireInstanceLock(path.join(env.dataDir, ".instance.lock"));
 
-// 修正历史剧集文件名：旧版多带了一截「-NN」序号，数据库与磁盘文件一起改名。
-// 放在下载队列启动之前，避免重试时生成「(2)」副本或留下孤儿文件。
+// 修正历史剧集文件名（旧版多带了一截「-NN」序号）与私有频道的失效链接，
+// 数据库与磁盘文件一起改。放在下载队列启动之前，避免重试时生成「(2)」副本或留下孤儿文件。
 try {
-  const fixed = repairLegacySeriesNames();
-  if (fixed > 0) logger.info({ count: fixed }, "已修正历史剧集文件名");
+  const report = repairLegacyArtifacts();
+  if (report.renamed || report.links) {
+    logger.info(report, "已修正历史剧集文件名与消息链接");
+  }
 } catch (err) {
-  logger.warn({ err: (err as Error).message }, "修正历史剧集文件名失败");
+  logger.warn({ err: (err as Error).message }, "修正历史剧集数据失败");
 }
 
 const server = app.listen(env.port, env.host, () => {

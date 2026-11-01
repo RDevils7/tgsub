@@ -3,15 +3,21 @@ import path from "node:path";
 import { db } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
+import { decodeMeta, encodeMeta } from "./emby";
+import { fixTelegramLink } from "./entity";
 import { stripLegacyIndex } from "./naming";
 
 /**
- * 历史命名修复。
+ * 历史数据修复。
  *
- * 旧版给剧集文件加了一截序号：「美人局S01E04-04.mp4」；
- * 新规则只要「美人局S01E04.mp4」。命名逻辑本身已经改对，
- * 但 downloads.save_name 是入队时就写死的，重试不会重算，
- * 所以历史记录（以及磁盘上已经下好的文件）还得单独收拾一遍。
+ * 两件事，都是同一个根因带来的：
+ *
+ * 1. 旧版给剧集文件加了一截序号（「美人局S01E04-04.mp4」）。命名逻辑本身已经改对，
+ *    但 downloads.save_name 是入队时就写死的，重试不会重算，
+ *    所以历史记录（以及磁盘上已经下好的文件）还得单独收拾一遍。
+ *
+ * 2. 旧版给私有频道生成的消息链接是 t.me/<裸号>/<消息ID>，那个地址根本打不开，
+ *    被写进了 nfo 的 uniqueid。
  */
 
 /** 目标路径必须落在下载目录内，防止数据库里的脏数据把文件写到别处 */
@@ -21,11 +27,24 @@ function isInsideDownloadDir(target: string): boolean {
   return full === root || full.startsWith(root + path.sep);
 }
 
+/** 同一目录下与媒体文件配套的 nfo 路径 */
+function nfoPathOf(dir: string, fileName: string): string {
+  return path.join(dir, `${path.basename(fileName, path.extname(fileName))}.nfo`);
+}
+
 interface LegacyRow {
   id: number;
   save_dir: string | null;
   save_name: string;
   file_path: string | null;
+  emby_json: string | null;
+}
+
+export interface RepairReport {
+  /** 修正了文件名的记录数 */
+  renamed: number;
+  /** 修正了失效链接的记录数 */
+  links: number;
 }
 
 /**
@@ -37,56 +56,80 @@ interface LegacyRow {
  *
  * 幂等：改完再跑一次不会重复改名。
  */
-export function repairLegacySeriesNames(): number {
+export function repairLegacyArtifacts(): RepairReport {
   const rows = db
     .prepare<[], LegacyRow>(
-      "SELECT id, save_dir, save_name, file_path FROM downloads WHERE save_name IS NOT NULL",
+      "SELECT id, save_dir, save_name, file_path, emby_json FROM downloads WHERE save_name IS NOT NULL",
     )
     .all();
 
-  let fixed = 0;
+  const report: RepairReport = { renamed: 0, links: 0 };
   for (const row of rows) {
-    const nextName = stripLegacyIndex(row.save_name);
-    if (!nextName || nextName === row.save_name) continue;
-
     const dir = row.save_dir ? path.join(env.downloadDir, row.save_dir) : env.downloadDir;
-    const oldPath = path.join(dir, row.save_name);
-    const newPath = path.join(dir, nextName);
-    if (!isInsideDownloadDir(oldPath) || !isInsideDownloadDir(newPath)) continue;
+    const nextName = stripLegacyIndex(row.save_name);
 
-    let renamed = false;
     let filePath: string | null = row.file_path;
-    if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
-      try {
-        fs.renameSync(oldPath, newPath);
-        renamed = true;
-        // 配套的 .nfo 跟着改名（finalizeMedia 按视频基名写 .nfo）
-        const oldStem = path.basename(row.save_name, path.extname(row.save_name));
-        const newStem = path.basename(nextName, path.extname(nextName));
-        const oldNfo = path.join(dir, `${oldStem}.nfo`);
-        const newNfo = path.join(dir, `${newStem}.nfo`);
-        if (oldStem !== newStem && fs.existsSync(oldNfo) && !fs.existsSync(newNfo)) {
-          fs.renameSync(oldNfo, newNfo);
+    if (nextName && nextName !== row.save_name) {
+      const oldPath = path.join(dir, row.save_name);
+      const newPath = path.join(dir, nextName);
+      if (isInsideDownloadDir(oldPath) && isInsideDownloadDir(newPath)) {
+        let renamed = false;
+        if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+          try {
+            fs.renameSync(oldPath, newPath);
+            renamed = true;
+            // 配套的 .nfo 跟着改名（finalizeMedia 按视频基名写 .nfo）
+            const oldNfo = nfoPathOf(dir, row.save_name);
+            const newNfo = nfoPathOf(dir, nextName);
+            if (oldNfo !== newNfo && fs.existsSync(oldNfo) && !fs.existsSync(newNfo)) {
+              fs.renameSync(oldNfo, newNfo);
+            }
+            if (row.file_path && isInsideDownloadDir(row.file_path)) filePath = newPath;
+          } catch (err) {
+            logger.warn(
+              { err: (err as Error).message, file: row.save_name },
+              "历史剧集文件改名失败，已跳过磁盘改名",
+            );
+          }
         }
-        if (row.file_path && isInsideDownloadDir(row.file_path)) filePath = newPath;
-      } catch (err) {
-        logger.warn(
-          { err: (err as Error).message, file: row.save_name },
-          "历史剧集文件改名失败，已跳过磁盘改名",
+
+        db.prepare("UPDATE downloads SET save_name = ?, file_path = ? WHERE id = ?").run(
+          nextName,
+          filePath,
+          row.id,
+        );
+        report.renamed += 1;
+        logger.info(
+          { id: row.id, from: row.save_name, to: nextName, renamed },
+          "已修正剧集文件名（去掉多余的序号）",
         );
       }
     }
 
-    db.prepare("UPDATE downloads SET save_name = ?, file_path = ? WHERE id = ?").run(
-      nextName,
-      filePath,
+    // 私有频道的旧链接（t.me/<裸号>/<消息ID>）打不开，一并纠正
+    const meta = decodeMeta(row.emby_json);
+    if (!meta || !meta.link) continue;
+    const fixedLink = fixTelegramLink(meta.link);
+    if (!fixedLink || fixedLink === meta.link) continue;
+    db.prepare("UPDATE downloads SET emby_json = ? WHERE id = ?").run(
+      encodeMeta({ ...meta, link: fixedLink }),
       row.id,
     );
-    fixed += 1;
-    logger.info(
-      { id: row.id, from: row.save_name, to: nextName, renamed },
-      "已修正剧集文件名（去掉多余的序号）",
-    );
+    // 已经写好的 nfo 里也有这个链接，就地替换
+    for (const name of [row.save_name, nextName].filter(Boolean) as string[]) {
+      const nfoPath = nfoPathOf(dir, name);
+      if (!isInsideDownloadDir(nfoPath) || !fs.existsSync(nfoPath)) continue;
+      try {
+        const text = fs.readFileSync(nfoPath, "utf8");
+        if (text.includes(meta.link)) {
+          fs.writeFileSync(nfoPath, text.split(meta.link).join(fixedLink), "utf8");
+        }
+      } catch (err) {
+        logger.warn({ err: (err as Error).message, nfo: path.basename(nfoPath) }, "修正 nfo 里的消息链接失败");
+      }
+    }
+    report.links += 1;
+    logger.info({ id: row.id, from: meta.link, to: fixedLink }, "已修正剧集消息链接");
   }
-  return fixed;
+  return report;
 }

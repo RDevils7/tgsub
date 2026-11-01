@@ -59,3 +59,14 @@ export function channelMessageLink(channel: ChannelRef, messageId: number | stri
   const internal = channelInternalId(channel.tg_id);
   return internal ? `https://t.me/c/${internal}/${messageId}` : "";
 }
+
+/**
+ * 修正旧版生成的失效链接：t.me/<裸号>/<消息ID> → t.me/c/<裸号>/<消息ID>。
+ * 裸号不是用户名，那个地址打不开，已经被写进 nfo 的 uniqueid 了。
+ */
+export function fixTelegramLink(link: string | null | undefined): string | null {
+  if (!link) return link ?? null;
+  const matched = /^https:\/\/t\.me\/(\d+)\/(\d+)$/.exec(link);
+  if (!matched) return link;
+  return `https://t.me/c/${matched[1]}/${matched[2]}`;
+}
