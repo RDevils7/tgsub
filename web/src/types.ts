@@ -203,6 +203,8 @@ export interface AppSettings {
   bot_enabled: boolean;
   bot_allow_users: string;
   bot_notify: boolean;
+  /** ffmpeg 可执行文件路径，留空则自动查找 */
+  ffmpeg_path: string;
   has_session?: boolean;
 }
 
@@ -245,4 +247,109 @@ export interface QrState {
   elapsedMs: number;
   qrDataUrl: string | null;
   auth?: AuthState;
+}
+
+/* ------------------------------ 元数据 ------------------------------ */
+
+export type ImageName = "poster" | "landscape" | "fanart" | "thumb" | "banner";
+export type ImageScope = "series" | "episode";
+
+export interface MetadataListItem {
+  id: number;
+  file_name: string;
+  save_name: string | null;
+  save_dir: string | null;
+  channel_title: string;
+  message_id: number;
+  file_size: number;
+  finished_at: number | null;
+  series: string | null;
+  season: number | null;
+  episode: number | null;
+  title: string;
+  videoExists: boolean;
+  nfoExists: boolean;
+  showNfoExists: boolean;
+  posterExists: boolean;
+  imageCount: number;
+  posterUrl: string | null;
+}
+
+export interface NfoFields {
+  title: string;
+  originaltitle: string;
+  showtitle: string;
+  season: string;
+  episode: string;
+  year: string;
+  aired: string;
+  premiered: string;
+  plot: string;
+  outline: string;
+  studio: string;
+  rating: string;
+  tags: string[];
+  genres: string[];
+}
+
+export interface VideoProbe {
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  bitrate: number | null;
+  fps: number | null;
+  container: string | null;
+  sizeBytes: number | null;
+}
+
+export interface FfmpegInfo {
+  available: boolean;
+  ffmpeg: string | null;
+  ffprobe: string | null;
+  source: "settings" | "env" | "bundled" | "path" | null;
+  version: string | null;
+  error: string | null;
+}
+
+export interface MetadataImage {
+  scope: ImageScope;
+  name: ImageName;
+  label: string;
+  file: string;
+  size: number;
+  updatedAt: number;
+  width: number | null;
+  height: number | null;
+  url: string;
+}
+
+export interface NfoSlotInfo {
+  exists: boolean;
+  file: string;
+  path?: string;
+  size: number;
+  nested: boolean;
+  editable: boolean;
+}
+
+export interface MetadataDetail {
+  item: DownloadItem;
+  pathError: string | null;
+  paths: { dir: string; video: string; base: string; dirName: string } | null;
+  video: { exists: boolean; size: number; probe: VideoProbe | null } | null;
+  nfo: { episode: NfoSlotInfo | null; show: NfoSlotInfo | null };
+  images: MetadataImage[];
+  extras: Array<{ file: string; url: string }>;
+  fields: { episode: NfoFields; show: NfoFields };
+  meta: Record<string, unknown> | null;
+  ffmpeg: FfmpegInfo;
+  covers: Array<{ file: string; index: number }>;
+}
+
+export interface FrameCandidate {
+  index: number;
+  at: number;
+  url: string;
 }

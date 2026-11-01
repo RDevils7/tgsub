@@ -8,6 +8,13 @@ import type {
   DownloadItem,
   MessagePreview,
   MessageLog,
+  MetadataDetail,
+  MetadataListItem,
+  FrameCandidate,
+  NfoFields,
+  ImageName,
+  ImageScope,
+  FfmpegInfo,
   QrState,
   ScanState,
   SettingsResponse,
@@ -168,4 +175,77 @@ export const api = {
       body: JSON.stringify({ session }),
     }),
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+
+  /* ------------------------------ 元数据 ------------------------------ */
+  metadataItems: (params: { q?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    return request<{ items: MetadataListItem[]; total: number; limit: number; offset: number }>(
+      `/metadata/items?${qs}`,
+    );
+  },
+  metadataDetail: (id: number) => request<MetadataDetail>(`/metadata/${id}`),
+  metadataTools: (refresh = false) =>
+    request<{ ffmpeg: FfmpegInfo; sharp: boolean; settings: { ffmpeg_path: string } }>(
+      `/metadata/tools/status${refresh ? "?refresh=1" : ""}`,
+    ),
+  saveMetaFields: (id: number, kind: "episode" | "show", fields: NfoFields) =>
+    request<{ ok: boolean; nfo: string; fields: NfoFields }>(`/metadata/${id}/meta`, {
+      method: "PUT",
+      body: JSON.stringify({ kind, fields }),
+    }),
+  readNfo: (id: number, kind: "episode" | "show") =>
+    request<{ exists: boolean; file: string; content: string }>(`/metadata/${id}/nfo/${kind}`),
+  saveNfoRaw: (id: number, kind: "episode" | "show", content: string) =>
+    request<{ ok: boolean }>(`/metadata/${id}/nfo`, {
+      method: "PUT",
+      body: JSON.stringify({ kind, content }),
+    }),
+  deleteImage: (id: number, scope: ImageScope, name: ImageName) =>
+    request<{ ok: boolean; removed: boolean }>(`/metadata/${id}/image/${scope}/${name}`, {
+      method: "DELETE",
+    }),
+  copyImage: (
+    id: number,
+    input: { fromScope: ImageScope; fromName: ImageName; toScope: ImageScope; toName: ImageName; fit?: string },
+  ) =>
+    request<{ ok: boolean; url: string }>(`/metadata/${id}/image/copy`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  useCoverImage: (
+    id: number,
+    input: { file: string; scope: ImageScope; name: ImageName; fit?: string },
+  ) =>
+    request<{ ok: boolean; url: string }>(`/metadata/${id}/image/from-cover`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  captureFrame: (
+    id: number,
+    input: { at: number; scope: ImageScope; name: ImageName; fit?: string },
+  ) =>
+    request<{ ok: boolean; at: number; url: string }>(`/metadata/${id}/frame`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  frameCandidates: (id: number, count = 8) =>
+    request<{ items: FrameCandidate[]; duration: number }>(`/metadata/${id}/frames`, {
+      method: "POST",
+      body: JSON.stringify({ count }),
+    }),
+  /** 上传图片：直接以二进制 body 提交，服务端按规格缩放写入 */
+  uploadImage: async (id: number, scope: ImageScope, name: ImageName, file: File) => {
+    const res = await fetch(`/api/metadata/${id}/image?scope=${scope}&name=${name}&fit=cover`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const text = await res.text();
+    const data = text ? (JSON.parse(text) as { url?: string; error?: string }) : {};
+    if (!res.ok) throw new ApiError(res.status, data.error || `上传失败 (${res.status})`);
+    return data as { url: string };
+  },
 };

@@ -10,6 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

@@ -6,6 +6,7 @@ import {
   IconBroadcast,
   IconDashboard,
   IconDownload,
+  IconImage,
   IconInbox,
   IconLink,
   IconMenu,
@@ -20,10 +21,19 @@ import Subscriptions from "./pages/Subscriptions";
 import Downloads from "./pages/Downloads";
 import Manual from "./pages/Manual";
 import Monitor from "./pages/Monitor";
+import Metadata from "./pages/Metadata";
 import SettingsPage from "./pages/Settings";
 import { formatCountdown } from "./utils";
 
-type PageKey = "dashboard" | "channels" | "subscriptions" | "monitor" | "manual" | "downloads" | "settings";
+type PageKey =
+  | "dashboard"
+  | "channels"
+  | "subscriptions"
+  | "monitor"
+  | "manual"
+  | "downloads"
+  | "metadata"
+  | "settings";
 
 const NAV: Array<{ key: PageKey; label: string; icon: React.ReactNode }> = [
   { key: "dashboard", label: "概览", icon: <IconDashboard className="h-[17px] w-[17px]" /> },
@@ -32,6 +42,7 @@ const NAV: Array<{ key: PageKey; label: string; icon: React.ReactNode }> = [
   { key: "monitor", label: "监控历史", icon: <IconInbox className="h-[17px] w-[17px]" /> },
   { key: "manual", label: "手动下载", icon: <IconLink className="h-[17px] w-[17px]" /> },
   { key: "downloads", label: "下载记录", icon: <IconDownload className="h-[17px] w-[17px]" /> },
+  { key: "metadata", label: "元数据", icon: <IconImage className="h-[17px] w-[17px]" /> },
   { key: "settings", label: "设置", icon: <IconSettings className="h-[17px] w-[17px]" /> },
 ];
 
@@ -42,6 +53,7 @@ const TITLES: Record<PageKey, { title: string; desc: string }> = {
   monitor: { title: "监控历史", desc: "每条被扫描到的消息及其命中结果，可追溯到原消息" },
   manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接，直接下载，不用等关键词命中" },
   downloads: { title: "下载记录", desc: "查看、重试与导出已抓取的文件" },
+  metadata: { title: "元数据", desc: "编辑已下载视频的 NFO 与封面，可从视频截图" },
   settings: { title: "设置", desc: "账号登录、扫描策略与下载参数" },
 };
 
@@ -242,6 +254,7 @@ function Shell() {
           {page === "monitor" && <Monitor />}
           {page === "manual" && <Manual />}
           {page === "downloads" && <Downloads />}
+          {page === "metadata" && <Metadata />}
           {page === "settings" && <SettingsPage />}
         </div>
       </main>

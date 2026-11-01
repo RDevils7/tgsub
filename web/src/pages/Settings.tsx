@@ -875,7 +875,19 @@ export default function Settings() {
               onChange={(e) => patch("cover_images", Math.max(0, Math.min(9, Number(e.target.value) || 0)))}
             />
           </Field>
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3 sm:col-span-2">
+          <Field
+            label="ffmpeg 路径"
+            hint="用于「元数据」页从视频截帧；留空自动使用内置二进制或系统 PATH 里的 ffmpeg"
+            className="sm:col-span-2"
+          >
+            <input
+              className="field font-mono text-[12.5px]"
+              placeholder="留空自动查找，例如 C:/ffmpeg/bin/ffmpeg.exe"
+              value={draft.ffmpeg_path}
+              onChange={(e) => patch("ffmpeg_path", e.target.value)}
+            />
+          </Field>
+          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3 sm:col-span-3">
             <p className="text-[11px] uppercase tracking-wider text-slate-500">落盘结构</p>
             <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed text-slate-400">{`美人局/
   美人局S01E04.mp4
@@ -889,7 +901,7 @@ export default function Settings() {
           <Button
             variant="primary"
             size="sm"
-            onClick={() => void saveSection("emby", ["emby_meta", "cover_images"])}
+            onClick={() => void saveSection("emby", ["emby_meta", "cover_images", "ffmpeg_path"])}
             loading={savingSection === "emby"}
           >
             保存设置

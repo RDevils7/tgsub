@@ -131,6 +131,8 @@ export interface AppSettings {
   bot_allow_users: string;
   /** 扫描发现新内容时主动推送摘要 */
   bot_notify: boolean;
+  /** ffmpeg 可执行文件路径；留空则自动查找（内置 npm 包 → PATH） */
+  ffmpeg_path: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -152,4 +154,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bot_enabled: false,
   bot_allow_users: "",
   bot_notify: true,
+  ffmpeg_path: "",
 };

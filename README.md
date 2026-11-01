@@ -87,6 +87,17 @@
   裁剪依赖可选的 `sharp`，装不上时退化为原图复制，不影响下载。
 - 「悬停预览用哪 3 张」与「下载用哪 3 张」保持一致：预览选中的序号会缓存到 `data/covers/`，下载时沿用。
 
+### 元数据编辑
+
+- **独立的「元数据」页**：左侧列出所有已下载视频，右侧分三块编辑——基本信息（标题 / 剧名 / 季集 / 首播 / 简介 / 标签）、
+  图片（poster、landscape、fanart、thumb、banner）、NFO 原文；顶部同时显示时长、分辨率、编码、码率、帧率。
+- **表单改 NFO 不破坏手写内容**：保存时只替换目标标签，`<uniqueid>`、注释、自定义标签原样保留；
+  检测到嵌套标签（如 `<actor>`）时会禁用表单，只能用原文编辑，避免误伤。
+- **ffmpeg 截帧当封面**：播放器拖到任意时间点截图，或一键抽 8 张候选帧挑选；目标尺寸按图片类型自动缩放，
+  可选「裁剪铺满 / 留黑边 / 拉伸」。ffmpeg 来自内置的静态二进制，也可在设置里指定自己的路径。
+- **图片来源四种**：视频截帧、上传本地图片、消息原图（下载时用的那 3 张）、复制目录里已有的图；
+  剧集级与单集级（`剧名S01E04-poster.jpg`）都能设置，改完在 Emby 里「刷新元数据 → 替换现有图片」即可生效。
+
 ### 管理界面
 
 概览统计、频道列表、订阅关键词、监控历史、手动下载、下载记录、设置（含在线登录 Telegram）。
@@ -123,6 +134,16 @@ React 18 + Vite + TailwindCSS，无 UI 框架，深色玻璃质感，桌面与�
 | 设置 / 扫码登录 | 机器人 |
 | --- | --- |
 | ![设置](docs/ui-settings-qr.png) | ![机器人](docs/shots/bot-online.png) |
+
+**元数据编辑**
+
+| 基本信息 | 图片（含 ffmpeg 截帧） |
+| --- | --- |
+| ![元数据-基本信息](docs/shots/meta-basic.png) | ![元数据-图片](docs/shots/meta-images.png) |
+
+| 从视频截图 | NFO 原文 |
+| --- | --- |
+| ![截帧](docs/shots/meta-picker.png) | ![NFO](docs/shots/meta-nfo.png) |
 
 **队列管控（暂停 / 停止 / 继续 / 插队）**
 
@@ -175,7 +196,7 @@ flowchart TB
 | Telegram | [gramjs](https://github.com/gram-js/gramjs)（MTProto，支持 SOCKS5 代理、扫码登录、bot 双模式） |
 | 存储 | SQLite（better-sqlite3，WAL 模式） |
 | 前端 | React 18 + Vite 6 + TailwindCSS 3（无 UI 框架） |
-| 图像 | sharp（可选，封面裁剪） |
+| 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg + ffprobe 静态二进制（截帧与媒体探测） |
 | 日志 | pino（结构化 JSON） |
 | 部署 | Docker 多阶段构建 + docker compose（单容器，Express 同时托管前端） |
 
@@ -326,6 +347,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 存储路径模板 | `{date}/{channel}/{name}` | 见下 |
 | 生成 Emby 元信息 | 开 | 写出 nfo 与三张封面 |
 | 封面图片数量 | 3 | 每条消息挑几张图做封面 |
+| ffmpeg 路径 | 空 | 「元数据」页截帧用；留空自动查找内置二进制或系统 PATH |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
 
 路径模板变量：`{date}`（按天分目录）、`{channel}`、`{name}`、`{id}`。
@@ -385,6 +407,17 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | GET | `/api/messages/:id/preview` | 悬停预览：完整正文 + 3 张封面 |
 | GET | `/api/messages/cover/:file` | 封面图（带文件名白名单校验，防目录穿越） |
 | DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
+| GET | `/api/metadata/items` | 可编辑的已下载视频列表（`q`、`limit`、`offset`） |
+| GET | `/api/metadata/:id` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
+| PUT | `/api/metadata/:id/meta` | 按表单保存单集 / 剧集 NFO（只替换目标标签） |
+| GET / PUT | `/api/metadata/:id/nfo/:kind` | 读取 / 覆盖 NFO 原文（`kind=episode\|show`） |
+| POST | `/api/metadata/:id/frame` | 用 ffmpeg 截取 `at` 秒那一帧写成指定图片 |
+| POST | `/api/metadata/:id/frames` | 均匀抽一组候选帧，供页面挑选 |
+| POST | `/api/metadata/:id/image` | 上传图片（二进制 body，`name` / `scope` / `fit` 查询参数） |
+| POST | `/api/metadata/:id/image/copy`、`image/from-cover` | 复制已有图片 / 用消息原图替换 |
+| DELETE | `/api/metadata/:id/image/:scope/:name` | 删除某张图片 |
+| GET | `/api/metadata/:id/video` | 视频流（支持 Range，供页面拖进度条选帧） |
+| GET | `/api/metadata/tools/status` | ffmpeg / sharp 可用性（`refresh=1` 强制重新探测） |
 | GET / PUT | `/api/settings` | 读取 / 保存界面设置 |
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
 | GET | `/api/scan/state`、POST `/api/scan` | 扫描状态 / 触发扫描 |
@@ -429,13 +462,15 @@ tgsub/
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
 │   │   │   ├── emby.ts         # nfo 生成、三张封面裁剪合成
+│   │   │   ├── nfo.ts          # NFO 解析与就地改写（只替换目标标签）
+│   │   │   ├── ffmpeg.ts       # ffmpeg/ffprobe 定位、媒体探测、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
-│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / settings / system
+│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / settings / system
 │   └── dist/                   # 构建产物（不提交）
 ├── web/
 │   └── src/
-│       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、设置
+│       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、元数据、设置
 │       ├── components/         # UI 基础组件、图标、Toast
 │       ├── api.ts / types.ts / utils.ts
 │       └── index.css           # Tailwind 主题
@@ -484,6 +519,11 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 4. 最后手段：等 24 小时自然解除。
 
 另外先回 my.telegram.org 首页看应用列表——建过的话直接复用已有 `api_id` / `api_hash`，不用新建。填表时 URL 可留空，平台选 **Desktop**。
+
+**元数据页点「抽帧」提示未找到 ffmpeg**
+项目依赖里已经带了 `@ffmpeg-installer/ffmpeg` 与 `@ffprobe-installer/ffprobe` 的静态二进制，正常安装无需额外配置。
+若提示找不到，按顺序检查：`node_modules/@ffmpeg-installer` 是否完整（`npm ci` 可修复）；Docker 部署时是否用了自定义镜像把 devDependencies 之外的东西裁掉；
+再不行到「设置 → Emby 媒体库 → ffmpeg 路径」手动填一个绝对路径，保存后回元数据页点右上角刷新即可。
 
 **扫码登录失败 / 二维码加载不出来**
 先确认代理已保存且可用。二维码 30 秒自动轮换，一直卡在「等待扫描…」时检查手机是否为同一账号、入口是否为「设置 → 设备 → 链接桌面设备」。连续多次生成会重建连接，不要在页面上反复点击。

@@ -271,3 +271,31 @@ export const IconSend = (p: Props) => (
     <path d="M21 3l-6.5 18-3.5-7.5L3.5 10 21 3z" />
   </Svg>
 );
+
+export const IconCamera = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 8.5h2.6L8 6h8l1.4 2.5H20a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 20 19.5H4A1.5 1.5 0 0 1 2.5 18v-8A1.5 1.5 0 0 1 4 8.5Z" />
+    <circle cx="12" cy="13.5" r="3.2" />
+  </Svg>
+);
+
+export const IconUpload = (p: Props) => (
+  <Svg {...p}>
+    <path d="M12 15.5V4.2m0 0L7.8 8.4M12 4.2l4.2 4.2" />
+    <path d="M4.5 15.5v2.8a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2.8" />
+  </Svg>
+);
+
+export const IconCode = (p: Props) => (
+  <Svg {...p}>
+    <path d="m9 8-4.5 4L9 16M15 8l4.5 4L15 16" />
+  </Svg>
+);
+
+export const IconImage = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+    <path d="m4 16 4.6-4.6 3.4 3.4 2.6-2.6L20 17" />
+    <circle cx="8.4" cy="9.4" r="1.4" />
+  </Svg>
+);

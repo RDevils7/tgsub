@@ -17,6 +17,7 @@ import { channelsRouter } from "./routes/channels";
 import { subscriptionsRouter } from "./routes/subscriptions";
 import { downloadsRouter } from "./routes/downloads";
 import { messagesRouter } from "./routes/messages";
+import { metadataRouter } from "./routes/metadata";
 import { settingsRouter } from "./routes/settings";
 import { systemRouter } from "./routes/system";
 
@@ -67,6 +68,7 @@ app.use("/api/channels", channelsRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/downloads", downloadsRouter);
 app.use("/api/messages", messagesRouter);
+app.use("/api/metadata", metadataRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api", systemRouter);
 

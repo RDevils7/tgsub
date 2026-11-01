@@ -208,12 +208,14 @@ check("图片只保留 3 张封面，其余跳过", () => {
 });
 check("封面沿用监控历史里预览过的那几张", () => {
   // artPrefer 的序号按「相册里第几张图」算（0 起），要跳过视频与其它附件
-  const plan = planFileNames(caption, albumMedia, { artCount: 3, artPrefer: [2, 5] });
+  // 用满 3 个槽位，避免「剩下一张随机挑」让断言时好时坏
+  const plan = planFileNames(caption, albumMedia, { artCount: 3, artPrefer: [2, 5, 7] });
   const arts = plan.slice(1).filter((p) => p.name && p.name.startsWith(".art-"));
   assert.equal(arts.length, 3);
-  // 第 3、6 张图（索引 2、5）必须被选中
+  // 第 3、6、8 张图（索引 2、5、7）必须被选中
   assert.ok(plan[3].name?.startsWith(".art-"), "索引 2 的图片应被选为封面");
   assert.ok(plan[6].name?.startsWith(".art-"), "索引 5 的图片应被选为封面");
+  assert.ok(plan[8].name?.startsWith(".art-"), "索引 7 的图片应被选为封面");
   assert.equal(plan[1].skip, true, "索引 0 的图片应被跳过");
 });
 check("纯图集不做封面裁剪", () => {  const plan = planFileNames(caption, albumMedia.slice(1), { artCount: 3 });
