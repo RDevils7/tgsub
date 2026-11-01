@@ -343,7 +343,12 @@ export default function Settings() {
   const isLoggedIn = Boolean(auth?.authorized);
 
   const botStatus = !draft.bot_enabled
-    ? { dot: "bg-slate-500", tone: "border-white/10 bg-white/[0.03] text-slate-400", label: "未启用" }
+    ? {
+        dot: "bg-slate-500",
+        tone: "border-white/10 bg-white/[0.03] text-slate-400",
+        // Token 已存在却关着开关时，说清楚这是「没启用」而不是「坏了」
+        label: bot?.tokenHint ? "未启用 · Token 已保存" : "未启用",
+      }
     : bot?.running
       ? {
           dot: "bg-emerald-400",
@@ -1078,6 +1083,13 @@ export default function Settings() {
           </div>
           <Toggle checked={draft.bot_enabled} onChange={(next) => patch("bot_enabled", next)} />
         </div>
+
+        {!draft.bot_enabled && bot?.tokenHint && (
+          <p className="mt-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-400">
+            Token 已保存（{bot.tokenHint}）。打开上面的开关，再点右下角「保存并连接」就会上线；
+            开关本身只是草稿，不保存不会生效。
+          </p>
+        )}
 
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field

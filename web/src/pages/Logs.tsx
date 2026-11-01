@@ -29,7 +29,7 @@ const LEVEL_STYLE: Record<LogLevel, { chip: string; text: string; bar: string }>
 };
 
 /** 只显示几个关键字段，其余折叠进「详情」 */
-const KEY_FIELDS = ["err", "code", "dcId", "fp", "path", "status", "method", "userId", "reason"];
+const KEY_FIELDS = ["err", "code", "dcId", "fp", "path", "status", "method", "userId", "reason", "strikes", "delayMs"];
 
 function summarize(entry: LogEntry): string {
   const parts: string[] = [];
@@ -235,8 +235,9 @@ export default function Logs() {
           {items.map((entry, index) => {
             const style = LEVEL_STYLE[entry.level] ?? LEVEL_STYLE.info;
             const summary = summarize(entry);
+            const hint = typeof entry.fields.hint === "string" ? entry.fields.hint : null;
             const extra = Object.entries(entry.fields).filter(
-              ([k]) => !KEY_FIELDS.includes(k),
+              ([k]) => !KEY_FIELDS.includes(k) && k !== "hint",
             );
             const open = expanded === index;
             return (
@@ -258,6 +259,11 @@ export default function Logs() {
                     {summary && (
                       <p className="mt-0.5 break-all font-mono text-[11px] leading-relaxed text-slate-500">
                         {summary}
+                      </p>
+                    )}
+                    {hint && (
+                      <p className="mt-1 rounded-md border border-amber-500/20 bg-amber-500/[0.07] px-2 py-1 text-[11px] leading-relaxed text-warn">
+                        {hint}
                       </p>
                     )}
                     {open && extra.length > 0 && (

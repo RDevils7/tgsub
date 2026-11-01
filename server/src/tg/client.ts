@@ -315,7 +315,22 @@ function createClient(session: string, cred: ResolvedCredentials): TelegramClien
  */
 const RECONNECT_BASE_DELAY_MS = 4000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
-const RECONNECT_RESET_MS = 180_000;
+
+/**
+ * 两次掉线之间的「稳定期」阈值：连接活过这么久再断，就当作新的一次抖动。
+ *
+ * 原值是 180 秒 —— 实测经代理时 MTProto 的 ping 大约每分钟超时一次，
+ * 永远达不到 180 秒，于是 strikes 单调递增到上限：每次掉线都要干等 30 秒才重连，
+ * 有效在线时间被砍掉一半，扫描和下载也跟着断。
+ *
+ * 45 秒的含义：重连后能活过 45 秒，说明重连本身是成功的、只是链路周期性抖动，
+ * 下次仍用最小延迟尽快恢复；只有「刚连上又断」（间隔 < 45 秒）才继续退避，
+ * 那种才是服务器在拒绝我们。
+ */
+const RECONNECT_RESET_MS = 45_000;
+
+/** 连续掉线到这个次数，说明不是偶发抖动，日志里直接给出排查方向 */
+const RECONNECT_HINT_AFTER = 5;
 
 function hardenReconnect(client: TelegramClient): void {
   const sender = (client as unknown as { _sender?: Record<string, unknown> })._sender as
@@ -332,11 +347,25 @@ function hardenReconnect(client: TelegramClient): void {
   sender.reconnect = () => {
     if (pending) return;
     const now = Date.now();
-    if (now - lastAt > RECONNECT_RESET_MS) strikes = 0;
+    const stable = lastAt > 0 && now - lastAt > RECONNECT_RESET_MS;
+    if (stable) {
+      if (strikes > 0) {
+        logger.info({ fp: keyFingerprint(client), strikes }, "连接已稳定一段时间，重连退避计数清零");
+      }
+      strikes = 0;
+    }
     lastAt = now;
     strikes += 1;
     const delay = Math.min(RECONNECT_BASE_DELAY_MS * strikes, RECONNECT_MAX_DELAY_MS);
-    logger.warn({ fp: keyFingerprint(client), strikes, delayMs: delay }, "连接异常，延迟重连");
+    // 连续掉线说明不是偶发抖动。把「该查什么」直接写进字段，日志页一眼能看到
+    const hint =
+      strikes >= RECONNECT_HINT_AFTER
+        ? "连续掉线：先查代理链路是否稳定（换节点/直连对比），再确认没有第二个实例共用同一份 data，最后考虑账号是否仍在限制期"
+        : undefined;
+    logger.warn(
+      { fp: keyFingerprint(client), strikes, delayMs: delay, ...(hint ? { hint } : {}) },
+      "连接异常，延迟重连",
+    );
     // 自己先占住「重连中」标志：让心跳跳过、避免请求继续压在死连接上
     sender.isReconnecting = true;
     pending = setTimeout(() => {
