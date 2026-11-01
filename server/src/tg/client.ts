@@ -857,7 +857,10 @@ function describeLoginError(err: unknown): string {
 
   const known: Record<string, string> = {
     AUTH_KEY_DUPLICATED:
-      "同一个登录凭据被 Telegram 检测到在多处同时使用，已被服务器作废。请点「彻底重置并重新登录」清掉本地旧凭据后重新扫码。",
+      "同一个登录凭据被 Telegram 检测到在多处同时使用，已被服务器作废。" +
+      "常见原因：另一台设备/另一个容器还在用同一份 data 目录（复制过去的旧备份也算），" +
+      "或者代理出口 IP 中途变了。请先确认只保留一个实例、代理出口固定，" +
+      "再点「彻底重置并重新登录」清掉旧凭据后重新扫码。",
     AUTH_KEY_UNREGISTERED:
       "本地保存的登录凭据已被 Telegram 注销，无法再使用。请点「彻底重置并重新登录」后重新扫码。" +
       "如果刚登录就失效、手机端其他设备也被一起踢下线，那是 Telegram 判定可疑活动后重置了全部会话，" +
