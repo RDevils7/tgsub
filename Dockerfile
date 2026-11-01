@@ -88,7 +88,7 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    PORT=3000 \
+    PORT=6789 \
     HOST=0.0.0.0 \
     DATA_DIR=/data \
     DOWNLOAD_DIR=/downloads \
@@ -107,14 +107,14 @@ COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
 
 USER node
-EXPOSE 3000
+EXPOSE 6789
 
 # ① 数据持久化目录：数据库、加密 session、封面缓存、临时截图
 # ② 下载目录：实际下载的视频 / 图片 / 剧集目录
 VOLUME ["/data", "/downloads"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||6789)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "server/dist/index.js"]

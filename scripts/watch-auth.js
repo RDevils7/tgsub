@@ -13,7 +13,7 @@ function stamp() {
   let prev = "";
   for (let i = 0; i < times; i++) {
     try {
-      const r = await fetch("http://127.0.0.1:3000/api/auth/state");
+      const r = await fetch("http://127.0.0.1:6789/api/auth/state");
       const d = await r.json();
       const sig = `auth=${d.authorized} conn=${d.connected} user=${d.me ? d.me.id : "-"}`;
       if (sig !== prev) {

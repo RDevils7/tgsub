@@ -27,7 +27,7 @@ for (const [name, files] of series) {
 }
 
 // 登记为手动来源（用完即删）
-const added = await fetch("http://127.0.0.1:3000/api/metadata/sources", {
+const added = await fetch("http://127.0.0.1:6789/api/metadata/sources", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ path: path.join(testRoot, "短剧") }),
@@ -103,7 +103,7 @@ const shot = async (name) => {
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1500, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/" });
 await sleep(1600);
 await send("Runtime.evaluate", { expression: 'location.hash = "/metadata";' });
 await sleep(2600);
@@ -153,7 +153,7 @@ proc.kill();
 
 // 清理：移除来源与测试目录
 if (sourceId) {
-  await fetch(`http://127.0.0.1:3000/api/metadata/sources/${sourceId}`, { method: "DELETE" }).catch(() => {});
+  await fetch(`http://127.0.0.1:6789/api/metadata/sources/${sourceId}`, { method: "DELETE" }).catch(() => {});
 }
 rmSync(testRoot, { recursive: true, force: true });
 console.log("cleaned up");

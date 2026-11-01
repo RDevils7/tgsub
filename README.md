@@ -65,25 +65,26 @@ sudo chown -R 1000:1000 data downloads
 ```yaml
 services:
   tgsub:
-    image: ${IMAGE:-ghcr.io/rdevils7/tgsub:latest}
+    image: ghcr.io/rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
     init: true
     ports:
-      - "${APP_PORT:-3000}:3000"
+      # 宿主机端口 → 容器端口
+      - "6789:6789"
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
+      TZ: Asia/Shanghai
       DATA_DIR: /data
       DOWNLOAD_DIR: /downloads
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      SESSION_SECRET: "${SESSION_SECRET:-}"
-      BASIC_AUTH_USER: "${BASIC_AUTH_USER:-}"
-      BASIC_AUTH_PASS: "${BASIC_AUTH_PASS:-}"
+      LOG_LEVEL: info
+      SESSION_SECRET: ""
+      BASIC_AUTH_USER: ""
+      BASIC_AUTH_PASS: ""
     volumes:
-      - "${DATA_HOST_DIR:-./data}:/data"
-      - "${DOWNLOAD_HOST_DIR:-./downloads}:/downloads"
+      - ./data:/data
+      - ./downloads:/downloads
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6789/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -100,21 +101,24 @@ services:
 ```
 
 整个部署过程**只需要这一个文件**，不需要 clone 仓库、不需要在本机编译、也不需要访问 GitHub 源码。
+文件里全部是真实值（不做变量插值），要改镜像版本、端口或目录，直接编辑对应那一行即可。
+
 （若网络能访问 raw.githubusercontent.com，也可以直接下载仓库里的同一份文件：
 `curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/RDevils7/tgsub/main/docker-compose.yml`）
 
-### 3. 可选：配置 `.env`
+### 3. 按需修改配置
 
-不上传也能跑（全部有默认值）。需要改端口、目录、认证时再新建 `.env`：
+compose 文件里全部是真实值，**直接编辑对应那一行**即可：
 
-```bash
-APP_PORT=3000                    # 宿主机映射端口
-DATA_HOST_DIR=/opt/tgsub/data    # 数据持久化目录
-DOWNLOAD_HOST_DIR=/mnt/nas/tgsub # 下载目录（可指向 NAS / 大容量盘）
-SESSION_SECRET=                  # 加密 session 的密钥，留空自动生成；换掉需重新登录
-BASIC_AUTH_USER=                 # 公网部署建议开启基础认证
-BASIC_AUTH_PASS=
-```
+| 要改什么 | 改哪一行 |
+| --- | --- |
+| 换镜像版本 | `image:` → `ghcr.io/rdevils7/tgsub:v1.0.0` |
+| 换宿主机端口 | `ports:` → `- "8080:6789"` |
+| 换数据目录 | `volumes:` 第一条 → `- /opt/tgsub/data:/data` |
+| 换下载目录 | `volumes:` 第二条 → `- /mnt/nas/tgsub:/downloads` |
+| 改时区 / 日志级别 | `environment:` 里的 `TZ:` / `LOG_LEVEL:` |
+| 开启基础认证 | `environment:` 里的 `BASIC_AUTH_USER:` / `BASIC_AUTH_PASS:` |
+| 固定 session 密钥 | `environment:` 里的 `SESSION_SECRET:`（≥16 位） |
 
 > `SESSION_SECRET` 留空（或不足 16 位）时，程序会在数据目录自动生成 `/data/.session-secret` 并一直复用；
 > 手动设置需 ≥16 位。**一旦设定就不要改** —— 改了数据库里的 session 解不开，得重新扫码。
@@ -126,7 +130,7 @@ docker compose up -d
 docker compose logs -f --tail=200
 ```
 
-启动后访问 `http://<服务器IP>:3000`，进入「设置 → Telegram 账号 → 扫码登录」用手机扫码即可。
+启动后访问 `http://<服务器IP>:6789`，进入「设置 → Telegram 账号 → 扫码登录」用手机扫码即可。
 
 > **代理**：国内网络直连不上 Telegram，请先在「设置 → API 凭证与网络」填代理地址。
 > 容器里的 `127.0.0.1` 是容器自己，访问宿主机代理要用 `host.docker.internal:7890`
@@ -152,8 +156,8 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署
-IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
+# 锁定版本部署：把 compose 里 image: 一行改成 ghcr.io/rdevils7/tgsub:v1.0.0
+docker compose up -d
 ```
 
 > 镜像仓库是公开的，任何人都能 `docker pull`。若你的 fork 需保持私有，去 GitHub 仓库
@@ -163,7 +167,7 @@ IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
 
 ```bash
 docker pull ghcr.io/rdevils7/tgsub:latest
-docker run -d --name tgsub -p 3000:3000 \
+docker run -d --name tgsub -p 6789:6789 \
   -v "$(pwd)/data:/data" -v "$(pwd)/downloads:/downloads" \
   -e DATA_DIR=/data -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
   --restart unless-stopped ghcr.io/rdevils7/tgsub:latest
@@ -191,7 +195,7 @@ docker run -d --name tgsub -p 3000:3000 \
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
-| `PORT` / `APP_PORT` | `3000` | 监听端口 / 宿主机映射端口 |
+| `PORT` | `6789` | 监听端口 |
 | `DATA_DIR` / `DOWNLOAD_DIR` | `./data` / `$DATA_DIR/downloads` | 数据目录与下载目录；Docker 里为 `/data`、`/downloads` |
 | `SESSION_SECRET` | 自动生成 | 加密 session 的密钥（≥16 位），更换后需重新登录 |
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置后启用 HTTP Basic 认证 |

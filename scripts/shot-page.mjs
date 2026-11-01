@@ -68,7 +68,7 @@ const send = (method, params = {}) =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 2600, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/" });
 await sleep(1800);
 // 单页应用：直接用 hash 路由跳转，比带 hash 的文档导航可靠
 await send("Runtime.evaluate", { expression: `location.hash = ${JSON.stringify(hash.replace(/^#/, ""))};` });

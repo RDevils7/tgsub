@@ -90,7 +90,7 @@ const clickText = (text, selector = "button") =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1500, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/" });
 await sleep(1600);
 await send("Runtime.evaluate", { expression: 'location.hash = "/metadata";' });
 await sleep(2600);

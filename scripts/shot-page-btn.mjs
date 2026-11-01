@@ -68,7 +68,7 @@ const send = (method, params = {}) =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1400, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/" });
 await sleep(1800);
 await send("Runtime.evaluate", { expression: `location.hash = "/${route}";` });
 await sleep(2400);

@@ -65,7 +65,7 @@ const ev = async (expr) =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/#/manual" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/#/manual" });
 await sleep(2200);
 
 // 一条已下载过的（不会真的重复下载）+ 一条格式不对的

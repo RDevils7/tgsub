@@ -227,12 +227,15 @@ flowchart TB
 
 > **只想部署起来用？** [README.md](README.md) 的「快速部署」章节给了一份**开箱即用、不需要 clone 仓库**
 > 的精简流程：只要一个 `docker-compose.yml` 文件 + `docker compose up -d`，镜像直接从
-> `ghcr.io/rdevils7/tgsub:latest` 拉取。本节是同一套方案的完整版（含 `.env` 说明、镜像标签、
+> `ghcr.io/rdevils7/tgsub:latest` 拉取。本节是同一套方案的完整版（含配置项对照、镜像标签、
 > 迁移步骤与 docker run 备选）。
 
 项目每次推送到 `main` 或打 `v*` 标签，GitHub Actions 会自动构建 **amd64 + arm64** 双架构镜像并发布到
 GitHub Container Registry。服务器上不用装 Node、不用编译，也**不需要 clone 仓库**——
 把仓库里的 `docker-compose.yml` 内容复制到服务器（或用 `curl` 从 raw.githubusercontent.com 下载同一份文件）即可。
+
+> compose 文件里**全部使用真实值，不做 `${}` 变量插值**，也**不读取 `.env`**。
+> 要改镜像版本、端口、目录、认证，直接编辑 compose 里对应的那一行。
 
 **持久化目录（compose 里已配好，两个目录可分别指向不同磁盘）**
 
@@ -241,11 +244,12 @@ GitHub Container Registry。服务器上不用装 Node、不用编译，也**不
 | `./data` | `/data` | SQLite 数据库 `tgsub.db`、加密后的 Telegram session、会话密钥 `.session-secret`、封面缓存 `covers/`、临时截图 `frames/`、运行日志 | **数据持久化目录**。换容器、重装镜像都不丢；备份它即可恢复全部配置与记录 |
 | `./downloads` | `/downloads` | 实际下载的媒体文件：视频 / 图片 / nfo / 封面，按 `{date}/{channel}/{name}` 归档 | **下载目录**。体积大，可单独挂到另一块大容量磁盘 |
 
-两个路径都写在 `.env` 里，想换位置直接改：
+想换位置，直接改 compose 里 `volumes:` 的两条：
 
-```bash
-DATA_HOST_DIR=/opt/tgsub/data        # 数据持久化目录
-DOWNLOAD_HOST_DIR=/mnt/nas/tgsub     # 下载目录（可指向 NAS / 大容量盘）
+```yaml
+    volumes:
+      - /opt/tgsub/data:/data        # 数据持久化目录
+      - /mnt/nas/tgsub:/downloads     # 下载目录（可指向 NAS / 大容量盘）
 ```
 
 **部署步骤（不需要 clone 仓库）**
@@ -266,10 +270,7 @@ docker compose up -d                # 默认就是拉 ghcr.io/rdevils7/tgsub:lat
 docker compose logs -f
 ```
 
-启动后访问 `http://<服务器IP>:3000`。
-
-> 如果希望顺带拿到 `.env.example` 等配套文件（改端口、认证、密钥、两个持久化目录），
-> 才需要 `git clone https://github.com/RDevils7/tgsub.git`；纯部署用不到。
+启动后访问 `http://<服务器IP>:6789`。
 
 常用运维命令：
 
@@ -284,10 +285,10 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 >
 > ```bash
 > docker pull ghcr.io/rdevils7/tgsub:latest
-> docker run -d --name tgsub -p 3000:3000 \
+> docker run -d --name tgsub -p 6789:6789 \
 >   -v "$(pwd)/data:/data" \
 >   -v "$(pwd)/downloads:/downloads" \
->   -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
+>   -e DATA_DIR=/data -e DOWNLOAD_DIR=/downloads -e TZ=Asia/Shanghai \
 >   --restart unless-stopped ghcr.io/rdevils7/tgsub:latest
 > ```
 
@@ -302,8 +303,8 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：改 .env 里的 IMAGE，或临时用环境变量覆盖
-IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
+# 锁定版本部署：把 compose 里 image: 一行改成 ghcr.io/rdevils7/tgsub:v1.0.0
+docker compose up -d
 ```
 
 > **镜像仓库是公开的**，任何人都能 `docker pull`；如果你的 fork 想保持私有，需要在
@@ -319,7 +320,6 @@ compose 文件是 `docker-compose.build.yml`，持久化目录与方式一完全
 git clone https://github.com/RDevils7/tgsub.git
 cd tgsub
 
-cp .env.example .env          # 按需修改端口、认证、密钥、两个持久化目录
 mkdir -p data downloads
 sudo chown -R 1000:1000 data downloads   # Linux 必需：容器内以 node(1000) 运行
 
@@ -327,10 +327,10 @@ docker compose -f docker-compose.build.yml up -d --build
 docker compose -f docker-compose.build.yml logs -f
 ```
 
-打开 `http://<服务器IP>:3000` 即可。容器内数据目录固定为 `/data`，下载目录固定为 `/downloads`，
+打开 `http://<服务器IP>:6789` 即可。容器内数据目录固定为 `/data`，下载目录固定为 `/downloads`，
 分别映射到宿主机 `./data` 与 `./downloads`（可在 `.env` 里改）。
 
-> 国内构建慢：在 `.env` 里把 `NPM_REGISTRY` 改为 `https://registry.npmmirror.com`。
+> 国内构建慢：把 `docker-compose.build.yml` 里 `build.args.NPM_REGISTRY` 改成 `https://registry.npmmirror.com`。
 > 若 `better-sqlite3` 预编译包下载失败，Dockerfile 会自动回退源码编译（镜像内置工具链）。
 
 常用命令：
@@ -347,7 +347,7 @@ docker compose down             # 停止，数据保留在 ./data 与 ./download
 ```bash
 npm install                     # 工作区安装 server + web 依赖
 npm run build                   # 构建前端静态资源与后端 dist
-npm start                       # 生产模式，默认 http://127.0.0.1:3000
+npm start                       # 生产模式，默认 http://127.0.0.1:6789
 ```
 
 开发模式（前后端热更新，Vite 在 5173 自动代理 `/api`）：
@@ -362,7 +362,7 @@ npm run dev
 > 请用内置优雅退出接口，等端口释放后再启动新进程：
 >
 > ```bash
-> curl -X POST http://127.0.0.1:3000/api/shutdown
+> curl -X POST http://127.0.0.1:6789/api/shutdown
 > node server/dist/index.js
 > ```
 
@@ -422,7 +422,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `3000` | 监听端口 |
+| `PORT` | `6789` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `./data` | 数据目录（数据库、session、封面缓存、密钥）；Docker 里为 `/data` |
 | `DOWNLOAD_DIR` | `$DATA_DIR/downloads` | 下载根目录；Docker 里为 `/downloads`，与数据目录分开挂载 |
@@ -432,10 +432,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置后启用 HTTP Basic 认证 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `TZ` | `Asia/Shanghai` | 时区，影响日志与按天分目录 |
-| `IMAGE` | `ghcr.io/rdevils7/tgsub:latest` | **仅 compose**：要拉取的镜像地址（可换成 `v1.0.0` 等固定版本） |
-| `DATA_HOST_DIR` | `./data` | **仅 compose**：宿主机数据持久化目录 → 容器 `/data` |
-| `DOWNLOAD_HOST_DIR` | `./downloads` | **仅 compose**：宿主机下载目录 → 容器 `/downloads` |
-| `NPM_REGISTRY` | 官方源 | **仅构建期**，Docker 构建时的 npm 源 |
+
+> **compose 不读 `.env`** —— 仓库里的两份 compose 全部使用真实值，不做变量插值。
+> 要改镜像版本、宿主机端口、两个持久化目录、认证信息，直接编辑 compose 对应的那一行。
+> `.env` 只在本地直接运行 `node server/dist/index.js` 时生效（程序用 dotenv 自动加载根目录的 `.env`）。
 
 ### 界面设置项
 
@@ -557,7 +557,7 @@ Docker 部署时目录被拆成两处（可在 `.env` 里改）：
 
 - **备份**：打包数据目录（Docker 部署即 `./data`）即可恢复全部配置与记录；下载文件在 `./downloads`，可按需单独备份。建议先 `POST /api/shutdown` 或 `docker compose stop`，让 SQLite 的 WAL 落盘。
 - **恢复**：还原数据目录并保持 `SESSION_SECRET`（或 `.session-secret`）不变，否则 session 解不开，需要重新扫码。
-- **容量**：单个 4K 影片可能几十 GB，下载目录务必放在空间充足的分区；Docker 部署时把 `DOWNLOAD_HOST_DIR` 指向大容量磁盘（甚至 NAS）即可，数据目录单独留在本机。
+- **容量**：单个 4K 影片可能几十 GB，下载目录务必放在空间充足的分区；Docker 部署时把 compose 里 `volumes:` 的下载目录那一项指向大容量磁盘（甚至 NAS）即可，数据目录单独留在本机。
 - **迁移到新目录布局**（从旧版 `./data/downloads` 改成独立下载目录）：
   ```bash
   docker compose down
@@ -623,7 +623,7 @@ tgsub/
 
 ```bash
 npm install
-npm run dev            # API :3000 + Vite :5173（/api 自动代理）
+npm run dev            # API :6789 + Vite :5173（/api 自动代理）
 npm run build          # 构建 web/dist 与 server/dist
 npm run typecheck      # 前后端类型检查
 npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、路径安全、命名与 Emby）
@@ -674,8 +674,8 @@ git tag v1.0.0 && git push origin v1.0.0    # 发布 v1.0.0 / 1.0 / 1.0.0 / late
 
 ```bash
 docker build -t tgsub:local .
-docker run -d --name tgsub -p 3000:3000 -v "$(pwd)/data:/data" tgsub:local
-curl http://127.0.0.1:3000/api/health
+docker run -d --name tgsub -p 6789:6789 -v "$(pwd)/data:/data" tgsub:local
+curl http://127.0.0.1:6789/api/health
 ```
 
 ---

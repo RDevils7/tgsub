@@ -62,7 +62,7 @@ console.log("代理     :", settings.proxy_url);
   // 关键保护：服务在跑的时候绝不能用同一个 session 再连一次 Telegram。
   // 同一个 authKey 并发连接会被服务器判 AUTH_KEY_DUPLICATED 并作废，
   // 结果就是「诊断脚本跑一次，网页端又要重新扫码」。
-  const alive = await fetch("http://127.0.0.1:3000/api/health")
+  const alive = await fetch("http://127.0.0.1:6789/api/health")
     .then(() => true)
     .catch(() => false);
   if (alive && !process.argv.includes("--force")) {

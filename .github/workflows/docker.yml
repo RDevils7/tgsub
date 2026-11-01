@@ -39,21 +39,21 @@ jobs:
 
       - name: 启动容器并检查健康接口
         run: |
-          docker run -d --name tgsub-smoke -p 3000:3000 tgsub:smoke
+          docker run -d --name tgsub-smoke -p 6789:6789 tgsub:smoke
           for i in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:3000/api/health > /tmp/health.json 2>/dev/null; then
+            if curl -fsS http://127.0.0.1:6789/api/health > /tmp/health.json 2>/dev/null; then
               echo "健康检查通过：$(cat /tmp/health.json)"
               break
             fi
             sleep 2
           done
-          if ! curl -fsS http://127.0.0.1:3000/api/health; then
+          if ! curl -fsS http://127.0.0.1:6789/api/health; then
             echo "容器未通过健康检查，日志如下："
             docker logs tgsub-smoke || true
             exit 1
           fi
           # 顺便确认页面能返回
-          curl -fsS -o /dev/null -w "首页 HTTP %{http_code}\n" http://127.0.0.1:3000/
+          curl -fsS -o /dev/null -w "首页 HTTP %{http_code}\n" http://127.0.0.1:6789/
           docker rm -f tgsub-smoke
 
       - name: 验证两个持久化目录都能写（数据 / 下载分离）
@@ -65,7 +65,7 @@ jobs:
             -v "$RUNNER_TEMP/tgsub-downloads:/downloads" \
             tgsub:smoke
           for i in $(seq 1 40); do
-            curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1 && break
+            curl -fsS http://127.0.0.1:6789/api/health >/dev/null 2>&1 && break
             sleep 2
           done
           # 容器内以 node(1000) 运行，必须能往两个挂载点写

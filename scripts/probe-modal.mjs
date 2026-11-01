@@ -68,7 +68,7 @@ const send = (method, params = {}) =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/#/subscriptions" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/#/subscriptions" });
 await sleep(2000);
 
 const evaluate = async (expression) =>

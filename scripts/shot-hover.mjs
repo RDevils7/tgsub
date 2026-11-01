@@ -71,7 +71,7 @@ const evaluate = async (expression) => {
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/" });
 await sleep(1800);
 await send("Runtime.evaluate", { expression: 'location.hash = "#/monitor";' });
 await sleep(2200);

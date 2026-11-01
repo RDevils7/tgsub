@@ -9,7 +9,7 @@ const PORT = 9339;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 先把机器人打开（token 留空），模拟用户已经打开开关但还没填 token
-await fetch("http://127.0.0.1:3000/api/settings", {
+await fetch("http://127.0.0.1:6789/api/settings", {
   method: "PUT",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ bot_enabled: true, bot_allow_users: "123456789" }),
@@ -72,7 +72,7 @@ const ev = async (expr) =>
 
 await send("Page.enable");
 await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 2600, deviceScaleFactor: 1, mobile: false });
-await send("Page.navigate", { url: "http://127.0.0.1:3000/#/settings" });
+await send("Page.navigate", { url: "http://127.0.0.1:6789/#/settings" });
 await sleep(2600);
 
 const before = await ev(`(() => {
@@ -119,14 +119,14 @@ const after = await ev(`(() => {
 })()`);
 console.log("保存后:", JSON.stringify(after));
 
-const state = await (await fetch("http://127.0.0.1:3000/api/bot")).json();
+const state = await (await fetch("http://127.0.0.1:6789/api/bot")).json();
 console.log("接口状态:", JSON.stringify(state.bot));
 
 ws.close();
 proc.kill();
 
 // 清场：关掉机器人并清除测试 token
-await fetch("http://127.0.0.1:3000/api/settings", {
+await fetch("http://127.0.0.1:6789/api/settings", {
   method: "PUT",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ bot_enabled: false, bot_token: "", bot_allow_users: "" }),

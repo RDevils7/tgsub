@@ -3,12 +3,18 @@
 #   docker compose up -d
 #
 # 镜像地址：ghcr.io/rdevils7/tgsub:latest
-# 锁定版本：IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose up -d
+# 需要固定版本时，把下面 image 改成 ghcr.io/rdevils7/tgsub:v1.0.0
 #
-# 本文件用「宿主机的两个目录」持久化：
-#   ① DATA_HOST_DIR     → 容器 /data      数据库、加密 session、封面缓存、临时截图
-#   ② DOWNLOAD_HOST_DIR → 容器 /downloads 实际下载的视频 / 图片 / 剧集目录
-# 两个目录可以在不同磁盘上（下载目录通常占空间，建议指向大容量盘）。
+# 本文件全部使用真实值，不做变量插值。直接改下面的字段即可：
+#   image        → 换镜像版本
+#   ports        → 换宿主机端口
+#   volumes      → 换两个持久化目录
+#   environment  → 改时区 / 日志级别 / 认证 / session 密钥
+#
+# 持久化目录（两个目录可分别指向不同磁盘）：
+#   ./data      → 容器 /data      数据库、加密 session、封面缓存、临时截图
+#   ./downloads → 容器 /downloads 实际下载的视频 / 图片 / 剧集目录
+# 下载目录通常占空间，建议指向大容量盘。
 #
 # 首次部署（Linux）：
 #   mkdir -p data downloads && sudo chown -R 1000:1000 data downloads
@@ -19,39 +25,39 @@
 
 services:
   tgsub:
-    image: ${IMAGE:-ghcr.io/rdevils7/tgsub:latest}
+    image: ghcr.io/rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
     init: true
     ports:
-      # 宿主机端口 → 容器 3000
-      - "${APP_PORT:-3000}:3000"
+      # 宿主机端口 → 容器端口
+      - "6789:6789"
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
+      TZ: Asia/Shanghai
       # ① 数据持久化目录（容器内）
       DATA_DIR: /data
       # ② 下载目录（容器内）
       DOWNLOAD_DIR: /downloads
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_LEVEL: info
       # 加密 Telegram session 的密钥；留空则首次启动自动生成并保存在 /data
-      SESSION_SECRET: "${SESSION_SECRET:-}"
+      SESSION_SECRET: ""
       # 可选的基础认证，暴露到公网时建议开启
-      BASIC_AUTH_USER: "${BASIC_AUTH_USER:-}"
-      BASIC_AUTH_PASS: "${BASIC_AUTH_PASS:-}"
+      BASIC_AUTH_USER: ""
+      BASIC_AUTH_PASS: ""
     volumes:
       # ① 数据持久化目录：数据库 tgsub.db、加密 session、封面缓存、临时截图
       #    换容器、重装镜像都不丢；备份这个目录即可恢复全部配置与记录
-      - "${DATA_HOST_DIR:-./data}:/data"
+      - ./data:/data
       # ② 下载目录：实际下载的媒体文件（视频 / 图片 / nfo / 封面）
       #    可单独挂到另一块大盘上，容器删除后文件仍在
-      - "${DOWNLOAD_HOST_DIR:-./downloads}:/downloads"
+      - ./downloads:/downloads
     healthcheck:
       test:
         [
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:6789/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
