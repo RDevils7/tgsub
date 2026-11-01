@@ -972,7 +972,7 @@ export default function Settings() {
           <div className="pr-4">
             <p className="text-[13px] text-slate-200">生成 Emby 媒体信息</p>
             <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-              每集写入「剧名S01E04.nfo」，剧集目录写入 tvshow.nfo，并用随机剧照生成 poster / landscape / fanart
+              每集写入「剧名S01E04.nfo」与缩略图，剧集目录写入 tvshow.nfo 与取自第一集的 poster / landscape / fanart；开启后消息里的图片不再下载
             </p>
           </div>
           <Toggle checked={draft.emby_meta} onChange={(next) => patch("emby_meta", next)} />
@@ -990,32 +990,19 @@ export default function Settings() {
 
         <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <div className="pr-4">
-            <p className="text-[13px] text-slate-200">没图时用视频随机截帧当封面</p>
+            <p className="text-[13px] text-slate-200">从视频随机截帧生成封面与缩略图</p>
             <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-              消息里没有可用图片时，下载完成后用 ffmpeg 随机截几帧，自动挑横版、竖版画面生成 poster / landscape / fanart
+              每集下载完成后用 ffmpeg 随机截几帧，生成这一集的缩略图（<code className="text-slate-400">剧名S01E04-thumb.jpg</code>）；
+              剧集目录的 poster / landscape / fanart 统一取自第一集。消息里的图片不再下载。
             </p>
           </div>
           <Toggle checked={draft.auto_cover_frames} onChange={(next) => patch("auto_cover_frames", next)} />
         </div>
 
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <Field
-            label="每条消息保留封面图"
-            hint="从消息内的图片里随机挑选，0 表示图片全部不下载"
-          >
-            <input
-              type="number"
-              min={0}
-              max={9}
-              className="field"
-              value={draft.cover_images}
-              onChange={(e) => patch("cover_images", Math.max(0, Math.min(9, Number(e.target.value) || 0)))}
-            />
-          </Field>
+        <div className="mt-3 grid grid-cols-1 gap-3">
           <Field
             label="ffmpeg 路径"
-            hint="用于「元数据」页从视频截帧；留空自动使用内置二进制或系统 PATH 里的 ffmpeg"
-            className="sm:col-span-2"
+            hint="用于生成缩略图与封面；留空自动使用内置二进制或系统 PATH 里的 ffmpeg"
           >
             <input
               className="field font-mono text-[12.5px]"
@@ -1024,13 +1011,16 @@ export default function Settings() {
               onChange={(e) => patch("ffmpeg_path", e.target.value)}
             />
           </Field>
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3 sm:col-span-3">
+          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
             <p className="text-[11px] uppercase tracking-wider text-slate-500">落盘结构</p>
             <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed text-slate-400">{`美人局/
-  美人局S01E04.mp4
-  美人局S01E04.nfo
+  美人局S01E01.mp4
+  美人局S01E01.nfo
+  美人局S01E01-thumb.jpg    ← 每集各自的随机截图
+  美人局S01E02.mp4
+  美人局S01E02-thumb.jpg
   tvshow.nfo
-  poster.jpg  landscape.jpg  fanart.jpg`}</pre>
+  poster.jpg  landscape.jpg  fanart.jpg   ← 取自第一集`}</pre>
           </div>
         </div>
 
@@ -1041,7 +1031,6 @@ export default function Settings() {
             onClick={() =>
               void saveSection("emby", [
                 "emby_meta",
-                "cover_images",
                 "fallback_folder",
                 "auto_cover_frames",
                 "ffmpeg_path",

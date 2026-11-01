@@ -97,18 +97,22 @@
   文件夹与文件同名（取正文首行，去掉链接 / @提及 / #标签，最长 50 字）；同一条消息多个视频加 `-01`、`-02`，
   两条不同链接撞名时后一条补 `-<消息id>`。纯文档 / 音乐 / 图片消息不受影响，仍走路径模板。
   可在设置里关掉。
-- **没图时用视频截帧当封面**：消息里没有可用图片时，下载完成后用 ffmpeg 随机截 6 帧，
-  自动挑横版、竖版画面——竖版槽位（poster 2:3）优先竖版帧，横版槽位（landscape / fanart 16:9）优先横版帧；
-  朝向一致就裁满，整段视频只有一种朝向时另一个朝向留黑边保住画面。已存在的图片不会被覆盖。
+- **封面与缩略图全部由视频截帧生成**：每集下载完成后用 ffmpeg 随机截 6 帧，
+  为该集写一张 `<剧名S01E04>-thumb.jpg`（保持画面原始比例，最长边不超过 1280）；
+  剧集目录的 poster / landscape / fanart **统一取自第一集**，其余集只补缺、不覆盖。
+  消息里的图片（台词截图、集数水印图）不再下载 —— 既省带宽，封面也更干净。
 
 ```text
 美人局/
-  美人局S01E04.mp4        正片
-  美人局S01E04.nfo        episodedetails：标题 / 季集 / 简介 / 标签 / 原消息链接
+  美人局S01E01.mp4        正片
+  美人局S01E01.nfo        episodedetails：标题 / 季集 / 简介 / 标签 / 原消息链接
+  美人局S01E01-thumb.jpg  这一集的随机截图（每集各不相同）
+  美人局S01E02.mp4
+  美人局S01E02-thumb.jpg
   tvshow.nfo              剧集信息（Emby 剧集库读这个）
-  poster.jpg              竖版海报 1000×1500
-  landscape.jpg           横版图 1920×1080
-  fanart.jpg              背景图 1920×1080
+  poster.jpg              竖版海报 1000×1500（取自第一集）
+  landscape.jpg           横版图 1920×1080（取自第一集）
+  fanart.jpg              背景图 1920×1080（取自第一集）
 ```
 
 ```text
@@ -131,12 +135,13 @@
   老板今天又发飙了，速看 完整版.mp4
   老板今天又发飙了，速看 完整版.nfo
   tvshow.nfo
-  poster.jpg  landscape.jpg  fanart.jpg  ← 消息里没图，由视频随机截帧生成
+  poster.jpg  landscape.jpg  fanart.jpg  ← 由视频随机截帧生成
 ```
 
-- 封面从消息里挑 3 张剧照（数量可配），竖版取最瘦的一张做 poster、最宽的做 landscape / fanart；
-  裁剪依赖可选的 `sharp`，装不上时退化为原图复制，不影响下载。
-- 「悬停预览用哪 3 张」与「下载用哪 3 张」保持一致：预览选中的序号会缓存到 `data/covers/`，下载时沿用。
+- 三张剧集封面按宽高比挑帧：竖版槽位（poster 2:3）优先竖版帧，横版槽位（landscape / fanart 16:9）优先横版帧；
+  朝向一致就裁满，整段视频只有一种朝向时另一个朝向留黑边保住画面。
+- 缩放依赖可选的 `sharp`，装不上时退化为原图复制，不影响下载。
+- 监控历史里的悬停预览（`data/covers/`）只服务于界面回看，取自消息缩略图，与 Emby 封面无关。
 
 ### 元数据编辑
 
@@ -361,12 +366,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
 | `main` | 与 `latest` 同步 |
-| `v1.0.2` / `1.0.2` | 打 `v1.0.2` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.3` / `1.0.3` | 打 `v1.0.3` 标签时产生的固定版本（建议生产环境锁定） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.2
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.3
 docker compose up -d
 ```
 
@@ -749,14 +754,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.2
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.3
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.2 && git push origin v1.0.2    # 发布 v1.0.2 / 1.0 / latest
+git tag v1.0.3 && git push origin v1.0.3    # 发布 v1.0.3 / 1.0 / latest
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

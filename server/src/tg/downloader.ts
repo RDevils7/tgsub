@@ -8,9 +8,30 @@ import { formatDateFolder, sanitizeSegment, toNumber } from "../utils";
 import { getClient } from "./client";
 import { extractMedia, targetRelativePath } from "./media";
 import { channelEntityKey } from "./entity";
-import { finalizeMedia } from "./emby";
+import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 
 const MAX_AUTO_RETRY = 1;
+
+/** 日志里给人看的大小，省得在列表里自己换算字节 */
+function humanSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+/** 下载目录内的相对路径（统一用 / 分隔，日志里跨平台都好读） */
+function relPathOf(file: string): string {
+  return path.relative(env.downloadDir, file).split(path.sep).join("/");
+}
+
+/** 一条任务在日志里的可读标识：优先「剧名 S01E04」，否则退回到文件名 */
+function describeRow(row: Download): string {
+  const meta = decodeMeta(row.emby_json);
+  if (meta) return describeMeta(meta);
+  if (row.save_name) return row.save_dir ? `${row.save_dir}/${row.save_name}` : row.save_name;
+  return row.file_name;
+}
 
 const stmtGet = db.prepare<[number], Download>("SELECT * FROM downloads WHERE id = ?");
 const stmtQueued = db.prepare<[], { id: number }>(
@@ -143,7 +164,7 @@ class DownloadQueue {
     db.prepare(
       "UPDATE downloads SET status = 'paused', progress = ?, downloaded_bytes = ?, started_at = NULL, error = NULL WHERE id = ?",
     ).run(pct, bytes, id);
-    logger.info({ id }, "任务已暂停");
+    logger.info({ id, file: describeRow(row) }, `任务已暂停：${describeRow(row)}`);
     return true;
   }
 
@@ -161,7 +182,7 @@ class DownloadQueue {
     db.prepare(
       "UPDATE downloads SET status = 'stopped', progress = ?, downloaded_bytes = ?, finished_at = ?, error = ? WHERE id = ?",
     ).run(pct, bytes, Date.now(), CANCEL_TEXT.stop, id);
-    logger.info({ id }, "任务已停止");
+    logger.info({ id, file: describeRow(row) }, `任务已停止：${describeRow(row)}`);
     return true;
   }
 
@@ -176,7 +197,7 @@ class DownloadQueue {
     ).run(id);
     // 排到队首：当前任务下完就轮到它，不用排到最后面去等
     this.queue = [id, ...this.queue.filter((x) => x !== id)];
-    logger.info({ id }, "任务继续下载");
+    logger.info({ id, file: describeRow(row) }, `任务继续下载：${describeRow(row)}`);
     this.pump();
     return true;
   }
@@ -203,7 +224,7 @@ class DownloadQueue {
     for (const other of this.active) {
       if (other !== id) this.cancelIntent.set(other, "preempt");
     }
-    logger.info({ id }, "任务插队到队首");
+    logger.info({ id, file: describeRow(row) }, `任务插队到队首：${describeRow(row)}`);
     this.pump();
     return true;
   }
@@ -317,14 +338,14 @@ class DownloadQueue {
       db.prepare(
         "UPDATE downloads SET status = 'paused', progress = ?, downloaded_bytes = ?, started_at = NULL, error = NULL WHERE id = ?",
       ).run(pct, bytes, id);
-      logger.info({ id, pct }, "下载已暂停");
+      logger.info({ id, file: describeRow(row), pct }, `下载已暂停：${describeRow(row)}（${pct}%）`);
       return;
     }
     if (mode === "stop") {
       db.prepare(
         "UPDATE downloads SET status = 'stopped', progress = ?, downloaded_bytes = ?, finished_at = ?, error = ? WHERE id = ?",
       ).run(pct, bytes, Date.now(), CANCEL_TEXT.stop, id);
-      logger.info({ id, pct }, "下载已停止");
+      logger.info({ id, file: describeRow(row), pct }, `下载已停止：${describeRow(row)}（${pct}%）`);
       return;
     }
 
@@ -336,7 +357,7 @@ class DownloadQueue {
       this.queue.splice(at, 0, id);
     }
     this.jumpTarget = null;
-    logger.info({ id, pct }, "任务让位给插队任务，稍后继续");
+    logger.info({ id, file: describeRow(row), pct }, `任务让位给插队任务，稍后继续：${describeRow(row)}`);
   }
 
   private async run(id: number): Promise<void> {
@@ -354,6 +375,16 @@ class DownloadQueue {
       lastBytes: 0,
     });
     let targetPath: string | null = null;
+    // 日志统一带上「哪条消息、哪一集、哪个文件」，排障时不用再翻库对号
+    const meta = decodeMeta(row.emby_json);
+    const logContext = {
+      id,
+      messageId: row.message_id,
+      channel: row.channel_title ?? null,
+      series: meta?.series ?? null,
+      season: meta?.season ?? null,
+      episode: meta?.episode ?? null,
+    };
 
     try {
       const settings = getSettings();
@@ -391,13 +422,17 @@ class DownloadQueue {
       }
 
       const candidate = path.join(env.downloadDir, rel);
+      const label = meta ? describeMeta(meta) : path.basename(candidate);
       let resumeInPlace = false;
       // 同一集重跑时目标文件已经在位（大小一致）：直接算完成，不重复下一遍
       if (row.file_size > 0 && fs.existsSync(candidate)) {
         const existing = await fs.promises.stat(candidate).catch(() => null);
         if (existing && existing.size === row.file_size) {
           stmtDone.run(existing.size, candidate, existing.size, Date.now(), id);
-          logger.info({ id, file: path.basename(candidate) }, "目标文件已存在，跳过重复下载");
+          logger.info(
+            { ...logContext, file: relPathOf(candidate), size: existing.size },
+            `跳过重复下载：${label} → ${relPathOf(candidate)}（本地已有 ${humanSize(existing.size)}）`,
+          );
           // 文件在但元信息可能缺（老版本下载的），顺手补齐
           await finalizeMedia(candidate, row.emby_json);
           return;
@@ -461,15 +496,21 @@ class DownloadQueue {
         if (Buffer.isBuffer(buffer) && buffer.length > 0) {
           await fs.promises.writeFile(targetPath, buffer);
           stat = await fs.promises.stat(targetPath);
-          logger.info({ id, size: stat.size }, "图片改走内存下载完成");
+          logger.info(
+            { ...logContext, file: relPathOf(targetPath), size: stat.size },
+            `图片改走内存下载完成：${relPathOf(targetPath)}（${humanSize(stat.size)}）`,
+          );
         }
       }
       // 校验落地文件：0 字节说明写入被中断，不能标记成功，否则会静默留下坏文件
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
       stmtDone.run(stat.size, targetPath, stat.size, Date.now(), id);
       this.attempts.delete(id);
-      logger.info({ id, file: path.basename(targetPath), size: stat.size }, "下载完成");
-      // 生成 Emby 的 .nfo / 封面（失败不影响下载结果）
+      logger.info(
+        { ...logContext, file: relPathOf(targetPath), size: stat.size },
+        `下载完成：${label} → ${relPathOf(targetPath)}（${humanSize(stat.size)}）`,
+      );
+      // 生成 Emby 的 .nfo / 本集缩略图 / 剧集封面（失败不影响下载结果）
       await finalizeMedia(targetPath, row.emby_json);
     } catch (err) {
       // 用户手动中断：不是失败，别计入重试次数，也不要触发自动重试
@@ -479,11 +520,15 @@ class DownloadQueue {
       }
       const message = (err as Error)?.message || "下载失败";
       const tried = this.attempts.get(id) ?? 0;
+      const where = targetPath ? relPathOf(targetPath) : row.file_name;
       if (targetPath) await fs.promises.unlink(targetPath).catch(() => undefined);
 
       if (tried < MAX_AUTO_RETRY) {
         this.attempts.set(id, tried + 1);
-        logger.warn({ id, err: message, attempt: tried + 1 }, "下载失败，稍后重试");
+        logger.warn(
+          { ...logContext, file: where, err: message, attempt: tried + 1 },
+          `下载失败，稍后重试：${meta ? describeMeta(meta) : row.file_name}（${message}）`,
+        );
         db.prepare(
           "UPDATE downloads SET status = 'queued', progress = 0, downloaded_bytes = 0, started_at = NULL WHERE id = ?",
         ).run(id);
@@ -495,8 +540,11 @@ class DownloadQueue {
       }
 
       stmtFail.run(message.slice(0, 500), Date.now(), id);
-      logger.error({ id, err: message }, "下载失败");
-      // 封面图彻底失败时也要触发一次拼图：有几张算几张，别让别的图白等
+      logger.error(
+        { ...logContext, file: where, err: message },
+        `下载失败：${meta ? describeMeta(meta) : row.file_name}（${message}）`,
+      );
+      // 老版本的封面图任务彻底失败时也触发一次收尾，别让同目录的活文件白等
       if (row.save_dir && (row.save_name ?? "").startsWith(".art-")) {
         const fallback = path.join(env.downloadDir, row.save_dir, row.save_name ?? "x");
         await finalizeMedia(fallback, row.emby_json);

@@ -5,7 +5,6 @@ import { extractMedia, groupIdOf, messageText, type MediaInfo } from "./media";
 import { parseCaptionMeta, planFileNames } from "./naming";
 import { channelMessageLink } from "./entity";
 import { encodeMeta, type EmbyMeta } from "./emby";
-import { preferredArtOrdinals } from "./covers";
 
 /**
  * 把「一条消息（含整个相册）」落成下载任务 + 监控记录。
@@ -85,9 +84,9 @@ const stmtFindDownload = db.prepare<[number, number, string], { id: number; stat
 /**
  * 按「目标文件名」查重。
  *
- * 封面图是随机挑 3 张再按 .art-<集号>-N 命名的：同一条消息重新抓一次，
- * 挑中的图可能不同，message_id 也就变了，但文件名还是 .art-10500-2.jpg。
- * 只按 (message_id, file_name) 判重会留下两行抢同一个文件，所以要按文件名再查一次。
+ * 同一集可能从不同链接、不同消息各抓一次（剧集频道常见「第 4 集」被重发），
+ * message_id 不同但目标文件名一样。只按 (message_id, file_name) 判重会留下
+ * 两行抢同一个文件，所以要按文件名再查一次。
  */
 const stmtFindBySaveName = db.prepare<[number, string | null, string], { id: number; status: string }>(
   "SELECT id, status FROM downloads WHERE channel_id = ? AND save_dir IS ? AND save_name = ?",
@@ -172,17 +171,14 @@ const runGroup = db.transaction(
 
     const totalSize = media.reduce((sum, entry) => sum + (entry.info.size || 0), 0);
     // 以正文说明为准命名：剧名文件夹 + 剧名S01E04.mp4（解析不到剧名则回退原名）
-    // 开启 Emby 元信息后，图片只随机留 N 张当封面，其余标记 skip 不入队
-    const artCount = settings.emby_meta ? Math.max(0, Math.min(9, settings.cover_images || 0)) : 0;
-    // 监控历史里预览过这条消息的封面 → 用同样的几张图做 Emby 封面
-    const artPrefer = artCount > 0 ? preferredArtOrdinals(channel.id, messageId) : null;
+    // 开启 Emby 元信息后，剧集类的图片一律不下载 —— 封面由下载完成后从视频随机截帧生成，
+    // 消息里的图片往往带集数水印或台词，做封面反而难看，还白占带宽
+    const skipAttachments = settings.emby_meta;
     const naming = planFileNames(
       sourceText,
       media.map((entry) => entry.info),
       {
-        artCount,
-        artPrefix: String(messageId),
-        artPrefer: artPrefer ?? undefined,
+        skipAttachments,
         // 认不出剧名时：一个链接一个文件夹，名字取正文
         looseFolder: settings.fallback_folder,
         uniqueLooseDir: (base) =>

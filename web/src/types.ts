@@ -216,12 +216,13 @@ export interface AppSettings {
   max_file_size: number;
   auto_scan: boolean;
   file_template: string;
-  /** 为 Emby 生成 nfo / 封面；开启时图片只留 cover_images 张 */
+  /** 为 Emby 生成 nfo / 缩略图 / 封面；开启时消息里的图片不再下载 */
   emby_meta: boolean;
+  /** @deprecated 1.0.2 起封面改为视频截帧，此字段不再参与逻辑，仅为兼容保留 */
   cover_images: number;
   /** 认不出剧名时：一条链接一个文件夹，名字取正文 */
   fallback_folder: boolean;
-  /** 消息里没图时用 ffmpeg 随机截帧生成封面 */
+  /** 下载完成后从视频随机截帧，生成每集缩略图与剧集目录封面 */
   auto_cover_frames: boolean;
   /** Telegram 机器人开关与白名单（token 单独管理，不在这里返回） */
   bot_enabled: boolean;

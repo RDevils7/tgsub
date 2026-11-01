@@ -859,12 +859,14 @@ metadataRouter.post(
 
       if (row) syncEmbyJson(row, fields);
 
-      // 目录里没有剧集封面时，用视频随机截帧补上
+      // 每集都要有缩略图；剧集目录的三张封面以第一集为准，
+      // 第一集还没下（或封面缺失）时先用当前集顶上，之后第一集下载完成会覆盖
       const poster = path.join(file.dir, "poster.jpg");
-      if (!fs.existsSync(poster)) {
-        const made = await autoCoversFromVideo(file.path, file.dir);
-        coverCount += made.length;
-      }
+      const made = await autoCoversFromVideo(file.path, file.dir, {
+        base: file.base,
+        isFirst: info.episode === 1 || !fs.existsSync(poster),
+      });
+      coverCount += made.length;
     }
 
     // 剧集信息（tvshow.nfo）：没有就按目录名生成一份

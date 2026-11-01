@@ -184,6 +184,24 @@ migrateOnce("migration_builtin_tdl_v101", () => {
 });
 
 /**
+ * 1.0.2：封面与每集缩略图改为「下载完成后从视频随机截帧」，不再下载消息里的图片。
+ *
+ * 老库里可能还躺着 .art-* 的封面图任务（排队中/失败重试中等），升级后要一并作废，
+ * 否则它们还会继续把那些图片拉下来，白占带宽也白占目录。
+ */
+migrateOnce("migration_video_covers_v102", () => {
+  const res = db
+    .prepare(
+      "UPDATE downloads SET status = 'skipped', error = '封面已改为视频截帧，不再下载消息图片' " +
+        "WHERE save_name LIKE '.art-%' AND status IN ('queued','downloading','paused','stopped','failed')",
+    )
+    .run();
+  if (res.changes > 0) {
+    logger.info({ count: res.changes }, "已作废旧版封面图任务（封面改为视频截帧）");
+  }
+});
+
+/**
  * 老数据合并：早期版本对相册的每条子消息各写一行，
  * 现在「一条消息 = 一行」（相册整组算一条），需要把历史数据收敛掉。
  *

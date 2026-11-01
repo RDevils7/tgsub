@@ -10,13 +10,11 @@ import { channelEntityKey } from "./entity";
 /**
  * 监控历史的「封面预览」缓存。
  *
- * 一次下载会用消息里随机挑的 3 张图做 Emby 的 poster / landscape / fanart，
- * 这 3 张原图在拼图结束后就被删掉了。为了能在监控历史里悬停回看，这里把它们
- * 复制一份到 data/covers/<频道ID>-<消息ID>-<序号>.<ext>（不进媒体库，不会被 Emby 扫到）。
+ * 注意：这里**只服务于界面预览**（列表里悬停/展开时看一眼这条消息长什么样），
+ * 与 Emby 封面无关 —— 1.0.2 起 Emby 的封面和每集缩略图全部由 ffmpeg 从视频随机截帧生成。
  *
- * 还没下载过的消息也要能预览：第一次悬停时按需从 Telegram 取 3 张缩略图，
- * 并把「用的是相册里第几张图」记进 <key>.json。之后真正下载时 enqueue 会读这份记录，
- * 用同样的 3 张图做封面 —— 保证「预览看到的」和「下载时用的」完全一致。
+ * 预览图按需从 Telegram 取 3 张缩略图（320px），落在 data/covers/<频道ID>-<消息ID>-<序号>.<ext>，
+ * 不进媒体库、不会被 Emby 扫到。第一次悬停时取一次，之后走缓存。
  */
 
 const coverDir = path.join(env.dataDir, "covers");
@@ -89,26 +87,6 @@ async function dropSameIndex(channelId: number, messageId: number, index: number
   const names = await fs.promises.readdir(coverDir).catch(() => [] as string[]);
   for (const name of names) {
     if (name.startsWith(prefix)) await fs.promises.unlink(path.join(coverDir, name)).catch(() => undefined);
-  }
-}
-
-/** 下载完成时调用：把封面原图从媒体目录复制到缓存目录 */
-export async function saveCoverFromFile(
-  channelId: number,
-  messageId: number,
-  index: number,
-  srcPath: string,
-): Promise<string | null> {
-  if (index <= 0) return null;
-  await dropSameIndex(channelId, messageId, index);
-  const ext = (path.extname(srcPath) || ".jpg").toLowerCase();
-  const file = `${coverKey(channelId, messageId)}-${index}${ext}`;
-  try {
-    await fs.promises.copyFile(srcPath, path.join(coverDir, file));
-    return file;
-  } catch (err) {
-    logger.warn({ err: (err as Error).message, srcPath }, "封面缓存复制失败");
-    return null;
   }
 }
 
@@ -235,23 +213,4 @@ export async function fetchCaption(channel: Channel, messageId: number): Promise
     .join("\n")
     .trim();
   return text || null;
-}
-
-/** 下载时优先复用预览里选中的那几张图，保证「预览 = 封面」 */
-export function preferredArtOrdinals(channelId: number, messageId: number): number[] | null {
-  const meta = readCoverMeta(channelId, messageId);
-  if (!meta || meta.source !== "telegram" || !meta.photos.length) return null;
-  return meta.photos;
-}
-
-/** 记录「这批封面图是从下载来的」，覆盖掉预览时的临时记录 */
-export async function markCoversFromDownload(channelId: number, messageId: number): Promise<void> {
-  const covers = await listCovers(channelId, messageId);
-  if (!covers.length) return;
-  writeCoverMeta(channelId, messageId, {
-    photos: [],
-    files: covers.map((c) => c.file),
-    source: "download",
-    at: Date.now(),
-  });
 }

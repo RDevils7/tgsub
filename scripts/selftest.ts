@@ -234,6 +234,19 @@ check("封面沿用监控历史里预览过的那几张", () => {
   assert.ok(plan[8].name?.startsWith(".art-"), "索引 7 的图片应被选为封面");
   assert.equal(plan[1].skip, true, "索引 0 的图片应被跳过");
 });
+check("Emby 模式下图片一律不下载（封面改由视频截帧）", () => {
+  const plan = planFileNames(caption, albumMedia, { skipAttachments: true });
+  assert.equal(plan[0].name, "美人局S01E04.mp4");
+  // 视频之后的所有图片都必须 skip，且不能留下任何文件名
+  const attachments = plan.slice(1);
+  assert.equal(attachments.every((p) => p.skip === true), true);
+  assert.equal(attachments.every((p) => p.name === null), true);
+});
+check("纯图集不受 skipAttachments 影响", () => {
+  const plan = planFileNames(caption, albumMedia.slice(1), { skipAttachments: true });
+  assert.equal(plan.some((p) => p.skip), false);
+  assert.equal(plan[0].name, "美人局S01E04-p1.jpg");
+});
 check("纯图集不做封面裁剪", () => {  const plan = planFileNames(caption, albumMedia.slice(1), { artCount: 3 });
   assert.equal(plan.some((p) => p.skip), false);
   assert.equal(plan[0].name, "美人局S01E04-p1.jpg");
@@ -666,11 +679,20 @@ async function ffmpegProbeChecks(): Promise<void> {
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
+  const crypto = await import("node:crypto");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const runFfmpeg = promisify(execFile);
   const { default: sharp } = await import("sharp");
   const { encodeMeta, finalizeMedia } = await import("../server/src/tg/emby");
+  const { autoCoversFromVideo } = await import("../server/src/tg/autocover");
+  const { ffmpegInfo } = await import("../server/src/tg/ffmpeg");
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-emby-"));
-  for (const item of [    { file: ".art-1.jpg", width: 1920, height: 1080 },
+
+  // 老版本会把消息里的图片下成 .art-N.jpg 当封面素材，升级后应被自动清理
+  for (const item of [
+    { file: ".art-1.jpg", width: 1920, height: 1080 },
     { file: ".art-2.jpg", width: 1080, height: 1920 },
     { file: ".art-3.jpg", width: 1280, height: 720 },
   ]) {
@@ -680,6 +702,7 @@ async function embyChecks(): Promise<void> {
       .jpeg()
       .toFile(path.join(dir, item.file));
   }
+
   const video = path.join(dir, "美人局S01E04.mp4");
   await fs.writeFile(video, "fake");
 
@@ -711,7 +734,54 @@ async function embyChecks(): Promise<void> {
     assert.ok(show.includes("<tvshow>"));
     assert.ok(show.includes("<title>美人局</title>"));
   });
-  await acheck("生成三张封面并按比例裁剪", async () => {
+  await acheck("老版本临时封面图被清理，不会混进媒体库", async () => {
+    const left = (await fs.readdir(dir)).filter((n) => n.startsWith(".art-"));
+    assert.equal(left.length, 0);
+  });
+  await acheck("假视频截帧失败不抛错、也不留半成品", async () => {
+    const files = await fs.readdir(dir);
+    assert.ok(!files.some((n) => n.endsWith("-thumb.jpg")));
+  });
+
+  const info = await ffmpegInfo();
+  if (!info.available) {
+    console.log("  - 跳过截帧用例（ffmpeg 不可用）");
+    await fs.rm(dir, { recursive: true, force: true });
+    return;
+  }
+
+  const clipA = path.join(dir, "clipA.mp4");
+  const clipB = path.join(dir, "clipB.mp4");
+  const sources: Array<[string, string]> = [
+    ["testsrc=size=640x360:rate=25", clipA],
+    ["smptebars=size=640x360:rate=25", clipB],
+  ];
+  for (const [src, out] of sources) {
+    await runFfmpeg(
+      info.ffmpeg as string,
+      ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-t", "2", "-pix_fmt", "yuv420p", "-c:v", "mpeg4", out],
+      { timeout: 120_000 },
+    );
+  }
+
+  const sha1 = async (file: string): Promise<string> => {
+    const buf = await fs.readFile(file);
+    return crypto.createHash("sha1").update(buf).digest("hex");
+  };
+
+  const madeFirst = await autoCoversFromVideo(clipA, dir, { base: "美人局S01E01", isFirst: true });
+  await acheck("第一集生成单集缩略图与三张剧集封面", async () => {
+    assert.ok(madeFirst.includes("美人局S01E01-thumb.jpg"), "缺单集缩略图");
+    assert.ok(madeFirst.includes("poster.jpg"), "缺 poster");
+    assert.ok(madeFirst.includes("landscape.jpg"), "缺 landscape");
+    assert.ok(madeFirst.includes("fanart.jpg"), "缺 fanart");
+  });
+  await acheck("缩略图保持视频原始比例且不超过 1280 宽", async () => {
+    const thumb = await sharp(path.join(dir, "美人局S01E01-thumb.jpg")).metadata();
+    assert.equal(thumb.width, 640);
+    assert.equal(thumb.height, 360);
+  });
+  await acheck("剧集封面尺寸符合 Emby 规格", async () => {
     const poster = await sharp(path.join(dir, "poster.jpg")).metadata();
     assert.deepEqual([poster.width, poster.height], [1000, 1500]);
     const landscape = await sharp(path.join(dir, "landscape.jpg")).metadata();
@@ -719,9 +789,20 @@ async function embyChecks(): Promise<void> {
     const fanart = await sharp(path.join(dir, "fanart.jpg")).metadata();
     assert.deepEqual([fanart.width, fanart.height], [1920, 1080]);
   });
-  await acheck("临时封面文件已清理", async () => {
-    const left = (await fs.readdir(dir)).filter((n) => n.startsWith(".art-"));
-    assert.equal(left.length, 0);
+
+  const posterBefore = await sha1(path.join(dir, "poster.jpg"));
+  const madeSecond = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E02", isFirst: false });
+  await acheck("第二集只生成自己的缩略图，不动剧集封面", async () => {
+    assert.ok(madeSecond.includes("美人局S01E02-thumb.jpg"), "第二集缺缩略图");
+    assert.ok(!madeSecond.includes("poster.jpg"), "非第一集不该重做剧集封面");
+    assert.equal(await sha1(path.join(dir, "poster.jpg")), posterBefore);
+  });
+
+  const madeAgain = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E01", isFirst: true });
+  await acheck("第一集重跑时覆盖剧集封面（目录图始终同第一集）", async () => {
+    assert.ok(madeAgain.includes("poster.jpg"));
+    assert.ok(!madeAgain.includes("美人局S01E01-thumb.jpg"), "缩略图已存在不该重做");
+    assert.notEqual(await sha1(path.join(dir, "poster.jpg")), posterBefore);
   });
 
   await fs.rm(dir, { recursive: true, force: true });

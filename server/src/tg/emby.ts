@@ -1,27 +1,28 @@
 import fs from "node:fs";
 import path from "node:path";
-import { db, getSettings } from "../db";
+import { getSettings } from "../db";
 import { logger } from "../logger";
 import { sanitizeSegment } from "../utils";
 import { autoCoversFromVideo } from "./autocover";
-import { markCoversFromDownload, saveCoverFromFile } from "./covers";
 import { fixTelegramLink } from "./entity";
-import { loadSharp } from "./sharp";
 
 /**
  * 生成 Emby 可直接识别的本地媒体信息。
  *
  * 落盘结构（一集短剧）：
  *   美人局/
- *     美人局S01E04.mp4
- *     美人局S01E04.nfo      ← episodedetails，标题/集数/简介/标签
- *     tvshow.nfo            ← 剧集信息（Emby 剧集库读这个）
- *     poster.jpg            ← 竖版 2:3
- *     landscape.jpg         ← 横版 16:9
- *     fanart.jpg            ← 背景图 16:9
+ *     美人局S01E01.mp4
+ *     美人局S01E01.nfo       ← episodedetails，标题/集数/简介/标签
+ *     美人局S01E01-thumb.jpg ← 这一集的缩略图（视频随机截帧）
+ *     美人局S01E02.mp4
+ *     美人局S01E02-thumb.jpg
+ *     tvshow.nfo             ← 剧集信息（Emby 剧集库读这个）
+ *     poster.jpg             ← 竖版 2:3，取自第一集
+ *     landscape.jpg          ← 横版 16:9，取自第一集
+ *     fanart.jpg             ← 背景图 16:9，取自第一集
  *
- * 封面来自消息里随机挑的 3 张图片（下载时先落成 .art-N.jpg，这里再统一转成
- * Emby 认识的三张图并删除临时文件）。sharp 不可用时退化为原图复制。
+ * 所有图片都由 ffmpeg 从视频里随机截帧生成，不再下载消息中的图片：
+ * 消息里的图片既占带宽，又常常是「第几集」的水印图，做封面并不好看。
  */
 
 export interface EmbyMeta {
@@ -80,14 +81,21 @@ function isoDate(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function episodeTag(meta: EmbyMeta): string {
+/** `S01E04` 形式的集号；没有集数时返回空串。日志里也用它拼可读标识 */
+export function formatEpisodeTag(meta: EmbyMeta): string {
   const season = String(meta.season || 1).padStart(2, "0");
   if (meta.episode === null) return "";
   return `S${season}E${String(meta.episode).padStart(2, "0")}`;
 }
 
+/** 「剧名 S01E04」；没有集数时只有剧名。日志与错误提示统一用它 */
+export function describeMeta(meta: EmbyMeta): string {
+  const tag = formatEpisodeTag(meta);
+  return tag ? `${meta.series} ${tag}` : meta.series;
+}
+
 export function buildEpisodeNfo(meta: EmbyMeta): string {
-  const tag = episodeTag(meta);
+  const tag = formatEpisodeTag(meta);
   const title = meta.episode !== null ? `${meta.series} ${tag}` : meta.series;
   const lines = [
     '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
@@ -139,123 +147,33 @@ export function buildShowNfo(meta: EmbyMeta): string {
   return lines.join("\n");
 }
 
-const assembling = new Set<string>();
-const assemblePending = new Set<string>();
-
-const stmtPendingArt = db.prepare<[string], { n: number }>(
-  "SELECT COUNT(*) AS n FROM downloads WHERE save_dir = ? AND save_name LIKE '.art-%' AND status IN ('queued','downloading')",
-);
-/** 临时封面图属于哪个频道（.art 文件名里只带相册代表消息 id，频道 id 得从库里查） */
-const stmtArtChannel = db.prepare<[string, string], { channel_id: number }>(
-  "SELECT channel_id FROM downloads WHERE save_dir = ? AND save_name = ? LIMIT 1",
-);
-
-/** 还有封面图没下完：这时拼图会把正在写入的临时文件卷进去，必须等 */
-function hasPendingArt(dir: string): boolean {
-  const row = stmtPendingArt.get(path.basename(dir));
-  return (row?.n ?? 0) > 0;
-}
-
 /**
- * 把目录里下载好的 .art-<消息id>-N.* 转成 poster/landscape/fanart 三张图。
- *
- * 返回：
- *  - "art"     已用消息图片生成
- *  - "pending" 还有封面图在下载，等它们下完再来
- *  - "none"    目录里没有封面图（调用方可以改用视频截帧兜底）
+ * 删掉老版本留下的临时封面图（`.art-<消息id>-N.jpg`）。
+ * 1.0.2 起封面改为视频截帧，这些文件不再产生；留着会混进媒体库，顺手清理。
  */
-export async function assembleArt(dir: string): Promise<"art" | "pending" | "none"> {
-  if (assembling.has(dir)) {
-    // 正在拼图时又有新图落地：记一笔，结束后再跑一遍，避免漏掉后到的封面
-    assemblePending.add(dir);
-    return "pending";
+async function cleanupLegacyArt(dir: string): Promise<void> {
+  const entries = await fs.promises.readdir(dir).catch(() => [] as string[]);
+  let removed = 0;
+  for (const name of entries) {
+    if (!/^\.art-[A-Za-z0-9-]+\.(jpe?g|png|webp)$/i.test(name)) continue;
+    await fs.promises.unlink(path.join(dir, name)).catch(() => undefined);
+    removed += 1;
   }
-  assembling.add(dir);
-  try {
-    if (hasPendingArt(dir)) return "pending";
-    const entries = await fs.promises.readdir(dir).catch(() => [] as string[]);
-    const arts = entries.filter((name) => /^\.art-[A-Za-z0-9-]+\.(jpe?g|png|webp)$/i.test(name)).sort();
-    if (arts.length === 0) return "none";
-
-    const sources = arts.map((name) => path.join(dir, name));
-    const sharp = await loadSharp();
-
-    // 按宽高比排序：最瘦的当竖版海报，最宽的当横版图与背景图
-    const sized = await Promise.all(
-      sources.map(async (file) => {
-        if (!sharp) return { file, ratio: 1 };
-        try {
-          const meta = await sharp(file).metadata();
-          const w = meta.width ?? 1;
-          const h = meta.height ?? 1;
-          return { file, ratio: h > 0 ? w / h : 1 };
-        } catch {
-          return { file, ratio: 1 };
-        }
-      }),
-    );
-    sized.sort((a, b) => a.ratio - b.ratio); // 从最宽到最瘦
-    const widest = sized[0];
-    const tallest = sized[sized.length - 1];
-    const middle = sized.length > 1 ? sized[1] : widest;
-
-    const plan: Array<{ target: string; source: string; width: number; height: number }> = [
-      { target: "poster.jpg", source: tallest.file, width: 1000, height: 1500 },
-      { target: "landscape.jpg", source: widest.file, width: 1920, height: 1080 },
-      { target: "fanart.jpg", source: (middle ?? widest).file, width: 1920, height: 1080 },
-    ];
-
-    for (const item of plan) {
-      const target = path.join(dir, item.target);
-      try {
-        if (sharp) {
-          await sharp(item.source)
-            .resize({ width: item.width, height: item.height, fit: "cover", position: "attention" })
-            .jpeg({ quality: 90 })
-            .toFile(target);
-        } else {
-          await fs.promises.copyFile(item.source, target);
-        }
-      } catch (err) {
-        logger.warn({ err: (err as Error).message, target: item.target }, "封面图生成失败，跳过");
-      }
-    }
-
-    // 临时封面文件用完即删，避免混进媒体库。
-    // 删之前先在监控历史的封面缓存里留一份，方便页面上回看这 3 张图。
-    // 封面按「相册代表消息 id」归档：一条相册里 3 张图各自有不同的 message_id，
-    // 但监控记录只有一条（组内最小 id），所以 key 取自文件名 .art-<代表id>-<序号>
-    const owners = new Map<string, { channel_id: number; message_id: number }>();
-    for (const name of arts) {
-      const parsed = /^\.art-([A-Za-z0-9-]+?)-(\d+)\.[a-z0-9]+$/i.exec(name);
-      if (!parsed) continue;
-      const row = stmtArtChannel.get(path.basename(dir), name);
-      if (!row) continue;
-      const messageId = Number(parsed[1]);
-      const index = Number(parsed[2]);
-      if (!Number.isFinite(messageId) || !Number.isFinite(index)) continue;
-      await saveCoverFromFile(row.channel_id, messageId, index, path.join(dir, name));
-      owners.set(`${row.channel_id}-${messageId}`, { channel_id: row.channel_id, message_id: messageId });
-    }
-    for (const row of owners.values()) await markCoversFromDownload(row.channel_id, row.message_id);
-    for (const file of sources) await fs.promises.unlink(file).catch(() => undefined);
-    logger.info({ dir: path.basename(dir), art: arts.length }, "已生成 Emby 封面图");
-    return "art";
-  } finally {
-    assembling.delete(dir);
-    if (assemblePending.delete(dir)) void assembleArt(dir);
+  if (removed > 0) {
+    logger.info({ dir: path.basename(dir), removed }, `清理老版本遗留的临时封面图 ${removed} 个`);
   }
 }
 
-/** 视频落盘后：写剧集 nfo + 剧集信息 + 封面 */
+/** 视频落盘后：写剧集 nfo + 剧集信息 + 本集缩略图与剧集封面 */
 export async function finalizeMedia(filePath: string, rawMeta: string | null | undefined): Promise<void> {
   const meta = decodeMeta(rawMeta);
   if (!meta) return;
   const dir = path.dirname(filePath);
+  const label = describeMeta(meta);
+  const base = path.basename(filePath, path.extname(filePath));
 
   try {
     if (meta.kind !== "art") {
-      const base = path.basename(filePath, path.extname(filePath));
       const nfoPath = path.join(dir, `${sanitizeSegment(base, 120)}.nfo`);
       await fs.promises.writeFile(nfoPath, buildEpisodeNfo(meta), "utf8");
 
@@ -263,21 +181,39 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
       if (!fs.existsSync(showPath)) {
         await fs.promises.writeFile(showPath, buildShowNfo(meta), "utf8");
       }
-      logger.info({ nfo: path.basename(nfoPath) }, "已写入 Emby 媒体信息");
-    }
+      logger.info(
+        {
+          series: meta.series,
+          season: meta.season,
+          episode: meta.episode,
+          messageId: meta.messageId,
+          dir: path.basename(dir),
+          nfo: path.basename(nfoPath),
+        },
+        `已写入 Emby 媒体信息：${label} → ${path.basename(nfoPath)}`,
+      );
 
-    const art = await assembleArt(dir);
-    // 消息里没有可用图片（或图片还没下完且压根没有）→ 用视频随机截帧兜底
-    if (meta.kind !== "art" && art === "none") {
+      await cleanupLegacyArt(dir);
+
+      // 封面一律来自视频截帧：本集生成 <剧集集名>-thumb.jpg，
+      // 第一集顺便定下剧集目录的 poster / landscape / fanart
       let enabled = true;
       try {
-        enabled = getSettings().auto_cover_frames && getSettings().emby_meta;
+        enabled = getSettings().emby_meta && getSettings().auto_cover_frames;
       } catch {
         enabled = false;
       }
-      if (enabled) await autoCoversFromVideo(filePath, dir);
+      if (enabled) {
+        await autoCoversFromVideo(filePath, dir, {
+          base,
+          isFirst: meta.episode === 1,
+        });
+      }
     }
   } catch (err) {
-    logger.warn({ err: (err as Error).message, dir }, "生成 Emby 媒体信息失败");
+    logger.warn(
+      { err: (err as Error).message, dir: path.basename(dir), series: meta.series, episode: meta.episode },
+      `生成 Emby 媒体信息失败：${label}`,
+    );
   }
 }

@@ -13,6 +13,8 @@ export interface ResizeOptions {
   fit?: string;
   position?: string;
   background?: string;
+  /** 目标尺寸大于原图时不放大（单集缩略图保持画面原始比例时用） */
+  withoutEnlargement?: boolean;
 }
 
 export interface ExtractOptions {

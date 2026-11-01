@@ -584,8 +584,9 @@ function resolveSlots(
  * - 单个视频本身含多集：`剧名S01E01-E10.mp4`（Emby 会认成第 1-10 集）
  * - 解析不到剧名但有视频：一个链接一个文件夹，文件夹与文件同名（正文首行），
  *   同一条消息里的多个视频加 `-01` 后缀区分
- * - 图片：只挑 3 张当封面（Emby 的 poster / landscape / fanart），其余标记 skip 不下载；
+ * - 有视频时的图片：默认整条跳过（`skipAttachments`），封面改由视频截帧生成；
  *   没有视频的消息（纯图集）保持原来的 `剧名S01E04-p1.jpg` 全量下载
+ * - 需要沿用「消息图片当封面」时传 `artCount`，挑 N 张命名成 `.art-*`
  * - 一条消息里有多个文件时，都放进同一个文件夹
  *
  * 解析不到剧名且没有视频（文档、音乐、纯图片）时全部返回 null，走原有命名逻辑。
@@ -597,6 +598,8 @@ export function planFileNames(
     artCount?: number;
     artPrefix?: string;
     artPrefer?: number[];
+    /** 有视频时把非视频附件全部标记 skip（封面改由视频截帧生成） */
+    skipAttachments?: boolean;
     /** 是否启用「无法识别标题 → 一个链接一个文件夹」的兜底命名 */
     looseFolder?: boolean;
     /** 兜底文件夹名重名时改名（同一个链接重下要保持原名） */
@@ -657,7 +660,14 @@ export function planFileNames(
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => !isVideoLike(item));
 
-  // 有视频 = 这是一集短剧：图片只留 3 张做封面，其余不下载
+  // 有视频 = 这是一集短剧。新版本封面全部由视频截帧生成，
+  // 消息里的图片（台词截图、集数水印图）不再下载，连下载记录都不建
+  if (videoIndexes.length > 0 && options.skipAttachments) {
+    for (const { index } of attachmentIndexes) plan[index] = { dir, name: null, skip: true };
+    return plan;
+  }
+
+  // 需要沿用「消息图片当封面」时：只留 N 张，其余不下载
   const artCount = Math.max(0, options.artCount ?? 0);
   if (videoIndexes.length > 0 && artCount > 0) {
     // 监控历史里预览过这条消息的话，沿用当时给用户看的那几张图，

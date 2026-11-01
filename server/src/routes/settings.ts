@@ -75,6 +75,7 @@ settingsRouter.put(
     }
     if (body.auto_scan !== undefined) patch.auto_scan = Boolean(body.auto_scan);
     if (body.emby_meta !== undefined) patch.emby_meta = Boolean(body.emby_meta);
+    // cover_images 已废弃（1.0.3 起封面改为视频截帧），仍接受写入只为兼容旧前端
     if (body.cover_images !== undefined) {
       patch.cover_images = clampInt(body.cover_images, 0, 9, current.cover_images);
     }

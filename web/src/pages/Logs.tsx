@@ -28,14 +28,37 @@ const LEVEL_STYLE: Record<LogLevel, { chip: string; text: string; bar: string }>
   fatal: { chip: "bg-red-500/20 text-red-400", text: "text-red-400", bar: "bg-red-500/80" },
 };
 
-/** 只显示几个关键字段，其余折叠进「详情」 */
-const KEY_FIELDS = ["err", "code", "dcId", "fp", "path", "status", "method", "userId", "reason", "strikes", "delayMs"];
+/** 只显示几个关键字段，其余折叠进「详情」。下载类日志的 messageId / file / series / episode 要能直接看到 */
+const KEY_FIELDS = [
+  "err",
+  "code",
+  "dcId",
+  "fp",
+  "path",
+  "status",
+  "method",
+  "userId",
+  "reason",
+  "strikes",
+  "delayMs",
+  "messageId",
+  "file",
+  "series",
+  "episode",
+  "nfo",
+  "size",
+];
 
 function summarize(entry: LogEntry): string {
   const parts: string[] = [];
   for (const key of KEY_FIELDS) {
     const value = entry.fields[key];
     if (value === undefined || value === null) continue;
+    // 字节数换算成 MB/GB，日志列表里不出现裸数字
+    if (key === "size" && typeof value === "number") {
+      parts.push(`size=${formatBytes(value)}`);
+      continue;
+    }
     if (typeof value === "string") {
       parts.push(`${key}=${value}`);
     } else if (typeof value === "number" || typeof value === "boolean") {
