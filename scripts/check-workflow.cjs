@@ -28,6 +28,15 @@ const leftover = text
 console.log("结构问题:", problems.length ? problems.join("; ") : "无");
 console.log(`GitHub 表达式: ${exprCount} 个，残留未闭合: ${leftover.length} ${leftover.length === 0 ? "✓" : "✗"}`);
 
+// GitHub Actions 禁止在步骤级 if 条件里引用 secrets 上下文，
+// 会让整个 workflow 解析失败（run 瞬间失败、没有任何 job）。
+lines.forEach((l, i) => {
+  if (/^\s*if:/.test(l) && /secrets\./.test(l)) {
+    problems.push(`第 ${i + 1} 行在 if 里引用了 secrets（GitHub Actions 禁止，会导致 workflow 解析失败）`);
+  }
+});
+console.log("secrets-in-if 检查:", problems.some((p) => p.includes("if 里引用")) ? "✗ 存在违规" : "✓ 无违规");
+
 console.log("\n--- jobs ---");
 lines.forEach((l) => {
   const m = l.match(/^  ([a-z-]+):$/);

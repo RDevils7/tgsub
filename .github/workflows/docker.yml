@@ -174,6 +174,12 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # job 级 env 可以引用 secrets，而步骤级 if 不行 ——
+    # GitHub Actions 禁止在 if 条件里用 secrets 上下文，会让 workflow 整体解析失败。
+    # 这里把 Docker Hub 凭据提到 job 级 env，下面的步骤就能用 env.DOCKERHUB_* 判断。
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -189,14 +195,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Docker Hub 用 Access Token 登录（不是账号密码）。
-      # Secret 缺失时跳过登录，GHCR 仍然照常发布，不至于整条流水线挂掉。
+      #
+      # 注意：**不能**在 if: 里直接判断 secrets —— GitHub Actions 禁止在
+      # 步骤级 if 条件中引用 secrets 上下文，会导致整个 workflow 解析失败
+      # （表现为 run 瞬间失败、没有任何 job）。因此把 Secret 透到 env，
+      # 再用 env 判断。
       - name: 登录 Docker Hub
         id: dockerhub_login
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: 计算镜像名（GHCR 要求全小写）
         id: slug
@@ -207,9 +217,6 @@ jobs:
       # registry 地址，push 阶段会直接失败，把整条流水线带崩。
       - name: 组装镜像地址列表
         id: images
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           {
             echo "list<<EOF"
