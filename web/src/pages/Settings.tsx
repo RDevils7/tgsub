@@ -822,8 +822,30 @@ export default function Settings() {
 
         <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <p className="text-[11px] uppercase tracking-wider text-slate-500">存储位置</p>
-          <p className="mt-1.5 break-all font-mono text-[11.5px] text-slate-300">{data.paths.downloadDir}</p>
-          <p className="mt-1 break-all font-mono text-[11px] text-slate-600">{data.paths.dbFile}</p>
+          <dl className="mt-2 space-y-1.5">
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <dt className="shrink-0 text-[11.5px] text-slate-400">下载目录</dt>
+              <dd className="break-all font-mono text-[11.5px] text-slate-300">
+                {data.paths.downloadDir}
+              </dd>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <dt className="shrink-0 text-[11.5px] text-slate-400">数据目录</dt>
+              <dd className="break-all font-mono text-[11.5px] text-slate-300">
+                {data.paths.dataDir}
+              </dd>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <dt className="shrink-0 text-[11.5px] text-slate-500">数据库文件</dt>
+              <dd className="break-all font-mono text-[11px] text-slate-600">
+                {data.paths.dbFile}
+              </dd>
+            </div>
+          </dl>
+          <p className="mt-2 text-[11px] text-slate-600">
+            Docker 部署时下载目录与数据目录是两个独立挂载点，下载目录可单独指向大容量盘；
+            两者由环境变量 DOWNLOAD_DIR / DATA_DIR 决定，重启后生效。
+          </p>
         </div>
 
         <div className="mt-4 flex justify-end">
