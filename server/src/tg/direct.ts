@@ -3,6 +3,7 @@ import { logger } from "../logger";
 import { Channel } from "../types";
 import { getClient } from "./client";
 import { fetchMessageGroup } from "./media";
+import { channelEntityKey, channelMessageLink } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { downloader } from "./downloader";
 
@@ -80,7 +81,7 @@ export function extractTelegramLinks(text: string): string[] {
 
 interface Target {
   channel: Channel;
-  /** 传给 getEntity 的键：优先用户名，其次 tg_id */
+  /** 传给 getEntity 的键：优先用户名，其次 -100 标记形式的频道 ID */
   entityKey: string;
   /** 本次自动新建的频道（会给用户提示） */
   autoAdded: boolean;
@@ -92,7 +93,7 @@ async function resolveTarget(parsed: ParsedLink): Promise<Target> {
   if (parsed.kind === "private") {
     const existing = stmtByTgId.get(parsed.internalId ?? "");
     if (existing) {
-      return { channel: existing, entityKey: existing.username || existing.tg_id || `-100${parsed.internalId}`, autoAdded: false };
+      return { channel: existing, entityKey: channelEntityKey(existing), autoAdded: false };
     }
     if (!parsed.internalId) throw new Error("链接里没有频道 ID");
     const entity = (await client.getEntity(`-100${parsed.internalId}`)) as unknown as {
@@ -106,7 +107,7 @@ async function resolveTarget(parsed: ParsedLink): Promise<Target> {
   const username = parsed.username ?? "";
   const existing = stmtByUsername.get(username);
   if (existing) {
-    return { channel: existing, entityKey: existing.username || existing.tg_id || username, autoAdded: false };
+    return { channel: existing, entityKey: channelEntityKey(existing), autoAdded: false };
   }
   const entity = (await client.getEntity(username)) as unknown as {
     id: unknown;
@@ -122,14 +123,14 @@ function insertChannel(
 ): Target {
   const tgId = String(entity.id);
   const byId = stmtByTgId.get(tgId);
-  if (byId) return { channel: byId, entityKey: byId.username || byId.tg_id || fallbackKey, autoAdded: false };
+  if (byId) return { channel: byId, entityKey: channelEntityKey(byId), autoAdded: false };
 
   const title = entity.title || entity.username || `频道 ${tgId}`;
   // 自动加入的频道默认停用：只用于这次下载，不参与定时扫描
   const info = stmtInsertChannel.run(tgId, entity.username ?? null, title, Date.now());
   const channel = stmtChannelById.get(Number(info.lastInsertRowid)) as Channel;
   logger.info({ channel: title, tgId }, "手动下载自动添加频道（默认停用，不参与定时扫描）");
-  return { channel, entityKey: channel.username || channel.tg_id || fallbackKey, autoAdded: true };
+  return { channel, entityKey: channelEntityKey(channel) || fallbackKey, autoAdded: true };
 }
 
 async function enqueueFromTarget(target: Target, messageId: number, link: string): Promise<DirectResult> {
@@ -178,10 +179,8 @@ export async function downloadFromLink(link: string): Promise<DirectResult> {
 export async function downloadFromChannelMessage(channelId: number, messageId: number): Promise<DirectResult> {
   const channel = stmtChannelById.get(channelId);
   if (!channel) throw new Error("频道不存在");
-  const entityKey = channel.username || channel.tg_id || "";
+  const entityKey = channelEntityKey(channel);
   if (!entityKey) throw new Error("该频道没有可用的标识，无法下载");
-  const link = channel.username
-    ? `https://t.me/${channel.username}/${messageId}`
-    : `https://t.me/c/${String(channel.tg_id ?? "").replace(/^-100/, "")}/${messageId}`;
+  const link = channelMessageLink(channel, messageId);
   return enqueueFromTarget({ channel, entityKey, autoAdded: false }, messageId, link);
 }

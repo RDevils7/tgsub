@@ -1,6 +1,7 @@
 import path from "node:path";
 import { toNumber } from "../utils";
 import { getClient } from "./client";
+import { normalizeEntityKey } from "./entity";
 
 export interface MediaInfo {
   kind: "photo" | "video" | "audio" | "voice" | "document" | "gif";
@@ -160,7 +161,8 @@ export async function fetchMessageGroup(
   messageId: number,
 ): Promise<Array<Record<string, unknown>>> {
   const client = await getClient();
-  const entity = await client.getEntity(entityKey as never);
+  // 兜底归一化：裸数字频道 ID 会被 gramjs 当成用户 ID 去查
+  const entity = await client.getEntity(normalizeEntityKey(entityKey) as never);
   const list = (await client.getMessages(entity as never, { ids: [messageId] })) as unknown as Array<
     Record<string, unknown>
   >;

@@ -7,7 +7,19 @@ import path from "node:path";
 import { matchText } from "../server/src/match";
 import { extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
 import { sanitizeSegment, splitKeywords, toNumber } from "../server/src/utils";
-import { fallbackFolderName, parseCaptionMeta, parseSeriesCaption, planFileNames } from "../server/src/tg/naming";
+import {
+  fallbackFolderName,
+  parseCaptionMeta,
+  parseSeriesCaption,
+  planFileNames,
+  stripLegacyIndex,
+} from "../server/src/tg/naming";
+import {
+  channelEntityKey,
+  channelMessageLink,
+  markedChannelId,
+  normalizeEntityKey,
+} from "../server/src/tg/entity";
 import { Subscription } from "../server/src/types";
 
 let passed = 0;
@@ -269,6 +281,45 @@ check("简介与标签提取", () => {
   assert.ok(meta.plot.includes("老板娘"));
   assert.equal(meta.plot.includes("#"), false);
   assert.deepEqual(meta.tags, ["ai成人短剧", "美人局"]);});
+
+console.log("\n频道实体标识");
+check("裸号频道 ID 转成 -100 标记形式", () => {
+  // 裸号会被 gramjs 当成用户 ID 去查，报 PeerUser 找不到
+  assert.equal(markedChannelId("4457697592"), "-1004457697592");
+  assert.equal(markedChannelId("-1004457697592"), "-1004457697592");
+  assert.equal(markedChannelId("-4457697592"), "-1004457697592");
+  assert.equal(markedChannelId(""), null);
+  assert.equal(markedChannelId("ASC2256"), null);
+});
+check("频道实体键优先用 username，其次标记 ID", () => {
+  assert.equal(channelEntityKey({ username: "ASC2256", tg_id: "3894893955" }), "ASC2256");
+  assert.equal(channelEntityKey({ username: null, tg_id: "4457697592" }), "-1004457697592");
+  assert.equal(channelEntityKey({ username: null, tg_id: null }), "");
+});
+check("实体键归一化：裸数字一律转标记形式", () => {
+  assert.equal(normalizeEntityKey("4457697592"), "-1004457697592");
+  assert.equal(normalizeEntityKey("ASC2256"), "ASC2256");
+  assert.equal(normalizeEntityKey("-1004457697592"), "-1004457697592");
+});
+check("私有频道消息链接走 t.me/c/", () => {
+  assert.equal(
+    channelMessageLink({ username: null, tg_id: "4457697592" }, 1373),
+    "https://t.me/c/4457697592/1373",
+  );
+  assert.equal(
+    channelMessageLink({ username: "ASC2256", tg_id: "3894893955" }, 10500),
+    "https://t.me/ASC2256/10500",
+  );
+});
+
+console.log("\n历史命名修复");
+check("旧版多出来的 -NN 序号被去掉", () => {
+  assert.equal(stripLegacyIndex("我的妈妈徐秋曼S01E02-02.mp4"), "我的妈妈徐秋曼S01E02.mp4");
+  assert.equal(stripLegacyIndex("美人局S01E04-04.nfo"), "美人局S01E04.nfo");
+  assert.equal(stripLegacyIndex("我的妈妈徐秋曼S01E01.mp4"), null);
+  assert.equal(stripLegacyIndex(".art-1373-1.jpg"), null);
+  assert.equal(stripLegacyIndex("老板今天又发飙了-01.mp4"), null);
+});
 
 /** 文件类用例：需要 await，单独提供异步断言入口 */
 async function acheck(name: string, fn: () => Promise<void>): Promise<void> {

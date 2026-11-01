@@ -4,6 +4,7 @@ import { Channel } from "../types";
 import { getClient, hasSession } from "./client";
 import { downloader } from "./downloader";
 import { groupIdOf } from "./media";
+import { channelEntityKey } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { notify } from "./notify";
 
@@ -175,7 +176,7 @@ async function scanChannelOnce(
   let skipped = 0;
 
   try {
-    const entity = await client.getEntity(channel.username || channel.tg_id || "");
+    const entity = await client.getEntity(channelEntityKey(channel) as never);
     const fetched = await fetchMessages(
       entity,
       channel,

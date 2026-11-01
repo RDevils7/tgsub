@@ -5,6 +5,7 @@ import { logger } from "../logger";
 import { Channel } from "../types";
 import { getClient } from "./client";
 import { extractMedia, fetchMessageGroup } from "./media";
+import { channelEntityKey } from "./entity";
 
 /**
  * 监控历史的「封面预览」缓存。
@@ -162,7 +163,7 @@ export async function ensureCovers(channel: Channel, messageId: number): Promise
 
   const task = serialize(async (): Promise<CoverEntry[]> => {
     try {
-      const entityKey = channel.username || channel.tg_id || "";
+      const entityKey = channelEntityKey(channel);
       if (!entityKey) return [];
       const client = await getClient();
       const messages = await fetchMessageGroup(entityKey, messageId);
@@ -225,7 +226,7 @@ export async function ensureCovers(channel: Channel, messageId: number): Promise
 
 /** 取消息的完整正文（老记录的 excerpt 只存了 400 字，悬停时补一次并存库） */
 export async function fetchCaption(channel: Channel, messageId: number): Promise<string | null> {
-  const entityKey = channel.username || channel.tg_id || "";
+  const entityKey = channelEntityKey(channel);
   if (!entityKey) return null;
   const messages = await fetchMessageGroup(entityKey, messageId);
   const text = messages

@@ -255,6 +255,22 @@ export function fallbackFolderName(raw: string): string {
 const isVideoLike = (item: MediaLike): boolean => item.kind === "video" || item.kind === "gif";
 
 /**
+ * 旧版命名会带一截序号：「美人局S01E04-04.mp4」。
+ * 新规则只要「美人局S01E04.mp4」，历史数据靠这个函数纠正。
+ * 认不出来（不是 SxxExx 形态）时返回 null，表示不用改。
+ */
+const LEGACY_INDEX_RE = /^(.*S\d{2}E\d{2})-(\d{2})$/;
+
+export function stripLegacyIndex(fileName: string): string | null {
+  const text = String(fileName ?? "").trim();
+  if (!text) return null;
+  const ext = path.extname(text);
+  const stem = ext ? text.slice(0, -ext.length) : text;
+  if (!LEGACY_INDEX_RE.test(stem)) return null;
+  return `${stem.replace(LEGACY_INDEX_RE, "$1")}${ext}`;
+}
+
+/**
  * 剧集命名（解析到剧名）或兜底命名（一链接一文件夹）共用的视频文件名。
  *
  * 已经带出 SxxExx 集号时不再追加序号：剧名S01E05.mp4 就够了，

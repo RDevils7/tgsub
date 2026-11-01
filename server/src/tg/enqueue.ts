@@ -3,6 +3,7 @@ import { Channel, Subscription } from "../types";
 import { matchText } from "../match";
 import { extractMedia, groupIdOf, messageText, type MediaInfo } from "./media";
 import { parseCaptionMeta, planFileNames } from "./naming";
+import { channelMessageLink } from "./entity";
 import { encodeMeta, type EmbyMeta } from "./emby";
 import { preferredArtOrdinals } from "./covers";
 
@@ -190,7 +191,8 @@ const runGroup = db.transaction(
     );
     const caption = parseCaptionMeta(sourceText);
     const airedAt = Number((messages[0] as { date?: number }).date ?? 0) * 1000 || now;
-    const channelLink = `https://t.me/${channel.username || channel.tg_id}`;
+    // 私有频道没有 username，链接要走 t.me/c/<内部ID>/<消息ID>，否则打不开
+    const channelLink = (messageId: number): string => channelMessageLink(channel, messageId);
     const fileNames = media
       .slice(0, 20)
       .map((entry) => ({ kind: entry.info.kind, name: entry.info.fileName, size: entry.info.size }));
@@ -280,7 +282,7 @@ const runGroup = db.transaction(
           plot: caption.plot,
           tags: caption.tags,
           studio: channel.title,
-          link: `${channelLink}/${Number(msg.id)}`,
+          link: channelLink(Number(msg.id)),
           airedAt,
           messageId: Number(msg.id),
           kind: isVideo ? "video" : "art",

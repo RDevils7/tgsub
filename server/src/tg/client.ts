@@ -1040,6 +1040,31 @@ export interface ResolvedChannel {
   title: string;
 }
 
+/**
+ * 数字输入的频道解析。
+ *
+ * 用户直接填频道 ID 时，裸号会被 gramjs 当成用户 ID 去查 users.getUsers，
+ * 私有频道必然失败。所以先按标记形式（-100<id>）试一次，
+ * 确实不是频道（比如本来就是用户 ID）再退回原始数字。
+ */
+async function resolveEntityInput(
+  client: TelegramClient,
+  target: string,
+  numeric: string | null,
+): Promise<unknown> {
+  if (!numeric) return client.getEntity(target);
+  const candidates = numeric.startsWith("-") ? [numeric] : [`-100${numeric}`, numeric];
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      return await client.getEntity(candidate);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("频道解析失败");
+}
+
 export async function resolveChannel(input: string): Promise<ResolvedChannel> {
   const client = await getClient();
   const raw = input.trim();
@@ -1067,7 +1092,7 @@ export async function resolveChannel(input: string): Promise<ResolvedChannel> {
       .replace(/\/.*$/, "");
 
     const numeric = /^-?\d+$/.test(target) ? target : null;
-    const entity = await client.getEntity(numeric ?? target);
+    const entity = await resolveEntityInput(client, target, numeric);
     const anyEntity = entity as unknown as {
       id: unknown;
       title?: string;

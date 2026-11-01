@@ -7,6 +7,7 @@ import { Download } from "../types";
 import { formatDateFolder, sanitizeSegment, toNumber } from "../utils";
 import { getClient } from "./client";
 import { extractMedia, targetRelativePath } from "./media";
+import { channelEntityKey } from "./entity";
 import { finalizeMedia } from "./emby";
 
 const MAX_AUTO_RETRY = 1;
@@ -360,7 +361,8 @@ class DownloadQueue {
       if (!channel) throw new Error("频道已被删除");
 
       const client = await getClient();
-      const entity = await client.getEntity(channel.username || channel.tg_id || "");
+      // 私有频道没有 username，必须用 -100 标记形式的 ID：裸号会被当成用户 ID
+      const entity = await client.getEntity(channelEntityKey(channel) as never);
       this.checkCancel(id);
       const messages = (await client.getMessages(entity, { ids: [row.message_id] })) as unknown[];
       const message = messages?.[0];
