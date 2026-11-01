@@ -332,7 +332,33 @@ const RECONNECT_RESET_MS = 45_000;
 /** 连续掉线到这个次数，说明不是偶发抖动，日志里直接给出排查方向 */
 const RECONNECT_HINT_AFTER = 5;
 
-function hardenReconnect(client: TelegramClient): void {
+/**
+ * 「心跳还新鲜」的判定窗口。
+ *
+ * gramjs 自己的保活是每 9 秒发一次 PingDelayDisconnect，单次 10 秒超时、
+ * 连续 3 次失败就无条件 `_sender.reconnect()`。实测经代理时 Pong 经常回不来，
+ * 而同一时刻 getMe 是成功的 —— 也就是说连接明明是通的，只是 ping 这一路被误判。
+ * 于是会出现「每 66 秒报一次连接异常」的稳定节奏（9s 等待 + 3×10s 超时 + 30s 退避）。
+ *
+ * 这里改用「getMe 心跳是否还新鲜」来判断连接到底活没活：
+ * 心跳每 45 秒一次，取 75 秒窗口 —— 只要这段时间内 getMe 成功过，就认为连接可用，
+ * 忽略 ping 触发的这次重连。心跳一旦失败就不再更新，窗口自然过期，重连照常进行。
+ */
+const PROBE_HEALTHY_WINDOW_MS = 75_000;
+
+/** 极弱兜底：连续忽略这么多次后强制真重连一次，避免长期挂着一条「半死」连接 */
+const RECONNECT_GUARD_MAX_SKIPS = 10;
+
+/** 最近一次 getMe 心跳成功的时刻（0 = 本次启动后还没成功过） */
+let lastProbeOkAt = 0;
+
+/** 心跳成功即调用，作为「连接确实可用」的唯一判据 */
+export function markProbeHealthy(): void {
+  lastProbeOkAt = Date.now();
+}
+
+/** @internal 导出仅为自检脚本能构造假 sender 验证重连闸门，业务代码请勿直接调用 */
+export function hardenReconnect(client: TelegramClient): void {
   const sender = (client as unknown as { _sender?: Record<string, unknown> })._sender as
     | (Record<string, unknown> & { reconnect: () => void; isReconnecting?: boolean })
     | undefined;
@@ -343,10 +369,34 @@ function hardenReconnect(client: TelegramClient): void {
   let pending: NodeJS.Timeout | null = null;
   let strikes = 0;
   let lastAt = 0;
+  let skipped = 0;
+  let skipNoticeLogged = false;
 
   sender.reconnect = () => {
     if (pending) return;
     const now = Date.now();
+
+    // 闸门：ping 超时但心跳仍新鲜 -> 连接实际可用，忽略这次重连。
+    // 这样既能消掉「每 66 秒刷一条连接异常」的噪音，又不影响真断线时的恢复：
+    // 心跳一失败 lastProbeOkAt 就停更，75 秒后闸门自动失效，重连照常走。
+    const sinceHealthy = lastProbeOkAt > 0 ? now - lastProbeOkAt : Number.POSITIVE_INFINITY;
+    if (sinceHealthy < PROBE_HEALTHY_WINDOW_MS && skipped < RECONNECT_GUARD_MAX_SKIPS) {
+      skipped += 1;
+      if (!skipNoticeLogged) {
+        skipNoticeLogged = true;
+        logger.info(
+          { fp: keyFingerprint(client), sinceHealthyMs: sinceHealthy },
+          "ping 超时但心跳正常，已忽略这次重连（连接实际可用，后续不再逐条记录）",
+        );
+      } else {
+        logger.debug(
+          { fp: keyFingerprint(client), sinceHealthyMs: sinceHealthy, skipped },
+          "再次忽略 ping 超时触发的重连",
+        );
+      }
+      return;
+    }
+
     const stable = lastAt > 0 && now - lastAt > RECONNECT_RESET_MS;
     if (stable) {
       if (strikes > 0) {
@@ -371,6 +421,7 @@ function hardenReconnect(client: TelegramClient): void {
     pending = setTimeout(() => {
       pending = null;
       sender.isReconnecting = false;
+      skipped = 0;
       original();
     }, delay);
     pending.unref?.();
@@ -439,6 +490,7 @@ export async function getClient(opts: { force?: boolean } = {}): Promise<Telegra
         const probe = await probeAuthorization(activeClient);
         if (probe.ok) {
           markSessionValid();
+          markProbeHealthy();
           probeCache = null;
           return activeClient;
         }
@@ -502,6 +554,7 @@ export async function getClient(opts: { force?: boolean } = {}): Promise<Telegra
         activeClient = client;
         lastError = null;
         markSessionValid();
+        markProbeHealthy();
         if (usingBackup) {
           // 备份跑通了就把它提升为主记录，下次启动直接命中最新的那份
           setSession(session);
@@ -592,7 +645,11 @@ export function startAuthWatchdog(): NodeJS.Timeout {
           logger.info({ fp, authorized: probe.ok, code: probe.code }, "认证心跳");
           lastSig = sig;
         }
-        if (probe.ok) return;
+        if (probe.ok) {
+          // 记下「连接确实可用」的时刻：ping 超时触发的重连要靠它来判断是否误判
+          markProbeHealthy();
+          return;
+        }
         if (attempt === 0) {
           await sleep(3000);
           continue;
