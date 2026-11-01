@@ -175,8 +175,18 @@
 
 ### 管理界面
 
-概览统计、频道列表、订阅关键词、监控历史、手动下载、下载记录、设置（含在线登录 Telegram）。
+概览统计、频道列表、订阅关键词、监控历史、手动下载、下载记录、**日志**、设置（含在线登录 Telegram）。
 React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双主题，桌面与移动端均可用。
+
+### 日志页面
+
+服务运行日志内置在 Web 界面的「日志」页，排障时不必 SSH 进容器：
+
+- **级别筛选**：全部 / 错误 / 警告 / 信息 / 调试 / 追踪，每级带计数。
+- **关键词搜索**：同时匹配日志正文与结构化附加字段（`err.code`、`dcId`、`dc` 等）。
+- **自动刷新**：5 秒一次，仅第一页生效；**下载 / 清空**（二次确认）/ **详情展开**（查看完整字段与堆栈）。
+- **三路输出**：`stdout`（`docker compose logs`）、磁盘 `data/logs/app.log`（10MB 轮转）、内存环形缓冲（最近 2000 条，重启后从文件尾部回灌）。
+- 后端实现见 `server/src/lib/logstore.ts`（环形缓冲 + 落盘 + 查询）与 `server/src/routes/logs.ts`（查询 / 统计 / 下载 / 清空 / 回灌）。
 
 ### Telegram 机器人
 
@@ -188,6 +198,9 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
 - **扫码登录**：手机 Telegram 扫一下即可，**无需申请 api_id / api_hash**（内置官方客户端凭证，设备指纹自动对齐）。
 - **session 加密落盘**：AES-256-GCM 加密后存 SQLite，重启进程/重建容器无需重新登录。
 - **单实例锁**：同一机器重复启动会被拒绝，避免同一 authKey 双连导致 `AUTH_KEY_DUPLICATED` 作废。
+- **登录失效自愈**：`AUTH_KEY_UNREGISTERED` 等「服务器已作废」类错误不再做无谓重试，界面直接给出「彻底重置并重新登录」入口（`POST /api/auth/reset`，只清 session，不动频道/订阅/下载记录）。
+- **重连节流加固**：gramjs 的 `_switchDC()` 会重建 `_sender` 对象，节流回调随之丢失、退化成 1 秒激进重连，进而双连触发 `AUTH_KEY_DUPLICATED`。项目对该方法做了包装，切换后重新装上退避节流（`hardenDcSwitch`）。
+- **扫码前清理 + 落库后验证**：开始扫码前先 `resetSessionForRelogin()` 清空旧 session 与备份；扫码落库后用新 session 独立重连验证一次，验证失败即标记失效而不是留下半残状态。
 - **生产就绪**：Docker 多阶段构建、入口脚本自动修正挂载目录属主后降权运行、健康检查、数据卷持久化、可选 HTTP Basic 认证、结构化日志（pino）。
 
 ---
@@ -551,6 +564,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | GET | `/api/auth/qr/state` | 轮询扫码状态（二维码、已扫描、成功） |
 | POST | `/api/auth/send-code`、`/api/auth/sign-in`、`/api/auth/password` | 手机号 + 验证码登录（备选方式） |
 | POST | `/api/auth/session`、`/api/auth/logout`、`/api/auth/retry` | 导入 StringSession、退出、重试连接 |
+| POST | `/api/auth/reset` | 彻底重置登录状态（清 session 与备份，可直接重新扫码；不影响其他数据） |
 | GET / POST | `/api/channels` | 频道列表 / 添加频道 |
 | DELETE | `/api/channels/:id` | 删除频道 |
 | POST | `/api/channels/:id/scan` | 立即扫描单个频道 |
@@ -587,6 +601,12 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
 | GET | `/api/scan/state`、POST `/api/scan` | 扫描状态 / 触发扫描 |
 | GET | `/api/bot`、POST `/api/bot/start`、`stop`、`restart` | 机器人状态与开关 |
+| GET | `/api/logs` | 日志查询（`level`、`q` 关键词、`limit`、`offset`；返回 `items` / `total` / `counts` / `fileSize`） |
+| GET | `/api/logs/stats` | 各级别日志条数与日志文件大小 |
+| GET | `/api/logs/download` | 下载完整日志文件（`tgsub-<时间戳>.log`） |
+| GET | `/api/logs/files` | 日志目录文件清单 |
+| DELETE | `/api/logs` | 清空内存缓冲并截断日志文件 |
+| POST | `/api/logs/reload` | 从磁盘文件重新回灌到内存缓冲 |
 | POST | `/api/shutdown` | 优雅退出（先断开 Telegram 再退出进程） |
 
 ---
@@ -624,6 +644,8 @@ tgsub/
 │   │   ├── index.ts            # 启动、中间件、静态资源、优雅关闭、单实例锁
 │   │   ├── env.ts              # 环境变量与数据目录
 │   │   ├── db.ts               # schema、迁移、设置读写、session 加解密
+│   │   ├── logger.ts           # pino 初始化（stdout + 文件 + 内存缓冲三路输出）
+│   │   ├── lib/logstore.ts     # 日志环形缓冲（2000 条）+ 落盘轮转（10MB）+ 查询解析
 │   │   ├── match.ts            # 关键词匹配引擎（包含 / 完整词 / 正则）
 │   │   ├── types.ts            # 共享类型与默认设置
 │   │   ├── tg/
@@ -643,11 +665,11 @@ tgsub/
 │   │   │   ├── ffmpeg.ts       # ffmpeg/ffprobe 定位、媒体探测、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
-│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / settings / system
+│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / logs / settings / system
 │   └── dist/                   # 构建产物（不提交）
 ├── web/
 │   └── src/
-│       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、元数据、设置
+│       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、元数据、日志、设置
 │       ├── components/         # UI 基础组件、图标、Toast
 │       ├── hooks/useTheme.ts   # 亮色 / 暗色主题（localStorage 持久化）
 │       ├── api.ts / types.ts / utils.ts
@@ -685,6 +707,7 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 | `node scripts/e2e-manual.mjs` | 手动下载接口端到端（需已登录、可联网） |
 | `node scripts/e2e-bot.mjs` | 机器人端到端 |
 | `node scripts/diag-session.js` | 解密本地 session，打印 DC / 地址 / authKey 指纹并试连（服务运行时会拒绝执行） |
+| `bash scripts/watch-ci.sh <run_id>` | 轮询 GitHub Actions run 直到结束，打印各 job 状态 |
 
 ### 镜像发布（CI/CD）
 
@@ -744,17 +767,27 @@ curl http://127.0.0.1:6789/api/health
 若提示找不到，按顺序检查：`node_modules/@ffmpeg-installer` 是否完整（`npm ci` 可修复）；Docker 部署时是否用了自定义镜像把 devDependencies 之外的东西裁掉；
 再不行到「设置 → Emby 媒体库 → ffmpeg 路径」手动填一个绝对路径，保存后回元数据页点右上角刷新即可。
 
-**扫码登录失败 / 二维码加载不出来**
-先确认代理已保存且可用。二维码 30 秒自动轮换，一直卡在「等待扫描…」时检查手机是否为同一账号、入口是否为「设置 → 设备 → 链接桌面设备」。连续多次生成会重建连接，不要在页面上反复点击。
-
 **重启后提示未登录 / 每次重启都要重新扫码**
-正常情况下**只需扫码一次**：session 加密写入数据库（另有一份备份），重启进程、重建容器都会自动复用。为此有四层保护：
-单实例锁、失效后退避重试两轮、判定失效只标记不删库（设置页有「重试连接」）、主记录损坏时回滚到备份。
-仍然失效时按顺序排查：看日志最后的错误码与 authKey 指纹（`dc5/xxxxxxxxxxxx`）→ 确认没有别的进程用过同一 session → 确认 `data/.session-secret` 没被删除或替换。
+正常情况下**只需扫码一次**：session 加密写入数据库（另有一份备份），重启进程、重建容器都会自动复用。为此有五层保护：
+单实例锁、失效后退避重试两轮、判定失效只标记不删库（设置页有「重试连接」）、主记录损坏时回滚到备份、扫码落库后用新 session 独立重连验证一次。
+仍然失效时按顺序排查：去「日志」页看最后的错误码与 authKey 指纹（`dc5/xxxxxxxxxxxx`）→ 确认没有别的进程用过同一 session → 确认 `data/.session-secret` 没被删除或替换。
 
-**操作时提示 `AUTH_KEY_UNREGISTERED`**
-本地 session 在服务器端已不可用（授权被撤销、在其他设备「终止其他会话」、或同一 authKey 被并发使用）。新版不会自动删除，设置页会提示失效并提供「重试连接」。
-根因：账号主 DC 不是默认 DC2 时，扫码过程会触发一次 `_switchDC`，偶尔留下「结构完整但未绑定」的 authKey。程序会把主 DC 记入 `account_dc`，下次直接连该 DC。
+**操作时提示 `AUTH_KEY_UNREGISTERED` / 点「重新链接」和「重新扫码」都没用**
+本地 session 在服务器端已不可用（授权被撤销、在其他设备「终止其他会话」、或同一 authKey 被并发使用）。
+这类错误**重试和直接重扫都不会恢复**：服务器已把该 authKey 作废，带着旧 session 去扫码会让新 key 当场一起作废（`AUTH_KEY_DUPLICATED`），看起来就是「扫码也没用」。
+设置页会显示红色失效卡片并按错误码给出指引，处理方式：
+
+1. 点「**彻底重置并重新登录**」（`POST /api/auth/reset`）—— 清掉本地 session、备份与登录状态，**不影响频道、订阅、下载记录**。
+2. 重新扫码。这一步已内置防护：扫码前先清理旧 session，扫码落库后用新 session 独立重连验证，验证通过才算成功。
+3. 若仍失败，去「日志」页搜 `AUTH_KEY` 看错误码，并搜「已切换数据中心并恢复重连节流」确认 DC 切换后节流是否恢复。
+
+**操作时提示 `AUTH_KEY_DUPLICATED`**
+同一 authKey 在多处并发连接，服务器会**永久作废**该 key。除按上一条「彻底重置并重新登录」外，
+务必确认没有第二个容器 / 第二个进程 / 一份被复制走的 `data/` 在用同一个 session —— 单实例锁只能拦住同一台机器上的重复启动。
+
+**扫码登录失败 / 二维码加载不出来**
+先确认代理已保存且可用。二维码 30 秒自动轮换，一直卡在「等待扫描…」时检查手机是否为同一账号、入口是否为「设置 → 设备 → 链接桌面设备」。
+连续多次生成会重建连接，不要在页面上反复点击；实在不行先「彻底重置并重新登录」再扫。
 
 **扫描报 `FLOOD_WAIT_X`**
 Telegram 限流。降低「单批拉取条数」、拉长扫描间隔，或等提示的秒数；下载任务遇到限流会自动退避重试。

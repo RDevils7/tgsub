@@ -331,3 +331,11 @@ export const IconMoon = (p: Props) => (
     <path d="M20 14.4A8.4 8.4 0 0 1 9.6 4a8.4 8.4 0 1 0 10.4 10.4Z" />
   </Svg>
 );
+
+export const IconLogs = (p: Props) => (
+  <Svg {...p}>
+    <path d="M5 4.5h9l5 5v10a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 19.5v-13A1.5 1.5 0 0 1 4.5 5Z" />
+    <path d="M14 4.5v5h5" />
+    <path d="M6.8 13h6M6.8 16.5h4" />
+  </Svg>
+);

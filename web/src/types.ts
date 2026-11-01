@@ -168,6 +168,24 @@ export interface AuthState {
   sessionSavedAt: number | null;
   sessionState: "ok" | "dead" | "none";
   sessionPersisted: boolean;
+  /** 判死时的原始错误码（如 AUTH_KEY_UNREGISTERED） */
+  sessionErrorCode: string | null;
+  /** true=只是连接撞车，点「重试连接」即可恢复；false=服务器已作废，必须重新扫码 */
+  sessionRecoverable: boolean;
+}
+
+/* ------------------------------ 日志 ------------------------------ */
+
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+
+export interface LogEntry {
+  /** 毫秒时间戳 */
+  time: number;
+  iso: string;
+  level: LogLevel;
+  msg: string;
+  /** 除 level/msg/time 之外的附加字段 */
+  fields: Record<string, unknown>;
 }
 
 export interface ScanState {

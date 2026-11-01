@@ -21,6 +21,8 @@ import { messagesRouter } from "./routes/messages";
 import { metadataRouter } from "./routes/metadata";
 import { settingsRouter } from "./routes/settings";
 import { systemRouter } from "./routes/system";
+import { logsRouter } from "./routes/logs";
+import { hydrateFromFile } from "./lib/logstore";
 
 const app = express();
 app.disable("x-powered-by");
@@ -71,6 +73,7 @@ app.use("/api/downloads", downloadsRouter);
 app.use("/api/messages", messagesRouter);
 app.use("/api/metadata", metadataRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/logs", logsRouter);
 app.use("/api", systemRouter);
 
 app.use("/api", (_req, res) => {
@@ -138,6 +141,14 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 // 先拿单实例锁：并发连接会让 Telegram 直接作废 authKey，代价是重新扫码
 acquireInstanceLock(path.join(env.dataDir, ".instance.lock"));
+
+// 把磁盘上的历史日志回灌进内存缓冲：容器重启后日志页还能看到上次的记录
+try {
+  const loaded = hydrateFromFile();
+  if (loaded > 0) logger.info({ loaded }, "已载入历史日志");
+} catch {
+  /* 日志回灌失败不影响启动 */
+}
 
 // 修正历史剧集文件名（旧版多带了一截「-NN」序号）与私有频道的失效链接，
 // 数据库与磁盘文件一起改。放在下载队列启动之前，避免重试时生成「(2)」副本或留下孤儿文件。

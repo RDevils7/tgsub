@@ -7,6 +7,7 @@ import {
   importSession,
   logout,
   requestLoginCode,
+  resetSessionForRelogin,
   retrySession,
   startQrLogin,
   submitLoginCode,
@@ -60,6 +61,21 @@ authRouter.post(
     } catch (err) {
       res.json({ ok: false, error: (err as Error).message, auth: await getAuthState({ fresh: true }) });
     }
+  }),
+);
+
+/**
+ * 彻底重置登录状态：清掉本地 session、备份与失效标记。
+ *
+ * 服务器端已把 authKey 作废时（AUTH_KEY_UNREGISTERED / SESSION_REVOKED 等），
+ * 重试连接没有意义，必须重新登录。而重新登录前又需要先清干净本地那份旧凭据，
+ * 否则新旧凭据会互相打架。这个接口就是给「彻底重置并重新登录」按钮用的。
+ */
+authRouter.post(
+  "/reset",
+  asyncHandler(async (_req, res) => {
+    await resetSessionForRelogin();
+    res.json({ ok: true, auth: await getAuthState({ fresh: true }) });
   }),
 );
 

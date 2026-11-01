@@ -514,6 +514,94 @@ async function permissionChecks(): Promise<void> {
   await fs.rm(root, { recursive: true, force: true });
 }
 
+/**
+ * 日志存储自检：
+ *  1. pino JSON 行能解析成结构化条目（级别、消息、附加字段）；
+ *  2. 级别过滤与关键词搜索能正确筛出目标条目；
+ *  3. 落盘的文件能重新回灌进内存缓冲。
+ */
+async function logStoreChecks(): Promise<void> {
+  const { queryLogs, clearMemory, hydrateFromFile, logFilePath } = await import(
+    "../server/src/lib/logstore"
+  );
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+
+  // 用真实的 pino 写一份日志，走完整的写入 → 解析链路
+  const { logger } = await import("../server/src/logger");
+  clearMemory();
+  logger.info({ probe: "hello", code: "TEST_CODE" }, "这是一条测试日志");
+  logger.warn({ probe: "warn" }, "这是一条警告日志");
+  logger.error({ probe: "error" }, "这是一条错误日志");
+
+  // 同步写盘，等一小会儿确保流已刷出
+  await new Promise((r) => setTimeout(r, 150));
+
+  await acheck("日志能被解析成结构化条目", async () => {
+    const res = queryLogs({ limit: 50 });
+    assert.ok(res.total >= 3, `至少应有 3 条日志，实际 ${res.total}`);
+    const hit = res.items.find((i) => i.msg.includes("这是一条测试日志"));
+    assert.ok(hit, "应能按消息找到目标日志");
+    assert.equal(hit!.level, "info");
+    assert.equal(hit!.fields.probe, "hello");
+    assert.equal(hit!.fields.code, "TEST_CODE");
+    assert.ok(hit!.time > 0, "应解析出时间戳");
+  });
+
+  await acheck("级别过滤只返回该级别及以上的日志", async () => {
+    const res = queryLogs({ level: "error", limit: 50 });
+    assert.ok(res.total >= 1);
+    for (const item of res.items) {
+      assert.ok(
+        item.level === "error" || item.level === "fatal",
+        `级别过滤后不应出现 ${item.level}`,
+      );
+    }
+  });
+
+  await acheck("关键词搜索能命中消息与附加字段", async () => {
+    const byMsg = queryLogs({ keyword: "这是一条警告日志", limit: 50 });
+    assert.equal(byMsg.total, 1);
+    const byField = queryLogs({ keyword: "TEST_CODE", limit: 50 });
+    assert.ok(byField.total >= 1, "应能按附加字段搜索");
+  });
+
+  await acheck("日志文件已落盘且可重新回灌", async () => {
+    const file = logFilePath();
+    assert.ok(fs.existsSync(file), "日志文件应存在");
+    assert.ok(queryLogs({ limit: 500 }).total > 0);
+    clearMemory();
+    assert.equal(queryLogs({ limit: 10 }).total, 0, "清空后内存缓冲应为空");
+    const loaded = hydrateFromFile();
+    assert.ok(loaded > 0, "应能从文件回灌出日志");
+    assert.ok(queryLogs({ limit: 500 }).total > 0, "回灌后应能查到日志");
+  });
+
+  await acheck("分页参数生效", async () => {
+    const all = queryLogs({ limit: 500 });
+    if (all.total < 2) return;
+    const first = queryLogs({ limit: 1, offset: 0 });
+    const second = queryLogs({ limit: 1, offset: 1 });
+    assert.equal(first.items.length, 1);
+    assert.equal(second.items.length, 1);
+    assert.notEqual(
+      `${first.items[0].time}${first.items[0].msg}`,
+      `${second.items[0].time}${second.items[0].msg}`,
+    );
+  });
+
+  // 清理测试产生的日志文件，避免污染真实日志目录
+  try {
+    const dir = path.dirname(logFilePath());
+    for (const name of fs.readdirSync(dir)) {
+      if (name.startsWith("app.log")) fs.rmSync(path.join(dir, name), { force: true });
+    }
+  } catch {
+    /* ignore */
+  }
+  clearMemory();
+}
+
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
@@ -587,6 +675,12 @@ async function main(): Promise<void> {
   }
   try {
   try {
+  try {
+    await logStoreChecks();
+  } catch (err) {
+    console.error(`  \u2717 \u65e5\u5fd7\u5b58\u50a8\u7528\u4f8b\u5f02\u5e38: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
     await permissionChecks();
   } catch (err) {
     console.error(`  \u2717 \u6743\u9650\u68c0\u67e5\u7528\u4f8b\u5f02\u5e38: ${(err as Error).message}`);

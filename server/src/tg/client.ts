@@ -39,12 +39,37 @@ export interface AuthState {
   sessionState: "ok" | "dead" | "none";
   /** session 是否已加密落盘（登录一次即可跨重启复用） */
   sessionPersisted: boolean;
+  /** 判死时的原始错误码（如 AUTH_KEY_UNREGISTERED），用于区分「可自愈」与「必须重扫」 */
+  sessionErrorCode: string | null;
+  /** true=只是连接撞车，点「重试连接」即可恢复；false=服务器已作废，必须重新扫码 */
+  sessionRecoverable: boolean;
 }
 
-/** 这些错误码代表 authKey 在服务器端已不可用 */
+/**
+ * 这些错误码代表 authKey 在服务器端已不可用。
+ *
+ * 细分两类，因为处理方式完全不同：
+ * - 「永久作废」：这个 key 在服务器端已经被删掉，重试一万次也没用，只能重新扫码；
+ * - 「暂时冲突」：两个连接短暂共用同一个 key，旧连接断开后就能恢复。
+ */
 const DEAD_SESSION_ERRORS = new Set([
   "AUTH_KEY_UNREGISTERED",
   "AUTH_KEY_DUPLICATED",
+  "AUTH_KEY_PERM_EMPTY",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED_BAN",
+]);
+
+/**
+ * 真的没救了的：服务器端已把这个 authKey 删掉。
+ *
+ * 之前把 AUTH_KEY_UNREGISTERED 也算进「可重试」，导致点「重试连接」时
+ * 白等 5.5 秒（两轮退避）最后还是失败，用户只看到「重试了也没用」，
+ * 却不知道这一类必须重新扫码。
+ */
+const PERMANENT_SESSION_ERRORS = new Set([
+  "AUTH_KEY_UNREGISTERED",
   "AUTH_KEY_PERM_EMPTY",
   "SESSION_REVOKED",
   "SESSION_EXPIRED",
@@ -57,7 +82,7 @@ const DEAD_SESSION_ERRORS = new Set([
  * 此时立刻判死会逼用户重新扫码，而旧连接通常几秒内就会断开，
  * 所以先退避重试几轮，仍然失败才算真的失效。
  */
-const RETRYABLE_SESSION_ERRORS = new Set(["AUTH_KEY_DUPLICATED", "AUTH_KEY_UNREGISTERED"]);
+const RETRYABLE_SESSION_ERRORS = new Set(["AUTH_KEY_DUPLICATED"]);
 
 /** 重试间隔：总等待约 5.5 秒，覆盖进程退出/网络抖动窗口，又不会让界面卡太久 */
 const CONNECT_RETRY_DELAYS = [1500, 4000];
@@ -192,7 +217,7 @@ function createClient(session: string, cred: ResolvedCredentials): TelegramClien
 /**
  * 收紧 gramjs 的自动重连节奏。
  *
- * 实测：本机经 SOCKS 代理连 Telegram，updates 心跳的 ping 会周期性 10s 超时，
+ * 实测：本机经 SOCKS代理连 Telegram，updates 心跳的 ping 会周期性 10s 超时，
  * gramjs 每次超时都会 `_sender.reconnect()` —— 关掉旧 socket，1 秒后重开一条连接。
  * 但服务器侧未必那么快回收旧连接，于是同一个 authKey 上出现两条连接，
  * Telegram 回 AUTH_KEY_DUPLICATED 并永久作废这个 key，表现就是「莫名其妙又要重新扫码」。
@@ -235,10 +260,45 @@ function hardenReconnect(client: TelegramClient): void {
   };
 }
 
-/** 统一入口：连上之后立刻加装重连节流 */
+/**
+ * 让重连节流在 DC 迁移后依然生效。
+ *
+ * **这是「重新扫码也没用」的直接原因。**
+ *
+ * gramjs 的 `_switchDC()` 会重建 `_sender`（新对象），所以在 connect 阶段
+ * 装到旧 sender 上的 `hardenReconnect` 会整个丢失 —— 新 sender 恢复成 gramjs
+ * 默认的「1 秒后立刻重开一条连接」。此时旧 socket 在服务器侧还没回收，
+ * 同一个 authKey 上出现两条连接，Telegram 立刻回 AUTH_KEY_DUPLICATED
+ * 并**永久作废**这个 key：用户刚扫完码看到「登录成功」，几十秒后又被判失效。
+ *
+ * 扫码登录尤其容易踩到：ExportLoginToken 在账号主 DC 不等于当前 DC 时
+ * 会回 LoginTokenMigrateTo，gramjs 内部就会调一次 `_switchDC`。
+ *
+ * 这里把 `_switchDC` 包一层：切完之后重新给新的 `_sender` 装上节流。
+ */
+function hardenDcSwitch(client: TelegramClient): void {
+  const target = client as unknown as {
+    _switchDC?: (dcId: number) => Promise<void>;
+    __tgsubSwitchHardened?: boolean;
+  };
+  if (typeof target._switchDC !== "function" || target.__tgsubSwitchHardened) return;
+  target.__tgsubSwitchHardened = true;
+
+  const original = target._switchDC.bind(client);
+  target._switchDC = async (dcId: number): Promise<void> => {
+    const before = keyFingerprint(client);
+    await original(dcId);
+    // _switchDC 会重建 _sender，必须重新装节流，否则退化成 1 秒激进重连
+    hardenReconnect(client);
+    logger.info({ before, after: keyFingerprint(client), dcId }, "已切换数据中心并恢复重连节流");
+  };
+}
+
+/** 统一入口：连上之后立刻加装重连节流 + DC 切换保护 */
 async function connectTelegram(client: TelegramClient): Promise<void> {
   await client.connect();
   hardenReconnect(client);
+  hardenDcSwitch(client);
 }
 
 export function isConfigured(): boolean {
@@ -531,6 +591,11 @@ export async function getAuthState(opts: { fresh?: boolean } = {}): Promise<Auth
     sessionSavedAt: meta.savedAt,
     sessionState: meta.state,
     sessionPersisted: meta.state !== "none",
+    sessionErrorCode: meta.error,
+    // 只有「连接撞车」这一类能靠重连自愈；服务器已作废的 key 必须重新扫码
+    sessionRecoverable:
+      meta.state !== "dead" ||
+      (meta.error !== null && RETRYABLE_SESSION_ERRORS.has(meta.error.split(":")[0].trim())),
   };
 }
 
@@ -545,6 +610,27 @@ export async function retrySession(): Promise<AuthState> {
   lastError = null;
   await getClient({ force: true });
   return getAuthState({ fresh: true });
+}
+
+/**
+ * 重新登录前的彻底重置。
+ *
+ * 「重新扫码」之所以经常没用，是因为本地还留着被判死的旧 session 与备份：
+ * 登录流程一开始就会把它们重新加载出来，撞上同一个已被作废的 authKey，
+ * 于是新扫码拿到的 key 立刻又被服务器判死。
+ *
+ * 这里把 session 主记录、备份、失效标记全部清掉，并断开当前连接，
+ * 保证接下来的扫码从一个完全干净的状态开始。
+ */
+export async function resetSessionForRelogin(): Promise<void> {
+  await disconnectClient();
+  clearSession();
+  probeCache = null;
+  cachedMe = null;
+  lastError = null;
+  qrSession = null;
+  pending = null;
+  logger.info("已清除本地 session 与备份，可以重新登录");
 }
 
 
@@ -652,7 +738,8 @@ function getComputeCheck(): ((pwd: unknown, password: string) => Promise<unknown
   return null;
 }
 
-/** 取 session 中 authKey 的短指纹，便于跨次登录对比排查 */
+/**
+ * 取 session 中 authKey 的短指纹，便于跨次登录对比排查 */
 function keyFingerprint(client: TelegramClient): string {
   const s = client.session as unknown as {
     authKey?: { getKey?: () => Buffer | undefined };
@@ -661,6 +748,51 @@ function keyFingerprint(client: TelegramClient): string {
   const key = s.authKey?.getKey?.();
   const fp = key && key.length ? crypto.createHash("sha256").update(key).digest("hex").slice(0, 12) : "none";
   return `dc${s.dcId ?? "?"}/${fp}`;
+}
+
+/**
+ * 把登录失败的底层错误翻译成用户看得懂的原因。
+ *
+ * 之前直接把 gramjs 的原始 message 抛给前端，
+ * 界面上只显示「AUTH_KEY_DUPLICATED: auth key was registered from a different IP address」，
+ * 用户既不知道该重试还是该换方式，也看不出到底哪里出了问题。
+ */
+function describeLoginError(err: unknown): string {
+  const raw = errText(err);
+  const code = raw.split(":")[0].trim().toUpperCase();
+
+  const known: Record<string, string> = {
+    AUTH_KEY_DUPLICATED:
+      "同一个登录凭据被 Telegram 检测到在多处同时使用，已被服务器作废。请点「彻底重置并重新登录」清掉本地旧凭据后重新扫码。",
+    AUTH_KEY_UNREGISTERED:
+      "本地保存的登录凭据已被 Telegram 注销，无法再使用。请点「彻底重置并重新登录」后重新扫码。",
+    AUTH_KEY_PERM_EMPTY: "登录凭据缺少权限，无法继续，请重新扫码登录。",
+    SESSION_REVOKED: "这个登录会话已在手机端被注销，请重新扫码登录。",
+    SESSION_EXPIRED: "登录会话已过期，请重新扫码登录。",
+    USER_DEACTIVATED_BAN: "该账号已被 Telegram 停用。",
+    PHONE_CODE_EMPTY: "验证码已失效，请重新获取。",
+    PHONE_CODE_INVALID: "验证码不正确，请重新输入。",
+    PHONE_CODE_EXPIRED: "验证码已过期，请重新获取。",
+    PHONE_MIGRATE_X: "账号所在数据中心发生变化，请重试。",
+    NETWORK_MIGRATE_X: "网络数据中心发生变化，请重试。",
+    SESSION_PASSWORD_NEEDED: "该账号开启了两步验证，请输入密码。",
+    TWO_FACTOR_AUTH_REQUIRED: "该账号开启了两步验证，请输入密码。",
+    PHONE_NUMBER_INVALID: "手机号格式不正确，请包含国际区号。",
+    PHONE_NUMBER_BANNED: "该手机号已被 Telegram 限制。",
+    API_ID_INVALID: "API ID 无效，请在设置里检查 API 凭证。",
+    API_HASH_INVALID: "API Hash 无效，请在设置里检查 API 凭证。",
+    ACCESS_TOKEN_INVALID: "登录凭据无效，请重新登录。",
+    AUTH_KEY_INVALID: "登录凭据无效，请重新登录。",
+    FLOOD_WAIT_X: "操作过于频繁，被 Telegram 限流，请稍后再试。",
+  };
+
+  if (known[code]) return known[code];
+
+  // 没匹配到已知错误码：把原始 code 带上，别把信息全丢了
+  if (/^[A-Z_]+$/.test(code) && code.length > 3) {
+    return `登录失败（${code}）：${raw.slice(code.length + 1).trim() || "未知原因"}`;
+  }
+  return raw;
 }
 
 /**
@@ -682,7 +814,7 @@ async function finalizeLogin(client: TelegramClient, source: string): Promise<vo
     logger.warn({ source, fp, err: msg }, "登录后校验失败，session 未保存");
     throw new TgError(
       "LOGIN_UNVERIFIED",
-      `登录未生效（${msg}），session 已丢弃，请重新扫码或改用手机号登录`,
+      `登录未生效（${describeLoginError(err)}），session 已丢弃，请重新扫码或改用手机号登录`,
     );
   }
 
@@ -703,6 +835,59 @@ async function finalizeLogin(client: TelegramClient, source: string): Promise<vo
     firstName: (me as { firstName?: string }).firstName ?? null,
   };
   logger.info({ source, fp, userId: String(me.id) }, "Telegram 登录成功，session 已加密保存");
+
+  /**
+   * 落库之后再做一次「独立验证」。
+   *
+   * 只信刚才那个 client 的 getMe() 是不够的：那个 client 正是扫码时用的那条连接，
+   * 它此刻的 authKey 是服务器刚发的、服务器当然认。但如果这个 client 因为
+   * LoginTokenMigrateTo 换过 DC、或者旧连接还挂在服务器侧没释放，
+   * 那么「用落库的 session 重新连一次」才是下次启动的真实处境。
+   *
+   * 所以这里断开当前连接，用刚落库的 session 重新建一个 client 握手 + getMe。
+   * 只有这一步也通过，才算真的登录成功 —— 否则用户会看到「登录成功」，
+   * 几十秒后又被心跳判死，白折腾一次扫码。
+   */
+  await verifyFreshSession(session, source, fp);
+}
+
+/**
+ * 用刚落库的 session 重新建连并验证。
+ * 失败时把 session 标记为失效并抛错，让用户明确知道这次登录没成。
+ */
+async function verifyFreshSession(session: string, source: string, fp: string): Promise<void> {
+  const cred = requireCredentials();
+  const previous = activeClient;
+  activeClient = null;
+  await previous?.disconnect().catch(() => undefined);
+
+  let client: TelegramClient | null = null;
+  try {
+    client = createClient(session, cred);
+    await connectTelegram(client);
+    const probe = await probeAuthorization(client);
+    if (!probe.ok) {
+      throw new TgError("LOGIN_UNVERIFIED", `新登录状态未通过校验（${probe.code || "UNKNOWN"}）`);
+    }
+    const me = await client.getMe();
+    cachedMe = {
+      id: String(me.id),
+      username: (me as { username?: string }).username ?? null,
+      firstName: (me as { firstName?: string }).firstName ?? null,
+    };
+    activeClient = client;
+    logger.info({ source, fp, userId: cachedMe.id }, "落库后的 session 已通过独立重连验证");
+  } catch (err) {
+    await client?.disconnect().catch(() => undefined);
+    activeClient = null;
+    // 落库的这份也用不了：标记失效，免得下次启动又拿它去撞
+    markSessionInvalid(errText(err).split(":")[0].trim() || "UNKNOWN");
+    logger.error({ source, fp, err: errText(err) }, "落库后的 session 独立重连验证失败，已标记为失效");
+    throw new TgError(
+      "LOGIN_UNVERIFIED",
+      `登录未生效：${describeLoginError(err)}。请确认 Telegram 连接稳定（代理是否正常）后重试`,
+    );
+  }
 }
 
 /** 登录状态在服务器端已失效：标记并断开，让前端拿到明确的「请重新登录」 */
@@ -930,12 +1115,22 @@ export async function startQrLogin(): Promise<QrState> {
     activeClient = null;
   }
 
+  // **重新扫码前必须清掉旧的失效 session。**
+  //
+  // 之前这里是直接开一个新 client 连上去的，而库里那份被判死的 session
+  // 和它的备份还留着：一旦有任何并发请求触发 getClient()，就会把那份
+  // 已被服务器作废的 authKey 再拿出来握手，撞出 AUTH_KEY_DUPLICATED，
+  // 连带把刚扫出来的新 key 一起作废 —— 表现就是「扫码提示成功，
+  // 几十秒后又变成已失效，点多少次都没用」。
+  //
+  // 这里主动清干净，让扫码从完全空白的状态开始。
+  await resetSessionForRelogin();
+
   const client = createClient("", cred);
   await connectTelegram(client);
   // 若已知该账号主 DC，先切过去；否则 ExportLoginToken 会返回 LoginTokenMigrateTo，
   // 而登录过程里的中途迁移正是 session 落库后失效的主要怀疑点
   await preconnectPreferredDc(client);
-
   const session: QrSession = {
     client,
     status: "waiting",
@@ -1005,8 +1200,8 @@ export async function startQrLogin(): Promise<QrState> {
     } catch (err) {
       if (qrSession !== session) return;
       session.status = "error";
-      session.error = errText(err);
-      logger.warn({ err: session.error }, "扫码登录失败");
+      session.error = describeLoginError(err);
+      logger.warn({ err: session.error, raw: errText(err) }, "扫码登录失败");
       // 登录未通过校验时不要把半成品 client 留着，下次请求会重新建连
       if (activeClient !== client) await client.disconnect().catch(() => undefined);
     }

@@ -18,6 +18,8 @@ import type {
   ImageName,
   ImageScope,
   FfmpegInfo,
+  LogEntry,
+  LogLevel,
   QrState,
   ScanState,
   SettingsResponse,
@@ -152,6 +154,8 @@ export const api = {
   authState: () => request<AuthState>("/auth/state"),
   authRetry: () =>
     request<{ ok: boolean; auth: AuthState }>("/auth/retry", { method: "POST" }),
+  /** 彻底重置登录状态：清掉本地 session 与备份，用于「必须重新扫码」的场景 */
+  authReset: () => request<{ ok: boolean; auth: AuthState }>("/auth/reset", { method: "POST" }),
   qrStart: () => request<QrState>("/auth/qr/start", { method: "POST" }),
   qrState: () => request<QrState>("/auth/qr/state"),
   qrPassword: (password: string) =>
@@ -178,6 +182,25 @@ export const api = {
       body: JSON.stringify({ session }),
     }),
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+
+  /* ------------------------------ 日志 ------------------------------ */
+  logs: (params: { level?: string; q?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.level) qs.set("level", params.level);
+    if (params.q) qs.set("q", params.q);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    return request<{
+      items: LogEntry[];
+      total: number;
+      limit: number;
+      offset: number;
+      counts: Record<LogLevel, number>;
+      fileSize: number;
+    }>(`/logs?${qs}`);
+  },
+  logsClear: () => request<{ ok: boolean }>("/logs", { method: "DELETE" }),
+  logsReload: () => request<{ ok: boolean; loaded: number }>("/logs/reload", { method: "POST" }),
 
   /* ------------------------------ 元数据 ------------------------------ */
   /** 文件夹列表：一个文件夹一条记录，展开后是里面的每个视频 */

@@ -28,6 +28,7 @@ export default function Settings() {
   const [qrBusy, setQrBusy] = useState(false);
   const [qrPassword, setQrPassword] = useState("");
   const [retrying, setRetrying] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const [botToken, setBotToken] = useState("");
   const [bot, setBot] = useState<BotState | null>(null);
@@ -256,6 +257,28 @@ export default function Settings() {
     }
   };
 
+  /**
+   * 彻底重置登录状态。
+   *
+   * 服务器已把 authKey 作废时（AUTH_KEY_UNREGISTERED / SESSION_REVOKED），
+   * 光重新扫码不够：本地那份被判死的 session 和备份还在，
+   * 重新登录时会被一起加载出来互相打架。先清干净再重新扫码才有效。
+   */
+  const resetAuth = async () => {
+    setResetting(true);
+    try {
+      const res = await api.authReset();
+      setAuth(res.auth);
+      setQr(null);
+      toast.push("已清除本地登录凭据，请重新扫码登录", "success");
+      await load();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const logout = async () => {
     setLoginBusy(true);
     try {
@@ -395,18 +418,50 @@ export default function Settings() {
               {auth?.sessionState === "dead" && (
                 <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3.5 py-3">
                   <p className="text-[12.5px] font-medium text-warn">本地登录凭据已被 Telegram 判定失效</p>
-                  <p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">
-                    常见原因是重启时旧进程还没退出、新旧连接共用了同一个 authKey。先点「重试连接」，多数情况能直接恢复，不必重新扫码。
-                    {auth.error && <span className="ml-1 text-slate-500">（{auth.error}）</span>}
-                  </p>
-                  <div className="mt-2 flex gap-2">
-                    <Button size="sm" variant="primary" loading={retrying} onClick={() => void retryAuth()}>
-                      重试连接
-                    </Button>
-                    <Button size="sm" onClick={() => setShowSessionBox(true)}>
-                      手动导入 session
-                    </Button>
-                  </div>
+                  {/*
+                    分两种情况给不同指引：
+                    - 可自愈（AUTH_KEY_DUPLICATED）：只是重启时新旧连接短暂撞车，点重试即可；
+                    - 不可自愈（服务器已作废）：重试多少次都没用，必须先清掉本地旧凭据再重新扫码。
+                    之前一律提示「先点重试连接」，用户点了很多次也没用。
+                  */}
+                  {auth.sessionRecoverable ? (
+                    <>
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">
+                        多数情况是重启时旧进程还没退出、新旧连接短暂共用了同一个 authKey。
+                        点「重试连接」通常能直接恢复，不必重新扫码。
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Button size="sm" variant="primary" loading={retrying} onClick={() => void retryAuth()}>
+                          重试连接
+                        </Button>
+                        <Button size="sm" loading={resetting} onClick={() => void resetAuth()}>
+                          彻底重置并重新登录
+                        </Button>
+                        <Button size="sm" onClick={() => setShowSessionBox(true)}>
+                          手动导入 session
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">
+                        服务器已把这个登录凭据作废（{auth.sessionErrorCode || "AUTH_KEY_INVALID"}），
+                        重试连接不会恢复，必须重新登录。
+                        请先「彻底重置」清掉本地残留的旧凭据，再重新扫码 —— 否则新旧凭据会互相打架，新扫出来的也会立刻失效。
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Button size="sm" variant="primary" loading={resetting} onClick={() => void resetAuth()}>
+                          彻底重置并重新登录
+                        </Button>
+                        <Button size="sm" onClick={() => setShowSessionBox(true)}>
+                          手动导入 session
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                  {auth.error && (
+                    <p className="mt-2 text-[11px] leading-relaxed text-slate-500">最近一次错误：{auth.error}</p>
+                  )}
                 </div>
               )}
               {qr && (qr.status === "waiting" || qr.status === "scanned" || qr.status === "password") ? (
@@ -470,7 +525,21 @@ export default function Settings() {
               )}
 
               {qr?.status === "error" && qr.error && (
-                <p className="text-[11.5px] leading-relaxed text-err/80">{qr.error}</p>
+                <div className="rounded-xl border border-rose-500/25 bg-rose-500/[0.06] px-3.5 py-3">
+                  <p className="text-[12.5px] font-medium text-err">登录失败</p>
+                  <p className="mt-1 text-[11.5px] leading-relaxed text-slate-300">{qr.error}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Button size="sm" onClick={() => void startQr()} loading={qrBusy}>
+                      重新生成二维码
+                    </Button>
+                    <Button size="sm" loading={resetting} onClick={() => void resetAuth()}>
+                      彻底重置并重新登录
+                    </Button>
+                    <span className="text-[11px] text-slate-500">
+                      详细过程可在「日志」页查看
+                    </span>
+                  </div>
+                </div>
               )}
 
               <div className="flex items-center gap-2">
