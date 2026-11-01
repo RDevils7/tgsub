@@ -711,16 +711,17 @@ export default function Settings() {
           <div className="mt-3 space-y-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] px-3.5 py-3">
             <p className="text-[12.5px] font-medium text-ok/90">无需申请 api_id / api_hash</p>
             <p className="text-[11.5px] leading-relaxed text-slate-400">
-              使用公开的 Telegram Desktop 官方客户端应用标识（与 tdl 等工具一致），登录时手机扫码即可。
-              设备指纹会自动对齐到 Desktop 平台，避免「凭证平台与设备不匹配」带来的额外风控。
+              当前默认使用 tdl 内置应用（api_id 15055931），它是 tdl 自行申请的应用，
+              不属于任何官方客户端，登录时手机扫码即可。设备指纹会自动对齐到 Desktop 平台，
+              避免「凭证平台与设备不匹配」带来的额外风控。
             </p>
             <div className="rounded-lg border border-rose-500/25 bg-rose-500/[0.07] px-3 py-2">
-              <p className="text-[11.5px] font-medium text-err">有账号风险，长期使用请换自定义 API</p>
+              <p className="text-[11.5px] font-medium text-err">仍是公开凭证，长期使用请换自定义 API</p>
               <p className="mt-1 text-[11px] leading-relaxed text-slate-300">
-                公开凭证 = 官方客户端身份。用它从机房/代理 IP 做批量下载，容易被判定为
-                <span className="text-slate-100">「仿冒官方客户端」</span>：一旦触发风控，
-                Telegram 会重置该账号的全部会话（其他设备一起掉线）并冻结它创建的机器人。
-                自己的 api_id 在 my.telegram.org 免费申请，两分钟即可。
+                公开凭证被所有使用该工具的人共用。1.0.1 起已不再默认使用 Telegram Desktop
+                官方客户端凭证 —— 拿官方客户端身份从机房/代理 IP 批量下载，会被判定为
+                <span className="text-slate-100">「仿冒官方客户端」</span>，代价是账号的全部会话被重置、
+                相关机器人被冻结。自己的 api_id 在 my.telegram.org 免费申请，两分钟即可。
               </p>
             </div>
             <Field label="内置应用">
@@ -729,8 +730,8 @@ export default function Settings() {
                 value={draft.builtin_app}
                 onChange={(e) => patch("builtin_app", e.target.value)}
               >
-                <option value="desktop">Telegram Desktop（官方客户端，风控最敏感）</option>
-                <option value="builtin">tdl 内置应用</option>
+                <option value="builtin">tdl 内置应用（默认，推荐）</option>
+                <option value="desktop">Telegram Desktop（官方客户端，风控最敏感，不推荐）</option>
               </select>
             </Field>
             {data.credential && (
@@ -1164,6 +1165,11 @@ export default function Settings() {
           </div>
         </div>
       </section>
+
+      {/* 版本信息：与镜像标签、/api/health 的 version 保持一致 */}
+      <p className="pb-2 text-center text-[11px] text-slate-600">
+        tgsub {data.version ?? "—"} · {data.paths.dataDir}
+      </p>
     </div>
   );
 }

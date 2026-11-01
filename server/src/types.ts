@@ -141,7 +141,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   credential_mode: "builtin",
-  builtin_app: "desktop",
+  builtin_app: "builtin",
   api_id: "",
   api_hash: "",
   proxy_url: "",

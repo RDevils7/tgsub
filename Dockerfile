@@ -92,6 +92,10 @@ RUN npm -w web run build \
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
+# 版本号：与 package.json / server/src/version.ts 保持一致。
+# /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.0.1 → 1.0.1 / 1.0 / latest）。
+ARG APP_VERSION=1.0.1
+
 ENV NODE_ENV=production \
     PORT=6789 \
     HOST=0.0.0.0 \
@@ -99,7 +103,15 @@ ENV NODE_ENV=production \
     DOWNLOAD_DIR=/downloads \
     TZ=Asia/Shanghai \
     PUID=1000 \
-    PGID=1000
+    PGID=1000 \
+    APP_VERSION=${APP_VERSION}
+
+# OCI 标准标签：docker inspect / Docker Hub 都能看到版本与来源
+LABEL org.opencontainers.image.title="tgsub" \
+      org.opencontainers.image.description="Telegram 频道媒体订阅下载，自动生成 Emby 媒体库（NFO + 封面）" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/RDevils7/tgsub" \
+      org.opencontainers.image.licenses="MIT"
 
 # util-linux 提供 setpriv：入口脚本用它把 root 降权成 PUID/PGID
 RUN apt-get update \

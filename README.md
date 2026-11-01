@@ -120,7 +120,7 @@ compose 文件里全部是真实值，**直接编辑对应那一行**即可：
 
 | 要改什么 | 改哪一行 |
 | --- | --- |
-| 换镜像版本 | `image:` → `rdevils7/tgsub:v1.0.0` |
+| 换镜像版本 | `image:` → `rdevils7/tgsub:v1.0.1` |
 | 换宿主机端口 | `ports:` → `- "8080:6789"` |
 | 换数据目录 | `volumes:` 第一条 → `- /opt/tgsub/data:/data` |
 | 换下载目录 | `volumes:` 第二条 → `- /mnt/nas/tgsub:/downloads` |
@@ -322,13 +322,26 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
-| `v1.0.0` / `1.0.0` | 打标签时产生的固定版本（**生产环境建议锁定**） |
+| `v1.0.1` / `1.0.1` | 打标签时产生的固定版本（**生产环境建议锁定**） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.1
 docker compose up -d
+```
+
+### 版本记录
+
+| 版本 | 主要变更 |
+| --- | --- |
+| `1.0.1` | 内置凭证默认值由 Telegram Desktop 官方客户端（`api_id=2040`）换成 **tdl 自建应用（15055931）**，老库自动迁移；新增**重登闸门**（1 分钟冷却 + 24h 5 次上限）；登录后延迟 10 秒再独立验证，避免新 authKey 双连接被判作废；失效原因识别为风控类时直接给出申诉指引；扫描分页与频道间加随机抖动；设置页底部显示版本号 |
+| `1.0.0` | 首个版本：扫码登录、频道扫描、关键词订阅、媒体下载、Emby NFO + 封面、Telegram 机器人控制台、日志页 |
+
+```bash
+# 查看当前运行的版本
+curl -s http://<NAS-IP>:6789/api/health
+# {"ok":true,"uptime":123,"telegram":true,"version":"1.0.1"}
 ```
 
 > 镜像仓库是公开的，任何人都能 `docker pull`。若你的 fork 需保持私有，
@@ -497,9 +510,10 @@ gramjs 的 `downloadMedia` 不支持断点续传，暂停/停止/让位后都会
 
 ### 会触发风控的行为（按风险从高到低）
 
-1. **用内置凭证（Telegram Desktop 官方 `api_id=2040`）跑自动化。**
-   内置凭证是官方客户端的身份，代码又把设备指纹伪装成 Desktop，从机房 IP 发大量请求——
-   这是最容易被判定为"仿冒官方客户端"的组合。**请到 my.telegram.org 申请自己的 api_id/api_hash**。
+1. **用内置凭证跑自动化（尤其是官方客户端凭证）。**
+   `1.0.1` 起默认已换成 tdl 自建应用（`api_id=15055931`），不再默认冒充官方桌面客户端；
+   但内置凭证终究是公开共用的，风控敏感度仍高于你自己申请的应用。
+   **长期使用请到 my.telegram.org 申请自己的 api_id/api_hash**，两分钟即可。
 2. **短时间内反复登录。** 每扫一次码就是一条新授权。十分钟内堆十几条，等于告诉 Telegram 账号被接管了。
 3. **代理出口 IP 频繁变化。** 同一个 authKey 从多个国家的 IP 出现，会直接回 `AUTH_KEY_DUPLICATED`
    （原文是 "auth key was registered from a different IP address"），并作废该 key。

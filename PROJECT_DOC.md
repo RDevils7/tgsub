@@ -195,7 +195,7 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
 
 ### 运维与安全
 
-- **扫码登录**：手机 Telegram 扫一下即可，**无需申请 api_id / api_hash**（内置官方客户端凭证，设备指纹自动对齐）。
+- **扫码登录**：手机 Telegram 扫一下即可，**无需申请 api_id / api_hash**（内置 tdl 自建应用凭证 15055931，设备指纹自动对齐）。
 - **session 加密落盘**：AES-256-GCM 加密后存 SQLite，重启进程/重建容器无需重新登录。
 - **单实例锁**：同一机器重复启动会被拒绝，避免同一 authKey 双连导致 `AUTH_KEY_DUPLICATED` 作废。
 - **登录失效自愈**：`AUTH_KEY_UNREGISTERED` 等「服务器已作废」类错误不再做无谓重试，界面直接给出「彻底重置并重新登录」入口（`POST /api/auth/reset`，只清 session，不动频道/订阅/下载记录）。
@@ -361,12 +361,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
 | `main` | 与 `latest` 同步 |
-| `v1.0.0` / `1.0.0` | 打 `v1.0.0` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.1` / `1.0.1` | 打 `v1.0.1` 标签时产生的固定版本（建议生产环境锁定） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.1
 docker compose up -d
 ```
 
@@ -456,8 +456,12 @@ npm run dev
 二维码每 30 秒自动刷新，手机确认后自动完成登录；若账号开启两步验证，页面会提示输入密码。
 session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
-内置凭证是 **Telegram Desktop 官方应用标识**（与 [tdl](https://github.com/iyear/tdl) 等工具做法一致），
+内置凭证是 **tdl 自建应用标识**（`api_id=15055931`，与 [tdl](https://github.com/iyear/tdl) 使用的 AppBuiltin 一致），
 不需要访问 my.telegram.org，也不会把账号信息交给任何第三方。
+
+> `1.0.1` 起默认不再使用 Telegram Desktop 官方客户端凭证（`api_id=2040`）——
+> 那等于冒充官方桌面客户端做自动化，会招致账号级处置（全部会话被重置、机器人被冻结）。
+> 老版本升级时 `builtin_app` 会被自动迁移到 tdl（一次性迁移，之后手动改回不会被覆盖）。
 
 #### 3. 可选：切换为自建应用凭证
 
@@ -745,14 +749,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.0
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.1
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.0 && git push origin v1.0.0    # 发布 v1.0.0 / 1.0 / 1.0.0 / latest
+git tag v1.0.1 && git push origin v1.0.1    # 发布 v1.0.1 / 1.0 / latest
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

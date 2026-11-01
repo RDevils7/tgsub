@@ -6,6 +6,7 @@ import { getAuthState, sdkLoaded } from "../tg/client";
 import { getBotState, restartBot, startBot, stopBot } from "../tg/bot";
 import { asyncHandler, assert } from "../lib/http";
 import { requestShutdown } from "../lib/lifecycle";
+import { APP_VERSION } from "../version";
 
 export const systemRouter = Router();
 
@@ -20,7 +21,7 @@ systemRouter.get("/health", (_req, res) => {
     ok: dbOk,
     uptime: Math.round(process.uptime()),
     telegram: sdkLoaded(),
-    version: process.env.APP_VERSION || "1.0.0",
+    version: APP_VERSION,
   });
 });
 

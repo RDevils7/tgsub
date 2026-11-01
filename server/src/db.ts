@@ -154,6 +154,35 @@ ensureColumn("downloads", "started_at", "INTEGER");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 
+/* ------------------------------------------------------------------ */
+/* 一次性设置迁移                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 1.0.1：内置凭证从「Telegram Desktop 官方客户端（api_id 2040）」
+ * 换成「tdl 内置应用（api_id 15055931）」。
+ *
+ * 老库里 `builtin_app` 是显式存下来的 "desktop"，只改 DEFAULT_SETTINGS 不会生效，
+ * 所以这里强制迁一次。迁移标记保证只执行一次 —— 之后用户在界面上手动改回 desktop
+ * 不会被再次打回（那是他自己的选择，界面上也有风险提示）。
+ */
+function migrateOnce(marker: string, run: () => void): void {
+  const done = db.prepare("SELECT 1 AS hit FROM settings WHERE key = ?").get(marker);
+  if (done) return;
+  run();
+  db.prepare(
+    "INSERT INTO settings(key, value) VALUES(?, '1') ON CONFLICT(key) DO UPDATE SET value = '1'",
+  ).run(marker);
+}
+
+migrateOnce("migration_builtin_tdl_v101", () => {
+  db.prepare(
+    "INSERT INTO settings(key, value) VALUES('builtin_app', 'builtin') " +
+      "ON CONFLICT(key) DO UPDATE SET value = 'builtin'",
+  ).run();
+  logger.info("内置凭证已从 Telegram Desktop 官方凭证切换为 tdl 内置应用");
+});
+
 /**
  * 老数据合并：早期版本对相册的每条子消息各写一行，
  * 现在「一条消息 = 一行」（相册整组算一条），需要把历史数据收敛掉。

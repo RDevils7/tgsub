@@ -7,6 +7,7 @@ import { getBuiltinApp } from "../tg/credentials";
 import { withLiveProgress } from "../tg/downloader";
 import { AppSettings, Download } from "../types";
 import { asyncHandler, clampInt } from "../lib/http";
+import { APP_VERSION } from "../version";
 
 export const settingsRouter = Router();
 
@@ -29,6 +30,7 @@ settingsRouter.get(
           ? { mode: "custom", label: "自定义应用", apiId: s.api_id || null }
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
       paths: { dataDir: env.dataDir, downloadDir: env.downloadDir, dbFile: env.dbFile },
+      version: APP_VERSION,
       bot: getBotState(),
     });
   }),

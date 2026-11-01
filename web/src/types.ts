@@ -254,6 +254,8 @@ export interface SettingsResponse {
   settings: AppSettings;
   credential?: CredentialInfo;
   paths: { dataDir: string; downloadDir: string; dbFile: string };
+  /** 后端版本号（与镜像标签、/api/health 一致） */
+  version?: string;
   bot?: BotState;
 }
 
