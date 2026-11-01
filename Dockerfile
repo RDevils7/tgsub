@@ -92,10 +92,13 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     DATA_DIR=/data \
     DOWNLOAD_DIR=/downloads \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    PUID=1000 \
+    PGID=1000
 
+# util-linux 提供 setpriv：入口脚本用它把 root 降权成 PUID/PGID
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini ca-certificates \
+ && apt-get install -y --no-install-recommends tini util-linux ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /downloads \
  && chown -R node:node /data /downloads /app
@@ -106,7 +109,15 @@ COPY --from=build --chown=node:node /app/server/package.json ./server/package.js
 COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
 
-USER node
+# 入口脚本：以 root 启动时先把 /data /downloads 属主改成 PUID:PGID，再降权运行 node。
+# NAS 场景（面板自动创建挂载目录、属主是 root）就是靠这一步解决反复重启的问题。
+COPY --chown=root:root docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 注意：这里不写死 USER node。
+# 入口脚本需要先以 root 身份 chown 挂载目录，之后自己用 setpriv 降权。
+# 最终业务进程仍是 PUID/PGID（默认 node/1000）身份运行。
+
 EXPOSE 6789
 
 # ① 数据持久化目录：数据库、加密 session、封面缓存、临时截图
@@ -116,5 +127,5 @@ VOLUME ["/data", "/downloads"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||6789)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "server/dist/index.js"]

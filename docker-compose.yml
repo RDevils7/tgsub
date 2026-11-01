@@ -9,7 +9,7 @@
 #   image        → 换镜像版本
 #   ports        → 换宿主机端口
 #   volumes      → 换两个持久化目录
-#   environment  → 改时区 / 日志级别 / 认证 / session 密钥
+#   environment  → 改时区 / 日志级别 / 认证 / session 密钥 / 运行用户
 #
 # 持久化目录（两个目录可分别指向不同磁盘）：
 #   ./data      → 容器 /data      数据库、加密 session、封面缓存、临时截图
@@ -18,7 +18,16 @@
 #
 # 首次部署（Linux）：
 #   mkdir -p data downloads && sudo chown -R 1000:1000 data downloads
-#   # 容器内以 node(1000) 运行，宿主机目录属主必须是 1000:1000，否则写入失败
+#
+# NAS（群晖 / 威联通 / 绿联 / 铁威马等）部署：
+#   面板自动创建的挂载目录属主是 root，容器内应用以 node(1000) 运行，
+#   会出现「容器反复重启 + EACCES: permission denied, open '/data/.session-secret'」。
+#   本镜像的入口脚本会自动把目录属主改成下面 PUID/PGID 对应的用户，无需手动 chown。
+#   若面板不允许面板改属主，把 PUID/PGID 改成 NAS 上对应账号的 uid/gid
+#   （SSH 执行 id <用户名> 查看），例如 NAS 用户是 admin(1026)：
+#     environment:
+#       PUID: "1026"
+#       PGID: "100"
 #
 # 从旧版本（下载文件在 ./data/downloads 内）升级：
 #   mv data/downloads/* downloads/ && rmdir data/downloads
@@ -28,7 +37,8 @@ services:
     image: ghcr.io/rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
-    init: true
+    # 不要加 init: true —— 镜像的 ENTRYPOINT 已经用 tini 做 PID 1，
+    # 再叠加一层会出现「Tini is not running as PID 1」警告并多占一个进程。
     ports:
       # 宿主机端口 → 容器端口
       - "6789:6789"
@@ -39,6 +49,10 @@ services:
       # ② 下载目录（容器内）
       DOWNLOAD_DIR: /downloads
       LOG_LEVEL: info
+      # 容器内运行用户（uid:gid）。入口脚本用它修正挂载目录属主，再降权运行。
+      # NAS 上若挂载目录属主是别的账号，改成对应账号的 uid/gid。
+      PUID: "1000"
+      PGID: "1000"
       # 加密 Telegram session 的密钥；留空则首次启动自动生成并保存在 /data
       SESSION_SECRET: ""
       # 可选的基础认证，暴露到公网时建议开启

@@ -69,7 +69,9 @@ jobs:
             sleep 2
           done
           # 容器内以 node(1000) 运行，必须能往两个挂载点写
-          docker exec tgsub-vol node -e "
+          # 显式指定 uid/gid：镜像不再写死 USER，docker exec 默认是 root，
+          # 那样测不出降权之后是否还能写
+          docker exec -u 1000:1000 tgsub-vol node -e "
             const fs = require('fs');
             fs.writeFileSync('/data/.probe', 'x');
             fs.writeFileSync('/downloads/.probe', 'x');
@@ -80,6 +82,68 @@ jobs:
           test -f "$RUNNER_TEMP/tgsub-downloads/.probe" || { echo "下载目录未挂载生效"; exit 1; }
           echo "持久化目录校验通过"
           docker rm -f tgsub-vol
+
+      - name: 验证 NAS 场景（挂载目录属主为 root）
+        run: |
+          # 群晖 / 威联通等 NAS 面板创建的挂载目录属主是 root，
+          # 容器内应用以 node(1000) 运行会 EACCES 导致反复重启。
+          # 入口脚本必须能自动把属主改掉并让容器正常起来。
+          mkdir -p "$RUNNER_TEMP/nas-data" "$RUNNER_TEMP/nas-downloads"
+          sudo chown -R root:root "$RUNNER_TEMP/nas-data" "$RUNNER_TEMP/nas-downloads"
+          sudo chmod -R 755 "$RUNNER_TEMP/nas-data" "$RUNNER_TEMP/nas-downloads"
+
+          docker run -d --name tgsub-nas \
+            --restart unless-stopped \
+            -p 6789:6789 \
+            -v "$RUNNER_TEMP/nas-data:/data" \
+            -v "$RUNNER_TEMP/nas-downloads:/downloads" \
+            tgsub:smoke
+
+          ok=0
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:6789/api/health >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            # 反复重启的典型特征：容器退出码 137/1 且被反复拉起
+            sleep 2
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "NAS 场景下容器未能正常启动，日志如下："
+            docker logs tgsub-nas || true
+            echo "重启次数：$(docker inspect -f '{{.RestartCount}}' tgsub-nas)"
+            docker rm -f tgsub-nas || true
+            exit 1
+          fi
+
+          # 容器不能陷入重启循环
+          restarts=$(docker inspect -f '{{.RestartCount}}' tgsub-nas)
+          if [ "$restarts" != "0" ]; then
+            echo "容器发生了 $restarts 次重启，说明权限问题未解决"
+            docker logs tgsub-nas
+            docker rm -f tgsub-nas
+            exit 1
+          fi
+
+          # 入口脚本应已把属主从 root 改成 1000:1000
+          owner=$(stat -c '%u:%g' "$RUNNER_TEMP/nas-data")
+          if [ "$owner" != "1000:1000" ]; then
+            echo "入口脚本未修正挂载目录属主，当前为 $owner，期望 1000:1000"
+            docker logs tgsub-nas
+            docker rm -f tgsub-nas
+            exit 1
+          fi
+
+          # 降权后仍要能写
+          docker exec -u 1000:1000 tgsub-nas node -e "
+            const fs = require('fs');
+            fs.writeFileSync('/data/.probe', 'x');
+            fs.writeFileSync('/downloads/.probe', 'x');
+          " || { docker logs tgsub-nas; exit 1; }
+
+          echo "NAS 场景（root 属主挂载目录）校验通过"
+          docker rm -f tgsub-nas
 
   # 2) 测试通过后再发布多架构镜像（amd64 + arm64）到 GHCR
   publish:

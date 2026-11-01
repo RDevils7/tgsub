@@ -188,7 +188,7 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
 - **扫码登录**：手机 Telegram 扫一下即可，**无需申请 api_id / api_hash**（内置官方客户端凭证，设备指纹自动对齐）。
 - **session 加密落盘**：AES-256-GCM 加密后存 SQLite，重启进程/重建容器无需重新登录。
 - **单实例锁**：同一机器重复启动会被拒绝，避免同一 authKey 双连导致 `AUTH_KEY_DUPLICATED` 作废。
-- **生产就绪**：Docker 多阶段构建、非 root 运行、健康检查、数据卷持久化、可选 HTTP Basic 认证、结构化日志（pino）。
+- **生产就绪**：Docker 多阶段构建、入口脚本自动修正挂载目录属主后降权运行、健康检查、数据卷持久化、可选 HTTP Basic 认证、结构化日志（pino）。
 
 ---
 
@@ -283,9 +283,8 @@ GitHub Container Registry。服务器上不用装 Node、不用编译，也**不
 ```bash
 mkdir -p tgsub && cd tgsub
 
-# 建目录并把属主交给容器内的 node(1000) 用户；Linux 上不做这步会写入失败
+# 建目录；属主问题由镜像入口脚本自动修正（见下方「挂载目录权限」）
 mkdir -p data downloads
-sudo chown -R 1000:1000 data downloads
 
 # 准备 compose 文件：把仓库里的 docker-compose.yml 复制过来即可
 curl -fsSL -o docker-compose.yml \
@@ -297,6 +296,28 @@ docker compose logs -f
 ```
 
 启动后访问 `http://<服务器IP>:6789`。
+
+### 挂载目录权限（NAS 反复重启的根因）
+
+容器内应用以 `node`(1000) 运行，需要往 `/data`、`/downloads` 里写文件。而 NAS 的 Docker 面板
+（包括群晖 Container Manager、威联通 Container Station 等）创建绑定挂载时，宿主机目录会被
+自动建为 `root:root` —— 于是第一次写 `/data/.session-secret` 就 `EACCES`，进程崩溃、
+被 `restart: unless-stopped` 反复拉起，表现为容器不停重启。
+
+三道防线：
+
+| 层 | 做法 |
+| --- | --- |
+| 镜像 | `docker-entrypoint.sh`：容器以 root 启动时把两个目录属主改成 `PUID:PGID`，再 `setpriv` 降权运行 node |
+| 应用 | `env.ts`：启动前用探针文件实测目录可写性，不通就打印「哪个目录不可写 / 当前 uid / 怎么改」的指引，而不是抛裸 `EACCES` 堆栈 |
+| 运维 | `PUID`/`PGID` 环境变量（默认 `1000:1000`）可指定运行账号；NAS 上改成自己账号的 uid/gid，下载的文件就直接属于该账号 |
+
+补充说明：
+
+- 入口脚本默认只改目录本身的属主（秒级完成）；历史文件属主不对时设 `CHOWN_RECURSE=1` 递归修正。
+- 属主改不动（SMB/CIFS 共享、只读挂载）时脚本退回以 root 运行，保证「能启动」优先。
+- compose 里**不要**加 `init: true`：镜像 ENTRYPOINT 已用 tini 做 PID 1，叠加会出现
+  「Tini is not running as PID 1」警告。
 
 常用运维命令：
 

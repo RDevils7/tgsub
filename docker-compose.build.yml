@@ -21,7 +21,7 @@ services:
     image: tgsub:local
     container_name: tgsub
     restart: unless-stopped
-    init: true
+    # 不要加 init: true —— 镜像的 ENTRYPOINT 已经用 tini 做 PID 1
     ports:
       # 宿主机端口 → 容器端口
       - "6789:6789"
@@ -30,6 +30,9 @@ services:
       DATA_DIR: /data
       DOWNLOAD_DIR: /downloads
       LOG_LEVEL: info
+      # 容器内运行用户（uid:gid），入口脚本用它修正挂载目录属主后降权运行
+      PUID: "1000"
+      PGID: "1000"
       SESSION_SECRET: ""
       BASIC_AUTH_USER: ""
       BASIC_AUTH_PASS: ""

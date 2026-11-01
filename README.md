@@ -68,7 +68,6 @@ services:
     image: ghcr.io/rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
-    init: true
     ports:
       # 宿主机端口 → 容器端口
       - "6789:6789"
@@ -77,6 +76,8 @@ services:
       DATA_DIR: /data
       DOWNLOAD_DIR: /downloads
       LOG_LEVEL: info
+      PUID: "1000"
+      PGID: "1000"
       SESSION_SECRET: ""
       BASIC_AUTH_USER: ""
       BASIC_AUTH_PASS: ""
@@ -100,6 +101,9 @@ services:
           memory: 1G
 ```
 
+> 不要加 `init: true` —— 镜像的 ENTRYPOINT 已经用 tini 做 PID 1，再叠加一层会出现
+> 「Tini is not running as PID 1」警告。
+
 整个部署过程**只需要这一个文件**，不需要 clone 仓库、不需要在本机编译、也不需要访问 GitHub 源码。
 文件里全部是真实值（不做变量插值），要改镜像版本、端口或目录，直接编辑对应那一行即可。
 
@@ -117,13 +121,38 @@ compose 文件里全部是真实值，**直接编辑对应那一行**即可：
 | 换数据目录 | `volumes:` 第一条 → `- /opt/tgsub/data:/data` |
 | 换下载目录 | `volumes:` 第二条 → `- /mnt/nas/tgsub:/downloads` |
 | 改时区 / 日志级别 | `environment:` 里的 `TZ:` / `LOG_LEVEL:` |
+| 改容器内运行用户 | `environment:` 里的 `PUID:` / `PGID:` |
 | 开启基础认证 | `environment:` 里的 `BASIC_AUTH_USER:` / `BASIC_AUTH_PASS:` |
 | 固定 session 密钥 | `environment:` 里的 `SESSION_SECRET:`（≥16 位） |
 
 > `SESSION_SECRET` 留空（或不足 16 位）时，程序会在数据目录自动生成 `/data/.session-secret` 并一直复用；
 > 手动设置需 ≥16 位。**一旦设定就不要改** —— 改了数据库里的 session 解不开，得重新扫码。
 
-### 4. 启动
+### 4. NAS 部署（群晖 / 威联通 / 绿联 / 铁威马等）
+
+NAS 的 Docker 面板和普通服务器有个关键差别：**面板自动创建的挂载目录属主是 `root`**，
+而容器内应用以 `node`(1000) 运行，写不进去 —— 典型症状是容器反复重启，日志里刷：
+
+```
+Error: EACCES: permission denied, open '/data/.session-secret'
+```
+
+**本镜像已经处理了这个问题**：入口脚本在容器启动时会自动把 `/data`、`/downloads`
+的属主改成 `PUID`/`PGID` 对应的用户，然后降权运行。正常情况下**不需要任何手工操作**。
+
+如果面板限制了权限修正（日志里出现「无法修改 … 的属主」），按下面顺序处理：
+
+| 场景 | 做法 |
+| --- | --- |
+| SSH 能登录 | `sudo chown -R 1000:1000 <宿主机 data 目录> <宿主机 downloads 目录>` |
+| 挂载目录属主是别的账号 | SSH 执行 `id <用户名>` 拿到 uid/gid，改 compose 里的 `PUID:` / `PGID:` |
+| 目录来自 SMB/CIFS 共享 | 共享的权限由 NAS 账号决定，把 `PUID`/`PGID` 设成该账号的 uid/gid |
+| 完全没有 SSH | 在面板里把挂载目录的属主改成「管理账号」，并让 `PUID`/`PGID` 与之一致 |
+
+> `PUID`/`PGID` 就是「容器内用哪个账号读写文件」。默认 `1000:1000`（镜像里的 `node` 用户）。
+> 改成 NAS 上你自己的账号 uid/gid，下载的视频在你 NAS 的文件管理器里就直接属于你的账号了。
+
+### 5. 启动
 
 ```bash
 docker compose up -d
@@ -220,6 +249,14 @@ docker run -d --name tgsub -p 6789:6789 \
 ---
 
 ## 常见问题
+
+**容器一直重启，日志报 `EACCES: permission denied, open '/data/.session-secret'`**
+挂载目录属主与容器内运行用户不一致。NAS 面板自动创建的目录属主是 `root`，而程序以 `node`(1000) 运行。
+本镜像的入口脚本会自动修正属主，**先确认镜像是最新版**（`docker compose pull && docker compose up -d`）；
+若日志显示「无法修改 … 的属主」，按上面「NAS 部署」章节的表格手动处理，或调 `PUID`/`PGID`。
+
+**日志里刷 `Tini is not running as PID 1 and isn't registered as a child subreaper`**
+compose 里多写了一行 `init: true`，和镜像自带的 tini 重复了。删掉那一行即可（不影响功能，但会多一个进程并刷警告）。
 
 **私有频道下载报 `Could not find the input entity ... className: PeerUser`**
 频道 ID 必须用 Telegram 的标记形式（`-100` 开头）解析，裸号会被当成用户 ID。程序内部已统一处理；若手动改过数据库里的 `channels.tg_id`，改回未标记的裸号即可。

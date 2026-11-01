@@ -464,6 +464,56 @@ async function seriesDirChecks(): Promise<void> {
   await fs.rm(root, { recursive: true, force: true });
 }
 
+/**
+ * 挂载目录权限检查（NAS 反复重启的根因）。
+ *
+ * 这里验证三件事：
+ *  1. 可写目录能被探针文件识别出来；
+ *  2. 不可写目录能识别出来（Linux 上靠 chmod 制造只读目录；
+ *     Windows 不支持这种权限语义，跳过该断言但仍校验提示文案）；
+ *  3. 权限提示文案里包含用户真正需要的信息：目录、当前身份、解决办法。
+ */
+async function permissionChecks(): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const { isDirWritable, explainPermissionProblem } = await import("../server/src/env");
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-perm-"));
+
+  await acheck("可写目录被正确识别", async () => {
+    assert.equal(isDirWritable(root), true);
+  });
+
+  await acheck("不可写目录被正确识别", async () => {
+    const ro = path.join(root, "readonly");
+    await fs.mkdir(ro);
+    try {
+      await fs.chmod(ro, 0o500);
+    } catch {
+      return; // Windows 上没有 POSIX 权限位，无法制造只读目录
+    }
+    // Windows 的 chmod 不会真正拒绝写入，只有 Linux 上才能验证这一点
+    if (process.platform === "win32") {
+      await fs.chmod(ro, 0o700);
+      return;
+    }
+    const writable = isDirWritable(ro);
+    await fs.chmod(ro, 0o700); // 还原，避免 rm 失败
+    assert.equal(writable, false);
+  });
+
+  await acheck("权限提示包含目录、身份与解决办法", async () => {
+    const text = explainPermissionProblem("/data", "数据目录");
+    assert.ok(text.includes("/data"), "应指出具体目录");
+    assert.ok(text.includes("数据目录"), "应说明目录用途");
+    assert.ok(text.includes("uid="), "应说明当前进程身份");
+    assert.ok(text.includes("chown"), "应给出 chown 解决办法");
+    assert.ok(text.includes("PUID"), "应提示 PUID/PGID 方案");
+  });
+
+  await fs.rm(root, { recursive: true, force: true });
+}
+
 async function embyChecks(): Promise<void> {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
@@ -536,6 +586,12 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
   try {
+  try {
+    await permissionChecks();
+  } catch (err) {
+    console.error(`  \u2717 \u6743\u9650\u68c0\u67e5\u7528\u4f8b\u5f02\u5e38: ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
     await embyChecks();
   } catch (err) {
     console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
