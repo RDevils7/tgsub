@@ -1,0 +1,111 @@
+name: Docker 镜像
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # 1) 先在 amd64 上构建并跑一次冒烟测试，确认镜像能起来、健康检查通过
+  test:
+    name: 构建并冒烟测试（amd64）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 amd64 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: tgsub:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 启动容器并检查健康接口
+        run: |
+          docker run -d --name tgsub-smoke -p 3000:3000 tgsub:smoke
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3000/api/health > /tmp/health.json 2>/dev/null; then
+              echo "健康检查通过：$(cat /tmp/health.json)"
+              break
+            fi
+            sleep 2
+          done
+          if ! curl -fsS http://127.0.0.1:3000/api/health; then
+            echo "容器未通过健康检查，日志如下："
+            docker logs tgsub-smoke || true
+            exit 1
+          fi
+          # 顺便确认页面能返回
+          curl -fsS -o /dev/null -w "首页 HTTP %{http_code}\n" http://127.0.0.1:3000/
+          docker rm -f tgsub-smoke
+
+  # 2) 测试通过后再发布多架构镜像（amd64 + arm64）到 GHCR
+  publish:
+    name: 发布到 GHCR（amd64 + arm64）
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像名（GHCR 要求全小写）
+        id: slug
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 生成标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 输出拉取命令
+        run: |
+          echo "镜像：${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}:${{ steps.meta.outputs.version }}"
+          echo "拉取：docker pull ${{ env.REGISTRY }}/${{ steps.slug.outputs.name }}:${{ steps.meta.outputs.version }}"

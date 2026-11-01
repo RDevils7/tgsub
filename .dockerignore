@@ -4,7 +4,9 @@ server/dist
 web/dist
 data
 .tmpdata
+docs
 .git
+.github
 .gitignore
 *.log
 .env
@@ -12,6 +14,7 @@ data
 !.env.example
 README.md
 docker-compose.yml
+docker-compose.ghcr.yml
 Dockerfile
 .dockerignore
 .DS_Store

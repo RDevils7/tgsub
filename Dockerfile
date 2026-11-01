@@ -35,7 +35,7 @@ WORKDIR /app
 
 ENV NODE_ENV=development
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json ./
+COPY package.json package-lock.json* ./
 COPY server ./server
 COPY web ./web
 

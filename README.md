@@ -23,8 +23,9 @@
 - [工作原理](#工作原理)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
-  - [方式一：Docker Compose（推荐）](#方式一docker-compose推荐)
-  - [方式二：本地运行](#方式二本地运行)
+  - [方式一：从 GHCR 拉取镜像（推荐，免编译）](#方式一从-ghcr-拉取镜像推荐免编译)
+  - [方式二：Docker Compose 本地构建](#方式二docker-compose-本地构建)
+  - [方式三：本地运行](#方式三本地运行)
   - [首次配置](#首次配置)
 - [配置说明](#配置说明)
 - [Telegram 机器人](#telegram-机器人)
@@ -193,7 +194,67 @@ flowchart TB
 - Docker 部署：Docker 20.10+ 与 docker compose v2
 - 本地运行：Node.js ≥ 20（推荐 22）、Python 3 与 C++ 构建工具（`better-sqlite3` 原生模块）
 
-### 方式一：Docker Compose（推荐）
+### 方式一：从 GHCR 拉取镜像（推荐，免编译）
+
+项目每次推送到 `main` 或打 `v*` 标签，GitHub Actions 会自动构建 **amd64 + arm64** 双架构镜像并发布到
+GitHub Container Registry，服务器上不用装 Node、不用编译，直接拉取运行：
+
+```bash
+mkdir -p tgsub && cd tgsub
+mkdir -p data && sudo chown -R 1000:1000 data   # Linux 必需：容器内以 node(1000) 运行
+
+docker pull ghcr.io/rdevils7/tgsub:latest
+docker run -d --name tgsub \
+  -p 3000:3000 \
+  -v "$(pwd)/data:/data" \
+  -e TZ=Asia/Shanghai \
+  --restart unless-stopped \
+  ghcr.io/rdevils7/tgsub:latest
+```
+
+或者用仓库里现成的 compose 文件（端口、认证、密钥都读 `.env`）：
+
+```bash
+git clone https://github.com/RDevils7/tgsub.git
+cd tgsub
+cp .env.example .env
+mkdir -p data && sudo chown -R 1000:1000 data
+
+docker compose -f docker-compose.ghcr.yml up -d
+docker compose -f docker-compose.ghcr.yml logs -f
+```
+
+常用运维命令：
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull     # 拉取最新镜像
+docker compose -f docker-compose.ghcr.yml up -d     # 用新镜像重建容器
+docker compose -f docker-compose.ghcr.yml logs -f --tail=200
+docker compose -f docker-compose.ghcr.yml down      # 停止，数据保留在 ./data
+```
+
+**可用标签**
+
+| 标签 | 含义 |
+| --- | --- |
+| `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
+| `main` | 与 `latest` 同步 |
+| `v1.0.0` / `1.0.0` | 打 `v1.0.0` 标签时产生的固定版本（建议生产环境锁定） |
+| `1.0` | 只带大版本号的滚动标签 |
+| `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
+
+```bash
+# 锁定版本部署
+IMAGE=ghcr.io/rdevils7/tgsub:v1.0.0 docker compose -f docker-compose.ghcr.yml up -d
+```
+
+> **镜像仓库是公开的**，任何人都能 `docker pull`；如果你的 fork 想保持私有，需要在
+> GitHub 仓库 `Settings → Packages` 里把可见性改成 Private，拉取前先
+> `docker login ghcr.io -u <用户名>`（密码用 PAT，勾选 `read:packages`）。
+
+### 方式二：Docker Compose 本地构建
+
+想改代码、或需要自定义镜像时用这个（会在本机跑一遍 `npm ci` + 前端打包，耗时较长）：
 
 ```bash
 git clone https://github.com/RDevils7/tgsub.git
@@ -221,7 +282,7 @@ docker compose logs -f --tail=200
 docker compose down             # 停止，数据保留在 ./data
 ```
 
-### 方式二：本地运行
+### 方式三：本地运行
 
 ```bash
 npm install                     # 工作区安装 server + web 依赖
@@ -462,8 +523,10 @@ tgsub/
 │       └── index.css           # Tailwind 主题
 ├── scripts/                    # 自检与诊断脚本（见下）
 ├── data/                       # 运行时数据（不提交）
+├── .github/workflows/docker.yml # CI：构建镜像并发布到 GHCR
 ├── Dockerfile                  # 三阶段构建
-├── docker-compose.yml
+├── docker-compose.yml          # 本地构建部署
+├── docker-compose.ghcr.yml     # 直接拉取 GHCR 镜像部署
 └── .env.example
 ```
 
@@ -488,6 +551,33 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 | `node scripts/e2e-manual.mjs` | 手动下载接口端到端（需已登录、可联网） |
 | `node scripts/e2e-bot.mjs` | 机器人端到端 |
 | `node scripts/diag-session.js` | 解密本地 session，打印 DC / 地址 / authKey 指纹并试连（服务运行时会拒绝执行） |
+
+### 镜像发布（CI/CD）
+
+`.github/workflows/docker.yml` 在每次推送 `main`、打 `v*` 标签、提 PR 时自动运行：
+
+1. **test 任务**：在 `linux/amd64` 上构建镜像 → 启动容器 → 轮询 `/api/health` → 请求首页，
+   任一步失败就不发布（PR 只跑这一步）；
+2. **publish 任务**：test 通过后，用 buildx 同时构建 `linux/amd64` 与 `linux/arm64`
+   （arm64 走 QEMU 模拟），推送到 `ghcr.io/rdevils7/tgsub`，标签见[「可用标签」](#方式一从-ghcr-拉取镜像推荐免编译)。
+
+镜像用仓库内置的 `GITHUB_TOKEN` 登录 GHCR，无需额外配置密钥；首次推送后如果包是私有的，
+去仓库 `Settings → Packages` 把 `tgsub` 改成 Public 即可让任何人 `docker pull`。
+
+手动触发或指定版本发布：
+
+```bash
+# 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
+git tag v1.0.0 && git push origin v1.0.0    # 发布 v1.0.0 / 1.0 / 1.0.0 / latest
+```
+
+本地想验证镜像（需要本机装了 Docker）：
+
+```bash
+docker build -t tgsub:local .
+docker run -d --name tgsub -p 3000:3000 -v "$(pwd)/data:/data" tgsub:local
+curl http://127.0.0.1:3000/api/health
+```
 
 ---
 
