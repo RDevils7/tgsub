@@ -86,7 +86,7 @@ function episodeTag(meta: EmbyMeta): string {
   return `S${season}E${String(meta.episode).padStart(2, "0")}`;
 }
 
-function buildEpisodeNfo(meta: EmbyMeta): string {
+export function buildEpisodeNfo(meta: EmbyMeta): string {
   const tag = episodeTag(meta);
   const title = meta.episode !== null ? `${meta.series} ${tag}` : meta.series;
   const lines = [
@@ -118,7 +118,7 @@ function buildEpisodeNfo(meta: EmbyMeta): string {
   return lines.join("\n");
 }
 
-function buildShowNfo(meta: EmbyMeta): string {
+export function buildShowNfo(meta: EmbyMeta): string {
   const lines = [
     '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
     "<tvshow>",

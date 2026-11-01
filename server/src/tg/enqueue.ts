@@ -187,6 +187,8 @@ const runGroup = db.transaction(
         looseFolder: settings.fallback_folder,
         uniqueLooseDir: (base) =>
           stmtLooseDirOwner.get(base, messageId) ? `${base}-${messageId}` : base,
+        // 消息条数决定「一个文件含多集」还是「相册一集一条」
+        messageCount: messages.length,
       },
     );
     const caption = parseCaptionMeta(sourceText);

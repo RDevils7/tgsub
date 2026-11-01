@@ -143,7 +143,7 @@ acquireInstanceLock(path.join(env.dataDir, ".instance.lock"));
 // 数据库与磁盘文件一起改。放在下载队列启动之前，避免重试时生成「(2)」副本或留下孤儿文件。
 try {
   const report = repairLegacyArtifacts();
-  if (report.renamed || report.links) {
+  if (report.renamed || report.links || report.series || report.dirs) {
     logger.info(report, "已修正历史剧集文件名与消息链接");
   }
 } catch (err) {

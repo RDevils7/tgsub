@@ -8,8 +8,10 @@ import { matchText } from "../server/src/match";
 import { extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
 import { sanitizeSegment, splitKeywords, toNumber } from "../server/src/utils";
 import {
+  deriveSeriesFromText,
   fallbackFolderName,
   parseCaptionMeta,
+  parseFileNameMarks,
   parseSeriesCaption,
   planFileNames,
   stripLegacyIndex,
@@ -283,6 +285,58 @@ check("简介与标签提取", () => {
   assert.ok(meta.plot.includes("老板娘"));
   assert.equal(meta.plot.includes("#"), false);
   assert.deepEqual(meta.tags, ["ai成人短剧", "美人局"]);});
+
+console.log("\n剧集命名：正文与文件名双来源");
+const albumCaption = "妈妈我爱你  EP1-10";
+const epAlbumMedia = Array.from({ length: 10 }, (_, i) => ({
+  kind: "video" as const,
+  fileName: `2048真实故事改编 - 妈妈我爱你 第${i + 1}集 - AI短剧.mp4`,
+  mimeType: "video/mp4",
+}));
+
+check("正文没有书名号时，用集数标记反推剧名", () => {
+  assert.equal(deriveSeriesFromText(albumCaption), "妈妈我爱你");
+  const info = parseSeriesCaption(albumCaption);
+  assert.equal(info?.series, "妈妈我爱你");
+  assert.deepEqual(info?.episodes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(info?.range, { from: 1, to: 10 });
+});
+check("宣传语不能当剧名", () => {
+  // 「连载中 全系列完整版」是宣传语，宁可退回兜底命名
+  assert.equal(deriveSeriesFromText("第1集 连载中 全系列完整版 简介：……"), "");
+  assert.equal(deriveSeriesFromText("老板今天又发飙了，速看 完整版"), "");
+});
+check("原始文件名里解析剧名与集数", () => {
+  const marks = parseFileNameMarks("2048真实故事改编 - 妈妈我爱你 第3集 - AI短剧.mp4");
+  assert.equal(marks.series, "妈妈我爱你");
+  assert.equal(marks.episode, 3);
+  assert.equal(parseFileNameMarks("VID_001.mp4").series, "");
+});
+check("相册逐集编号 S01E01 ~ S01E10", () => {
+  const plan = planFileNames(albumCaption, epAlbumMedia, { artCount: 0, messageCount: 10 });
+  assert.deepEqual(
+    plan.map((p) => p.name),
+    Array.from({ length: 10 }, (_, i) => `妈妈我爱你S01E${String(i + 1).padStart(2, "0")}.mp4`),
+  );
+  assert.equal(plan[0].dir, "妈妈我爱你");
+  assert.deepEqual(plan.map((p) => p.episode), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+});
+check("一个视频含多集时用范围名 S01E01-E10", () => {
+  const plan = planFileNames(albumCaption, [epAlbumMedia[0]], { artCount: 0, messageCount: 1 });
+  assert.equal(plan[0].name, "妈妈我爱你S01E01-E10.mp4");
+  const merged = planFileNames(
+    "妈妈我爱你 合集",
+    [{ kind: "video" as const, fileName: "妈妈我爱你 EP1-10.mp4", mimeType: "video/mp4" }],
+    { artCount: 0, messageCount: 1 },
+  );
+  assert.equal(merged[0].name, "妈妈我爱你S01E01-E10.mp4");
+  assert.equal(merged[0].dir, "妈妈我爱你");
+});
+check("认不出剧名时仍然一个链接一个文件夹", () => {
+  const plan = planFileNames(looseText, oneVideo, { artCount: 0 });
+  assert.equal(plan[0].dir, "老板今天又发飙了，速看 完整版");
+  assert.equal(plan[0].loose, true);
+});
 
 console.log("\n频道实体标识");
 check("裸号频道 ID 转成 -100 标记形式", () => {
