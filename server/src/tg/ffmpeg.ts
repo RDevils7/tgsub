@@ -215,6 +215,9 @@ export async function probeVideo(file: string): Promise<VideoProbe | null> {
 
 export type FitMode = "cover" | "contain" | "stretch";
 
+/** 默认留黑边：视频比例和封面规格不一致时保住完整画面，不裁掉内容 */
+export const DEFAULT_FIT: FitMode = "contain";
+
 function scaleFilter(width: number, height: number, fit: FitMode): string {
   if (fit === "stretch") return `scale=${width}:${height}`;
   if (fit === "contain") {
@@ -245,7 +248,7 @@ export async function captureFrame(
       "-frames:v",
       "1",
       "-vf",
-      scaleFilter(opts.width, opts.height, opts.fit ?? "cover"),
+      scaleFilter(opts.width, opts.height, opts.fit ?? DEFAULT_FIT),
       "-q:v",
       "2",
       opts.out,

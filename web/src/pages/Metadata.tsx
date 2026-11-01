@@ -878,7 +878,7 @@ function ImagePicker({
   // 截图
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [at, setAt] = useState(0);
-  const [fit, setFit] = useState<"cover" | "contain" | "stretch">("cover");
+  const [fit, setFit] = useState<"cover" | "contain" | "stretch">("contain");
   const [candidates, setCandidates] = useState<FrameCandidate[]>([]);
   const [grabbing, setGrabbing] = useState(false);
   const [selectedFrame, setSelectedFrame] = useState<number | null>(null);
@@ -983,6 +983,28 @@ function ImagePicker({
           ))}
         </div>
 
+        {/* 缩放方式对所有来源（截图 / 上传 / 复用）生效，比例不符时默认留黑边 */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11.5px] text-slate-500">缩放方式</span>
+          <select
+            value={fit}
+            onChange={(e) => setFit(e.target.value as "cover" | "contain" | "stretch")}
+            className="field !w-auto !py-1 !text-[11.5px]"
+            title="比例与目标尺寸不一致时怎么处理"
+          >
+            <option value="contain">留黑边（完整显示）</option>
+            <option value="cover">裁剪铺满</option>
+            <option value="stretch">拉伸变形</option>
+          </select>
+          <span className="text-[11px] text-slate-600">
+            {fit === "contain"
+              ? "比例不一致时补黑边，不裁掉画面"
+              : fit === "cover"
+                ? "比例不一致时裁掉超出部分"
+                : "比例不一致时强行拉伸"}
+          </span>
+        </div>
+
         {tab === "frame" && (
           <div className="space-y-3">
             {!detail.ffmpeg.available || !detail.video?.exists ? (
@@ -1016,16 +1038,6 @@ function ImagePicker({
                   <span className="w-[128px] shrink-0 whitespace-nowrap text-right text-[11.5px] tabular-nums text-slate-400">
                     {at.toFixed(1)}s / {duration ? formatDuration(duration) : "—"}
                   </span>
-                  <select
-                    value={fit}
-                    onChange={(e) => setFit(e.target.value as "cover" | "contain" | "stretch")}
-                    className="field !w-auto !py-1.5 !text-[12px]"
-                    title="缩放方式"
-                  >
-                    <option value="cover">裁剪铺满</option>
-                    <option value="contain">留黑边</option>
-                    <option value="stretch">拉伸变形</option>
-                  </select>
                   <Button size="sm" onClick={() => void grab()} loading={grabbing}>
                     <IconRefresh className="h-3.5 w-3.5" />
                     抽帧
@@ -1074,7 +1086,7 @@ function ImagePicker({
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
-                void run(() => api.uploadImage(detail.item.id, scope, name, file), "图片已上传并写入封面");
+                void run(() => api.uploadImage(detail.item.id, scope, name, file, fit), "图片已上传并写入封面");
                 e.target.value = "";
               }}
             />
@@ -1085,7 +1097,10 @@ function ImagePicker({
             >
               {busy ? <Spinner /> : <IconUpload className="h-6 w-6" />}
               <span className="text-[12.5px]">点击选择本地图片（jpg / png / webp，≤ 30MB）</span>
-              <span className="text-[11px] text-slate-600">会按 {slot.hint} 自动缩放</span>
+              <span className="text-[11px] text-slate-600">
+                会按 {slot.hint} 缩放，比例不符时
+                {fit === "contain" ? "留黑边（默认）" : fit === "cover" ? "裁剪" : "拉伸"}
+              </span>
             </button>
           </div>
         )}

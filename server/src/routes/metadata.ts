@@ -66,6 +66,14 @@ const IMAGE_SPECS: Record<ImageName, { width: number; height: number; label: str
 
 const IMAGE_NAMES = Object.keys(IMAGE_SPECS) as ImageName[];
 
+/** 缩放方式：默认留黑边（比例不对时保住整张图），其次裁剪铺满 / 拉伸变形 */
+const DEFAULT_FIT: FitMode = "contain";
+
+function normalizeFit(value: unknown, fallback: FitMode = DEFAULT_FIT): FitMode {
+  const text = String(value ?? "").trim().toLowerCase();
+  return text === "cover" || text === "contain" || text === "stretch" ? (text as FitMode) : fallback;
+}
+
 function isImageName(value: unknown): value is ImageName {
   return typeof value === "string" && (IMAGE_NAMES as string[]).includes(value);
 }
@@ -576,7 +584,7 @@ metadataRouter.post(
 
     const target = resolveTarget(row);
     const scope = normalizeScope(req.query.scope);
-    const fit = (String(req.query.fit ?? "cover") as FitMode) ?? "cover";
+    const fit = normalizeFit(req.query.fit);
     const file = imagePath(target, scope, name as ImageName);
     await saveBuffer(buffer, file, IMAGE_SPECS[name], fit);
     await fs.promises.unlink(`${file}.tmp`).catch(() => undefined);
@@ -602,7 +610,7 @@ metadataRouter.post(
     const src = imagePath(target, fromScope, fromName);
     assert(fs.existsSync(src), 404, "源图片不存在");
     const dest = imagePath(target, toScope, toName);
-    await writeImageFile(src, dest, IMAGE_SPECS[toName], (req.body?.fit as FitMode) ?? "cover");
+    await writeImageFile(src, dest, IMAGE_SPECS[toName], normalizeFit(req.body?.fit));
     res.json({ ok: true, url: `/api/metadata/${id}/image/${toScope}/${toName}?v=${Date.now()}` });
   }),
 );
@@ -642,7 +650,7 @@ metadataRouter.post(
     assert(isImageName(name), 400, "未知图片类型");
     const scope = normalizeScope(req.body?.scope);
     const dest = imagePath(target, scope, name);
-    await writeImageFile(src, dest, IMAGE_SPECS[name], (req.body?.fit as FitMode) ?? "cover");
+    await writeImageFile(src, dest, IMAGE_SPECS[name], normalizeFit(req.body?.fit));
     res.json({ ok: true, url: `/api/metadata/${id}/image/${scope}/${name}?v=${Date.now()}` });
   }),
 );
@@ -721,7 +729,7 @@ metadataRouter.post(
       out: dest,
       width: spec.width,
       height: spec.height,
-      fit: (req.body?.fit as FitMode) ?? "cover",
+      fit: normalizeFit(req.body?.fit),
     });
 
     logger.info({ id, at, name, scope }, "已从视频截帧生成封面");

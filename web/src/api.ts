@@ -236,9 +236,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ count }),
     }),
-  /** 上传图片：直接以二进制 body 提交，服务端按规格缩放写入 */
-  uploadImage: async (id: number, scope: ImageScope, name: ImageName, file: File) => {
-    const res = await fetch(`/api/metadata/${id}/image?scope=${scope}&name=${name}&fit=cover`, {
+  /** 上传图片：直接以二进制 body 提交，服务端按规格缩放写入（默认留黑边，不裁图） */
+  uploadImage: async (id: number, scope: ImageScope, name: ImageName, file: File, fit = "contain") => {
+    const res = await fetch(`/api/metadata/${id}/image?scope=${scope}&name=${name}&fit=${encodeURIComponent(fit)}`, {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: file,
