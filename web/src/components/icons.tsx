@@ -306,3 +306,28 @@ export const IconCrop = (p: Props) => (
     <path d="M2.5 6.5h15v15" />
   </Svg>
 );
+
+export const IconChevronDown = (p: Props) => (
+  <Svg {...p}>
+    <path d="m6 9 6 6 6-6" />
+  </Svg>
+);
+
+export const IconFolder = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.3l1.8 2.2h7.5A2.2 2.2 0 0 1 20 9.4v7.4a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 16.8Z" />
+  </Svg>
+);
+
+export const IconSun = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2.6v2.1M12 19.3v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.6 12h2.1M19.3 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" />
+  </Svg>
+);
+
+export const IconMoon = (p: Props) => (
+  <Svg {...p}>
+    <path d="M20 14.4A8.4 8.4 0 0 1 9.6 4a8.4 8.4 0 1 0 10.4 10.4Z" />
+  </Svg>
+);

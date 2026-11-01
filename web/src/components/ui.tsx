@@ -42,9 +42,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             <span
               className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${
                 t.kind === "success"
-                  ? "bg-emerald-500/15 text-emerald-300"
+                  ? "bg-emerald-500/15 text-ok"
                   : t.kind === "error"
-                    ? "bg-rose-500/15 text-rose-300"
+                    ? "bg-rose-500/15 text-err"
                     : "bg-brand-500/15 text-brand-300"
               }`}
             >
@@ -126,7 +126,7 @@ export function Toggle({
       }`}
     >
       <span
-        className={`absolute top-[3px] h-4 w-4 rounded-full bg-white shadow transition-all duration-200 ${
+        className={`absolute top-[3px] h-4 w-4 rounded-full bg-[#fff] shadow transition-all duration-200 ${
           checked ? "left-[19px]" : "left-[3px]"
         }`}
       />

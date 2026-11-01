@@ -67,7 +67,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
       value: String(today.downloads),
       suffix: "个文件",
       icon: <IconDownload className="h-4 w-4" />,
-      tone: "text-emerald-300 bg-emerald-500/10 border-emerald-500/20",
+      tone: "text-ok bg-emerald-500/10 border-emerald-500/20",
       hint: `共 ${formatBytes(today.bytes)}`,
     },
     {
@@ -75,7 +75,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
       value: formatBytes(totalBytes, 1),
       suffix: "",
       icon: <IconFile className="h-4 w-4" />,
-      tone: "text-amber-300 bg-amber-500/10 border-amber-500/20",
+      tone: "text-warn bg-amber-500/10 border-amber-500/20",
       hint: `${totals.done} 个文件已完成`,
     },
   ];
@@ -128,7 +128,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
               </p>
               <div className="mt-1">
                 {!auth.authorized ? (
-                  <span className="text-[12px] text-amber-300/80">待登录</span>
+                  <span className="text-[12px] text-warn/80">待登录</span>
                 ) : scanState.autoScan ? (
                   <Countdown ts={scanState.nextRunAt} />
                 ) : (
@@ -174,7 +174,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
               <span className="text-slate-400">任务完成度</span>
               <span className="font-mono text-slate-300">
                 {totals.done}/{totals.total}
-                {totals.failed > 0 && <span className="ml-2 text-rose-300">失败 {totals.failed}</span>}
+                {totals.failed > 0 && <span className="ml-2 text-err">失败 {totals.failed}</span>}
               </span>
             </div>
             <ProgressBar value={doneRatio} className="mt-2.5" />
@@ -278,7 +278,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
                       <td className="max-w-[220px] truncate px-3 py-2.5 text-slate-200">{run.channel_title}</td>
                       <td className="px-3 py-2.5 font-mono text-slate-400">{run.scanned}</td>
                       <td className="px-3 py-2.5 font-mono">
-                        <span className={run.matched > 0 ? "text-emerald-300" : "text-slate-500"}>{run.matched}</span>
+                        <span className={run.matched > 0 ? "text-ok" : "text-slate-500"}>{run.matched}</span>
                       </td>
                       <td className="px-3 py-2.5">
                         <Badge className={meta.className}>
@@ -298,8 +298,8 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
 
       {totals.failed > 0 && (
         <div className="flex items-start gap-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.06] px-4 py-3">
-          <IconAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />
-          <div className="text-[12.5px] leading-relaxed text-rose-200/90">
+          <IconAlert className="mt-0.5 h-4 w-4 shrink-0 text-err" />
+          <div className="text-[12.5px] leading-relaxed text-err/90">
             有 {totals.failed} 个任务下载失败，可能是网络波动或文件已被删除。
             <button onClick={() => onNavigate("downloads")} className="ml-1 underline decoration-rose-400/40 underline-offset-2 hover:text-white">
               去查看

@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
+  BrowseResult,
   CropRect,
   FrameCandidate,
   ImageName,
   ImageScope,
   MetadataDetail,
-  MetadataListItem,
+  MetadataFolderItem,
+  MetadataSource,
   NfoFields,
 } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
@@ -16,16 +18,20 @@ import {
   IconAlert,
   IconCamera,
   IconCheck,
+  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
   IconCode,
   IconCrop,
   IconDownload,
   IconEdit,
+  IconFolder,
   IconImage,
   IconPhoto,
+  IconPlus,
   IconRefresh,
   IconSearch,
+  IconSpark,
   IconTrash,
   IconUpload,
   IconVideo,
@@ -87,6 +93,12 @@ function scopeLabel(scope: ImageScope): string {
   return scope === "episode" ? "单集图片" : "剧集图片";
 }
 
+/** 选中的目标：文件夹 = 剧集级，文件 = 单集级 */
+interface Selection {
+  key: string;
+  kind: "file" | "folder";
+}
+
 /* ------------------------------ 页面 ------------------------------ */
 
 export default function Metadata() {
@@ -95,22 +107,26 @@ export default function Metadata() {
   const [pageSize, setPageSize] = usePageSize("metadata", 20);
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
-  const [items, setItems] = useState<MetadataListItem[]>([]);
+  const [items, setItems] = useState<MetadataFolderItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  /** 展开的文件夹 */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [selected, setSelected] = useState<Selection | null>(null);
   const [detail, setDetail] = useState<MetadataDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [tab, setTab] = useState<"basic" | "images" | "nfo">("basic");
-  const [kind, setKind] = useState<"episode" | "show">("episode");
+  const [kind, setKind] = useState<"episode" | "show">("show");
 
   const [fields, setFields] = useState<NfoFields>(EMPTY_FIELDS);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
 
   const [picker, setPicker] = useState<{ scope: ImageScope; name: ImageName } | null>(null);
   const [imageScope, setImageScope] = useState<ImageScope>("series");
+  const [addOpen, setAddOpen] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -123,9 +139,11 @@ export default function Metadata() {
         setTotal(res.total);
         const last = Math.max(0, Math.ceil(res.total / pageSize) - 1);
         if (target > last) setPage(last);
-        setSelectedId((prev) => {
-          if (prev && res.items.some((i) => i.id === prev)) return prev;
-          return res.items[0]?.id ?? null;
+        setSelected((prev) => {
+          const fallback = res.items[0] ? { key: res.items[0].key, kind: "folder" as const } : null;
+          if (!prev) return fallback;
+          const stillThere = res.items.some((i) => i.key === prev.key || i.files.some((f) => f.key === prev.key));
+          return stillThere ? prev : fallback;
         });
       } catch (err) {
         if (!silent) toast.push((err as Error).message, "error");
@@ -141,12 +159,11 @@ export default function Metadata() {
   }, [fetchList, page]);
 
   const loadDetail = useCallback(
-    async (id: number, silent = false) => {
+    async (key: string, silent = false) => {
       if (!silent) setDetailLoading(true);
       try {
-        const res = await api.metadataDetail(id);
+        const res = await api.metadataDetail(key);
         setDetail(res);
-        setFields(res.fields[kind] ?? EMPTY_FIELDS);
         setDirty(false);
       } catch (err) {
         toast.push((err as Error).message, "error");
@@ -154,18 +171,23 @@ export default function Metadata() {
         setDetailLoading(false);
       }
     },
-    [kind, toast],
+    [toast],
   );
 
   useEffect(() => {
-    if (selectedId === null) {
+    if (!selected) {
       setDetail(null);
       return;
     }
-    void loadDetail(selectedId);
-    // kind 变化由下面单独处理，避免重复请求
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+    void loadDetail(selected.key);
+  }, [selected, loadDetail]);
+
+  // 目标换了：文件夹只能编辑剧集信息，文件可以切单集 / 剧集
+  useEffect(() => {
+    if (!detail) return;
+    setKind(detail.target.kind === "folder" ? "show" : "episode");
+    setImageScope("series");
+  }, [detail]);
 
   // 切换「单集 / 剧集」时换一套字段
   useEffect(() => {
@@ -186,16 +208,32 @@ export default function Metadata() {
     if (!detail) return;
     setSaving(true);
     try {
-      const res = await api.saveMetaFields(detail.item.id, kind, fields);
+      const res = await api.saveMetaFields(detail.target.key, kind, fields);
       toast.push(kind === "episode" ? "单集元数据已保存" : "剧集信息已保存", "success");
       setFields(res.fields);
       setDirty(false);
-      await loadDetail(detail.item.id, true);
+      await loadDetail(detail.target.key, true);
       await fetchList(page, true);
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** 一键生成：单集 NFO + tvshow.nfo，缺封面时随机截帧 */
+  const generate = async () => {
+    if (!selected) return;
+    setGenerating(true);
+    try {
+      const res = await api.generateMetadata(selected.key);
+      toast.push(`已生成 ${res.nfoCount} 份 NFO、${res.coverCount} 张封面（${res.files} 个视频）`, "success");
+      await loadDetail(selected.key, true);
+      await fetchList(page, true);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setGenerating(false);
     }
   };
 
@@ -205,18 +243,30 @@ export default function Metadata() {
   const removeImage = async (scope: ImageScope, name: ImageName) => {
     if (!detail) return;
     try {
-      await api.deleteImage(detail.item.id, scope, name);
+      await api.deleteImage(detail.target.key, scope, name);
       toast.push("图片已删除", "success");
-      await loadDetail(detail.item.id, true);
+      await loadDetail(detail.target.key, true);
       await fetchList(page, true);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
   };
 
+  const toggleExpand = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const isFolderTarget = detail?.target.kind === "folder";
+  const scopes: ImageScope[] = isFolderTarget ? ["series"] : ["series", "episode"];
+
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(280px,330px)_minmax(0,1fr)]">
-      {/* 左侧：已下载视频列表 */}
+    <div className="grid gap-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+      {/* 左侧：文件夹树（一个文件夹一条记录，展开看里面的每个视频） */}
       <section className="card flex min-h-0 flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-white/[0.06] p-3">
           <div className="relative flex-1">
@@ -237,6 +287,10 @@ export default function Metadata() {
               className="field !py-2 !pl-8 !text-[12.5px]"
             />
           </div>
+          <Button size="sm" onClick={() => setAddOpen(true)} title="手动添加视频或视频目录">
+            <IconPlus className="h-3.5 w-3.5" />
+            添加
+          </Button>
           <Button size="sm" onClick={() => void fetchList(page)} title="刷新">
             <IconRefresh className="h-3.5 w-3.5" />
           </Button>
@@ -251,53 +305,118 @@ export default function Metadata() {
           {!loading && items.length === 0 && (
             <EmptyState
               icon={<IconVideo className="h-5 w-5" />}
-              title="还没有已下载的视频"
-              description="下载完成的视频会出现在这里，可编辑它的 NFO 与封面"
+              title="还没有可管理的媒体"
+              description="下载完成的视频会按文件夹聚合到这里，也可以手动添加本地视频或目录"
+              action={
+                <Button size="sm" onClick={() => setAddOpen(true)}>
+                  <IconPlus className="h-3.5 w-3.5" />
+                  手动添加
+                </Button>
+              }
             />
           )}
+
           <ul className="divide-y divide-white/[0.05]">
-            {items.map((item) => {
-              const active = item.id === selectedId;
+            {items.map((folder) => {
+              const open = expanded.has(folder.key);
+              const active = selected?.key === folder.key;
               return (
-                <li key={item.id}>
-                  <button
-                    onClick={() => setSelectedId(item.id)}
-                    className={`flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition ${
+                <li key={folder.key}>
+                  {/* 首级：文件夹 = 一条记录，显示剧集信息 */}
+                  <div
+                    className={`flex items-start gap-2 px-2.5 py-2.5 transition ${
                       active ? "bg-brand-500/[0.12]" : "hover:bg-white/[0.03]"
                     }`}
                   >
-                    <span className="relative h-[62px] w-[42px] shrink-0 overflow-hidden rounded-md border border-white/10 bg-ink-900">
-                      {item.posterUrl ? (
-                        <img src={item.posterUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
-                      ) : (
-                        <span className="flex h-full w-full items-center justify-center text-slate-600">
-                          <IconPhoto className="h-4 w-4" />
-                        </span>
-                      )}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span
-                        className={`block truncate text-[12.5px] font-medium ${
-                          active ? "text-white" : "text-slate-200"
-                        }`}
-                        title={item.title}
-                      >
-                        {item.title}
-                      </span>
-                      <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-slate-500">
-                        {item.episode !== null && (
-                          <span className="rounded bg-white/[0.06] px-1.5 py-[1px] tabular-nums text-slate-400">
-                            S{String(item.season ?? 1).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}
+                    <button
+                      onClick={() => toggleExpand(folder.key)}
+                      className="mt-1 shrink-0 rounded p-0.5 text-slate-500 transition hover:text-slate-300"
+                      title={open ? "收起" : "展开文件"}
+                      aria-label={open ? "收起" : "展开"}
+                    >
+                      <IconChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? "" : "-rotate-90"}`} />
+                    </button>
+
+                    <button
+                      onClick={() => setSelected({ key: folder.key, kind: "folder" })}
+                      className="flex min-w-0 flex-1 items-start gap-2.5 text-left"
+                      title={folder.dir}
+                    >
+                      <span className="relative h-[62px] w-[42px] shrink-0 overflow-hidden rounded-md border border-white/10 bg-ink-900">
+                        {folder.posterUrl ? (
+                          <img src={folder.posterUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
+                        ) : (
+                          <span className="flex h-full w-full items-center justify-center text-slate-600">
+                            <IconFolder className="h-4 w-4" />
                           </span>
                         )}
-                        <span className={item.nfoExists ? "text-emerald-400/80" : "text-amber-400/80"}>
-                          {item.nfoExists ? "NFO" : "无 NFO"}
-                        </span>
-                        <span>· {item.imageCount} 图</span>
-                        <span>· {formatBytes(item.file_size)}</span>
                       </span>
-                    </span>
-                  </button>
+                      <span className="min-w-0 flex-1">
+                        <span
+                          className={`block truncate text-[12.5px] font-medium ${
+                            active ? "text-white" : "text-slate-200"
+                          }`}
+                          title={folder.name}
+                        >
+                          {folder.name}
+                        </span>
+                        <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-slate-500">
+                          <span className="rounded bg-white/[0.06] px-1.5 py-[1px] tabular-nums text-slate-400">
+                            {folder.fileCount} 个视频
+                          </span>
+                          <span className={folder.nfoExists ? "text-ok/80" : "text-warn/80"}>
+                            {folder.nfoExists ? "tvshow.nfo" : "无 tvshow.nfo"}
+                          </span>
+                          <span>· {folder.imageCount} 图</span>
+                          <span>· {formatBytes(folder.totalSize)}</span>
+                        </span>
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* 子级：文件夹里的每个视频 */}
+                  {open && (
+                    <ul className="border-t border-white/[0.04] bg-black/[0.12] py-1">
+                      {folder.files.length === 0 && (
+                        <li className="px-8 py-2 text-[11.5px] text-slate-600">这个目录里没有视频</li>
+                      )}
+                      {folder.files.map((file) => {
+                        const fileActive = selected?.key === file.key;
+                        return (
+                          <li key={file.key}>
+                            <button
+                              onClick={() => setSelected({ key: file.key, kind: "file" })}
+                              className={`flex w-full items-center gap-2 py-1.5 pl-9 pr-3 text-left transition ${
+                                fileActive ? "bg-brand-500/[0.14]" : "hover:bg-white/[0.03]"
+                              }`}
+                              title={file.path}
+                            >
+                              <IconVideo className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                              <span className="min-w-0 flex-1">
+                                <span
+                                  className={`block truncate text-[12px] ${
+                                    fileActive ? "text-white" : "text-slate-300"
+                                  }`}
+                                >
+                                  {file.name}
+                                </span>
+                              </span>
+                              {file.episode !== null && (
+                                <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-[1px] text-[10px] tabular-nums text-slate-400">
+                                  S{String(file.season ?? 1).padStart(2, "0")}E{String(file.episode).padStart(2, "0")}
+                                </span>
+                              )}
+                              <span
+                                className={`shrink-0 text-[10px] ${file.nfoExists ? "text-ok/80" : "text-warn/70"}`}
+                              >
+                                {file.nfoExists ? "NFO" : "无"}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </li>
               );
             })}
@@ -338,13 +457,13 @@ export default function Metadata() {
 
       {/* 右侧：详情 */}
       <section className="card flex min-h-0 flex-col overflow-hidden">
-        {!selectedId && (
+        {!selected && (
           <div className="flex flex-1 items-center justify-center py-20 text-[13px] text-slate-500">
-            左侧选一条记录开始编辑
+            左侧选一个文件夹或视频开始编辑
           </div>
         )}
 
-        {selectedId && !detail && (
+        {selected && !detail && (
           <div className="flex flex-1 items-center justify-center gap-2 py-20 text-[13px] text-slate-500">
             <Spinner /> 读取元数据…
           </div>
@@ -354,22 +473,29 @@ export default function Metadata() {
           <>
             <header className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] p-4">
               <div className="min-w-0">
-                <h2 className="truncate text-[15px] font-semibold text-white" title={detail.item.save_name ?? detail.item.file_name}>
-                  {detail.fields[kind].title || detail.item.save_name || detail.item.file_name}
+                <h2 className="truncate text-[15px] font-semibold text-white" title={detail.target.path}>
+                  {detail.fields[kind].title || detail.target.name}
                 </h2>
-                <p className="mt-1 truncate text-[11.5px] text-slate-500" title={detail.paths?.video}>
-                  {detail.paths?.video ?? detail.pathError ?? ""}
+                <p className="mt-1 truncate text-[11.5px] text-slate-500" title={detail.target.path}>
+                  {detail.target.path}
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <Badge className="border-white/10 bg-white/[0.04] text-slate-400">
-                    {detail.item.channel_title}
+                    {detail.target.kind === "folder" ? "剧集目录" : "单集视频"}
                   </Badge>
+                  {detail.download && (
+                    <Badge className="border-white/10 bg-white/[0.04] text-slate-400">
+                      {detail.download.channel_title}
+                    </Badge>
+                  )}
                   {detail.nfo.episode?.exists ? (
-                    <Badge className="border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+                    <Badge className="border-ok/20 bg-ok/10 text-ok">
                       <IconCheck className="h-3 w-3" /> 单集 NFO
                     </Badge>
                   ) : (
-                    <Badge className="border-amber-500/20 bg-amber-500/10 text-amber-300">缺 NFO</Badge>
+                    !isFolderTarget && (
+                      <Badge className="border-warn/20 bg-warn/10 text-warn">缺单集 NFO</Badge>
+                    )
                   )}
                   {detail.nfo.show?.exists && (
                     <Badge className="border-white/10 bg-white/[0.04] text-slate-400">tvshow.nfo</Badge>
@@ -386,13 +512,33 @@ export default function Metadata() {
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
-                <Button size="sm" onClick={() => void loadDetail(detail.item.id)} loading={detailLoading} title="重新读取">
+                <Button
+                  size="sm"
+                  onClick={() => void loadDetail(detail.target.key)}
+                  loading={detailLoading}
+                  title="重新读取"
+                >
                   <IconRefresh className="h-3.5 w-3.5" />
                 </Button>
-                <a className="btn-ghost !px-2.5 !py-1.5 !text-[12.5px]" href={`/api/downloads/${detail.item.id}/file`} download>
-                  <IconDownload className="h-3.5 w-3.5" />
-                  视频
-                </a>
+                <Button
+                  size="sm"
+                  onClick={() => void generate()}
+                  loading={generating}
+                  title="按当前目标批量生成 NFO 与封面"
+                >
+                  <IconSpark className="h-3.5 w-3.5" />
+                  一键生成
+                </Button>
+                {detail.download && (
+                  <a
+                    className="btn-ghost !px-2.5 !py-1.5 !text-[12.5px]"
+                    href={`/api/downloads/${detail.download.id}/file`}
+                    download
+                  >
+                    <IconDownload className="h-3.5 w-3.5" />
+                    视频
+                  </a>
+                )}
               </div>
             </header>
 
@@ -416,17 +562,22 @@ export default function Metadata() {
                 </button>
               ))}
               <div className="ml-auto flex items-center gap-1 py-1.5">
-                {(["episode", "show"] as const).map((k) => (
-                  <button
-                    key={k}
-                    onClick={() => setKind(k)}
-                    className={`rounded-lg px-2 py-1 text-[11.5px] transition ${
-                      kind === k ? "bg-brand-500/15 text-brand-200" : "text-slate-500 hover:text-slate-300"
-                    }`}
-                  >
-                    {k === "episode" ? "单集" : "剧集(tvshow)"}
-                  </button>
-                ))}
+                {(["episode", "show"] as const).map((k) => {
+                  const disabled = k === "episode" && isFolderTarget;
+                  return (
+                    <button
+                      key={k}
+                      disabled={disabled}
+                      onClick={() => setKind(k)}
+                      title={disabled ? "单集 NFO 需要选中具体视频文件" : undefined}
+                      className={`rounded-lg px-2 py-1 text-[11.5px] transition disabled:opacity-35 ${
+                        kind === k ? "bg-brand-500/15 text-brand-200" : "text-slate-500 hover:text-slate-300"
+                      }`}
+                    >
+                      {k === "episode" ? "单集" : "剧集(tvshow)"}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -446,6 +597,7 @@ export default function Metadata() {
               {tab === "images" && (
                 <ImagesTab
                   detail={detail}
+                  scopes={scopes}
                   imageScope={imageScope}
                   setImageScope={setImageScope}
                   imageOf={imageOf}
@@ -461,8 +613,8 @@ export default function Metadata() {
                   detail={detail}
                   kind={kind}
                   onSaved={async () => {
-                    if (!selectedId) return;
-                    await loadDetail(selectedId, true);
+                    if (!selected) return;
+                    await loadDetail(selected.key, true);
                     await fetchList(page, true);
                   }}
                 />
@@ -480,11 +632,19 @@ export default function Metadata() {
           onClose={() => setPicker(null)}
           onDone={async () => {
             setPicker(null);
-            await loadDetail(detail.item.id, true);
+            await loadDetail(detail.target.key, true);
             await fetchList(page, true);
           }}
         />
       )}
+
+      <AddSourceDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onAdded={async () => {
+          await fetchList(page, true);
+        }}
+      />
     </div>
   );
 }
@@ -534,7 +694,7 @@ function BasicTab({
         <span className="font-mono text-slate-300">{slot?.file ?? "（将新建）"}</span>
         {slot?.exists && <span className="text-slate-500">· {formatBytes(slot.size)}</span>}
         {locked && (
-          <span className="ml-auto flex items-center gap-1 text-amber-300">
+          <span className="ml-auto flex items-center gap-1 text-warn">
             <IconAlert className="h-3.5 w-3.5" />
             该 NFO 含嵌套标签，请用「NFO 原文」编辑
           </span>
@@ -589,7 +749,11 @@ function BasicTab({
 
       <div className="sticky bottom-0 -mx-4 flex items-center justify-between gap-2 border-t border-white/[0.06] bg-ink-850/95 px-4 py-3 backdrop-blur">
         <span className="text-[11.5px] text-slate-500">
-          {dirty ? "有未保存的修改" : `已同步 · ${formatDateTime(detail.item.finished_at)} 下载`}
+          {dirty
+            ? "有未保存的修改"
+            : detail.download
+              ? `已同步 · ${formatDateTime(detail.download.finished_at)} 下载`
+              : "手动来源 · 已与磁盘同步"}
         </span>
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={onOpenRaw} title="用原始 XML 编辑">
@@ -709,6 +873,7 @@ function TagEditor({
 
 function ImagesTab({
   detail,
+  scopes,
   imageScope,
   setImageScope,
   imageOf,
@@ -717,6 +882,7 @@ function ImagesTab({
   onOpenSettings,
 }: {
   detail: MetadataDetail;
+  scopes: ImageScope[];
   imageScope: ImageScope;
   setImageScope: (scope: ImageScope) => void;
   imageOf: (scope: ImageScope, name: ImageName) => MetadataDetail["images"][number] | null;
@@ -744,7 +910,7 @@ function ImagesTab({
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1 rounded-xl border border-white/[0.07] bg-white/[0.02] p-1">
-          {(["series", "episode"] as const).map((scope) => (
+          {scopes.map((scope) => (
             <button
               key={scope}
               onClick={() => setImageScope(scope)}
@@ -775,7 +941,7 @@ function ImagesTab({
                       className="h-full w-full cursor-zoom-in object-contain"
                       onClick={() => setZoom({ url: img.url, label: slot.label })}
                     />
-                    <span className="absolute right-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-white/80">
+                    <span className="absolute right-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-[#fff]/80">
                       {img.width && img.height ? `${img.width}×${img.height}` : formatBytes(img.size)}
                     </span>
                   </>
@@ -856,6 +1022,217 @@ function ImagesTab({
   );
 }
 
+/* ------------------------------ 手动添加来源 ------------------------------ */
+
+function AddSourceDialog({
+  open,
+  onClose,
+  onAdded,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdded: () => void | Promise<void>;
+}) {
+  const toast = useToast();
+  const [browse, setBrowse] = useState<BrowseResult | null>(null);
+  const [path, setPath] = useState("");
+  const [sources, setSources] = useState<MetadataSource[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const loadSources = useCallback(async () => {
+    try {
+      const res = await api.metadataSources();
+      setSources(res.items);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    }
+  }, [toast]);
+
+  const browseTo = useCallback(
+    async (target?: string) => {
+      setLoading(true);
+      try {
+        const res = await api.metadataBrowse(target);
+        setBrowse(res);
+        setPath(res.path);
+      } catch (err) {
+        toast.push((err as Error).message, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [toast],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    void browseTo();
+    void loadSources();
+  }, [open, browseTo, loadSources]);
+
+  const add = async (target: string, title?: string) => {
+    setBusy(true);
+    try {
+      await api.addMetadataSource(target, title);
+      toast.push("已添加媒体来源", "success");
+      await loadSources();
+      await onAdded();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id: number) => {
+    setBusy(true);
+    try {
+      await api.removeMetadataSource(id);
+      toast.push("已移除来源", "success");
+      await loadSources();
+      await onAdded();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="手动添加媒体来源"
+      description="除了项目下载的文件，也可以选服务器上的本地视频文件或视频目录，一样能生成 NFO 和封面。"
+      width="max-w-3xl"
+      footer={
+        <Button size="sm" onClick={onClose}>
+          完成
+        </Button>
+      }
+    >
+      <div className="space-y-4">
+        {/* 已登记的来源 */}
+        <div>
+          <p className="label">已添加的来源（{sources.length}）</p>
+          {sources.length === 0 ? (
+            <p className="text-[11.5px] text-slate-500">还没有手动添加的来源。</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {sources.map((source) => (
+                <li
+                  key={source.id}
+                  className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5"
+                >
+                  <IconFolder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-slate-300"
+                    title={source.path}
+                  >
+                    {source.path}
+                  </span>
+                  <Badge className="shrink-0 border-white/10 bg-white/[0.04] text-slate-400">
+                    {source.kind === "dir" ? "目录" : "文件"}
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={busy}
+                    onClick={() => void remove(source.id)}
+                    title="移除"
+                  >
+                    <IconTrash className="h-3 w-3" />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* 目录浏览 */}
+        <div>
+          <p className="label">浏览服务器目录</p>
+          <div className="flex items-center gap-1.5">
+            <input
+              className="field font-mono !py-1.5 !text-[11.5px]"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && path.trim()) void browseTo(path.trim());
+              }}
+              placeholder="输入绝对路径后回车"
+            />
+            <Button size="sm" className="shrink-0" loading={loading} onClick={() => void browseTo(path.trim())}>
+              跳转
+            </Button>
+          </div>
+
+          {browse && (
+            <div className="mt-2 overflow-hidden rounded-xl border border-white/[0.07]">
+              <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-400"
+                  title={browse.path}
+                >
+                  {browse.path}
+                </span>
+                {browse.parent && (
+                  <Button size="sm" onClick={() => void browseTo(browse.parent ?? undefined)} title="上一级">
+                    <IconChevronLeft className="h-3 w-3" />
+                    上一级
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void add(browse.path)}
+                  title="把当前目录作为媒体来源"
+                >
+                  <IconFolder className="h-3 w-3" />
+                  添加此目录
+                </Button>
+              </div>
+
+              <div className="max-h-[260px] overflow-y-auto">
+                {browse.dirs.length === 0 && browse.files.length === 0 && (
+                  <p className="px-3 py-6 text-center text-[11.5px] text-slate-500">这个目录里没有视频</p>
+                )}
+                {browse.dirs.map((dir) => (
+                  <button
+                    key={dir.path}
+                    onClick={() => void browseTo(dir.path)}
+                    className="flex w-full items-center gap-2 border-b border-white/[0.04] px-3 py-1.5 text-left transition hover:bg-white/[0.04]"
+                  >
+                    <IconFolder className="h-3.5 w-3.5 shrink-0 text-brand-300" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-slate-200">{dir.name}</span>
+                    <IconChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-600" />
+                  </button>
+                ))}
+                {browse.files.map((file) => (
+                  <div key={file.path} className="flex items-center gap-2 border-b border-white/[0.04] px-3 py-1.5">
+                    <IconVideo className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-slate-300" title={file.path}>
+                      {file.name}
+                    </span>
+                    <span className="shrink-0 text-[10.5px] tabular-nums text-slate-500">
+                      {formatBytes(file.size)}
+                    </span>
+                    <Button size="sm" disabled={busy} onClick={() => void add(file.path)} title="把这个视频作为来源">
+                      <IconPlus className="h-3 w-3" />
+                      添加
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 /* ------------------------------ 图片来源选择 ------------------------------ */
 
 function ImagePicker({
@@ -873,6 +1250,7 @@ function ImagePicker({
 }) {
   const toast = useToast();
   const slot = IMAGE_SLOTS.find((s) => s.name === name) ?? IMAGE_SLOTS[0];
+  const key = detail.target.key;
   const [tab, setTab] = useState<"frame" | "upload" | "existing">(
     detail.ffmpeg.available && detail.video?.exists ? "frame" : "upload",
   );
@@ -918,7 +1296,7 @@ function ImagePicker({
   const grab = async () => {
     setGrabbing(true);
     try {
-      const res = await api.frameCandidates(detail.item.id, 8);
+      const res = await api.frameCandidates(key, 8);
       setCandidates(res.items);
       if (res.items.length > 0) {
         setSelectedFrame(0);
@@ -949,11 +1327,11 @@ function ImagePicker({
   const cropFrame = async () => {
     setPreviewing(true);
     try {
-      const res = await api.framePreview(detail.item.id, at);
+      const res = await api.framePreview(key, at);
       openCropper(res.url, (crop) => {
         setCropper(null);
         void run(
-          () => api.captureFrame(detail.item.id, { at, scope, name, fit, crop }),
+          () => api.captureFrame(key, { at, scope, name, fit, crop }),
           crop ? "已按框选范围截取封面" : "已从视频截取并写入封面",
         );
       });
@@ -991,7 +1369,7 @@ function ImagePicker({
                 loading={busy}
                 onClick={() =>
                   void run(
-                    () => api.captureFrame(detail.item.id, { at, scope, name, fit }),
+                    () => api.captureFrame(key, { at, scope, name, fit }),
                     "已从视频截取并写入封面",
                   )
                 }
@@ -1057,7 +1435,7 @@ function ImagePicker({
                 <div className="overflow-hidden rounded-xl border border-white/10 bg-black">
                   <video
                     ref={videoRef}
-                    src={`/api/metadata/${detail.item.id}/video`}
+                    src={`/api/metadata/video?key=${encodeURIComponent(key)}`}
                     poster={detail.images.find((img) => img.name === "poster")?.url}
                     controls
                     preload="metadata"
@@ -1104,7 +1482,7 @@ function ImagePicker({
                           title={`${frame.at}s`}
                         >
                           <img src={frame.url} alt={`${frame.at}s`} className="aspect-video w-full object-cover" />
-                          <span className="absolute bottom-0 right-0 rounded-tl bg-black/60 px-1 text-[9.5px] tabular-nums text-white/80">
+                          <span className="absolute bottom-0 right-0 rounded-tl bg-black/60 px-1 text-[9.5px] tabular-nums text-[#fff]/80">
                             {frame.at.toFixed(0)}s
                           </span>
                         </button>
@@ -1134,7 +1512,7 @@ function ImagePicker({
                   setCropper(null);
                   URL.revokeObjectURL(url);
                   void run(
-                    () => api.uploadImage(detail.item.id, scope, name, file, { fit, crop }),
+                    () => api.uploadImage(key, scope, name, file, { fit, crop }),
                     "图片已上传并写入封面",
                   );
                 });
@@ -1171,8 +1549,7 @@ function ImagePicker({
                         openCropper(`/api/messages/cover/${cover.file}`, (crop) => {
                           setCropper(null);
                           void run(
-                            () =>
-                              api.useCoverImage(detail.item.id, { file: cover.file, scope, name, fit, crop }),
+                            () => api.useCoverImage(key, { file: cover.file, scope, name, fit, crop }),
                             "已使用消息原图",
                           );
                         })
@@ -1204,7 +1581,7 @@ function ImagePicker({
                       onClick={() =>
                         void run(
                           () =>
-                            api.copyImage(detail.item.id, {
+                            api.copyImage(key, {
                               fromScope: img.scope,
                               fromName: img.name,
                               toScope: scope,
@@ -1259,6 +1636,7 @@ function NfoTab({
   onSaved: () => void | Promise<void>;
 }) {
   const toast = useToast();
+  const key = detail.target.key;
   const [content, setContent] = useState("");
   const [original, setOriginal] = useState("");
   const [exists, setExists] = useState(false);
@@ -1269,7 +1647,7 @@ function NfoTab({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.readNfo(detail.item.id, kind);
+      const res = await api.readNfo(key, kind);
       setContent(res.content);
       setOriginal(res.content);
       setExists(res.exists);
@@ -1279,7 +1657,7 @@ function NfoTab({
     } finally {
       setLoading(false);
     }
-  }, [detail.item.id, kind, toast]);
+  }, [key, kind, toast]);
 
   useEffect(() => {
     void load();
@@ -1290,7 +1668,7 @@ function NfoTab({
   const save = async () => {
     setSaving(true);
     try {
-      await api.saveNfoRaw(detail.item.id, kind, content);
+      await api.saveNfoRaw(key, kind, content);
       setOriginal(content);
       setExists(true);
       toast.push("NFO 已保存", "success");

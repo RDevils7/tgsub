@@ -258,25 +258,60 @@ export interface QrState {
 export type ImageName = "poster" | "landscape" | "fanart" | "thumb" | "banner";
 export type ImageScope = "series" | "episode";
 
-export interface MetadataListItem {
-  id: number;
-  file_name: string;
-  save_name: string | null;
-  save_dir: string | null;
-  channel_title: string;
-  message_id: number;
-  file_size: number;
-  finished_at: number | null;
-  series: string | null;
+/**
+ * 元数据页的一条记录 = 一个文件夹（剧集级）。
+ * 展开后子级是文件夹里的每个视频文件（单集级）。
+ */
+export interface MetadataFileItem {
+  /** 路径标识（base64url 编码的绝对路径） */
+  key: string;
+  path: string;
+  name: string;
+  size: number;
+  series: string;
   season: number | null;
   episode: number | null;
+  /** 展示用标题：剧名 + SxxExx */
   title: string;
-  videoExists: boolean;
   nfoExists: boolean;
-  showNfoExists: boolean;
+  source: "download" | "manual";
+  downloadId: number | null;
+  channelTitle: string | null;
+}
+
+export interface MetadataFolderItem {
+  key: string;
+  dir: string;
+  name: string;
+  fileCount: number;
+  totalSize: number;
+  source: "download" | "manual" | "mixed";
+  /** tvshow.nfo 是否存在 */
+  nfoExists: boolean;
+  /** 剧集封面是否存在 */
   posterExists: boolean;
   imageCount: number;
   posterUrl: string | null;
+  files: MetadataFileItem[];
+}
+
+/** 手动添加的媒体来源 */
+export interface MetadataSource {
+  id: number;
+  path: string;
+  kind: "dir" | "file";
+  title: string | null;
+  created_at: number;
+  key: string;
+}
+
+/** 服务端目录浏览结果 */
+export interface BrowseResult {
+  path: string;
+  parent: string | null;
+  dirs: Array<{ name: string; path: string }>;
+  files: Array<{ name: string; path: string; size: number }>;
+  home: string;
 }
 
 export interface NfoFields {
@@ -339,17 +374,31 @@ export interface NfoSlotInfo {
 }
 
 export interface MetadataDetail {
-  item: DownloadItem;
-  pathError: string | null;
-  paths: { dir: string; video: string; base: string; dirName: string } | null;
-  video: { exists: boolean; size: number; probe: VideoProbe | null } | null;
-  nfo: { episode: NfoSlotInfo | null; show: NfoSlotInfo | null };
+  target: {
+    kind: "file" | "folder";
+    key: string;
+    path: string;
+    dir: string;
+    base: string | null;
+    name: string;
+    dirName: string;
+  };
+  paths: { dir: string; video: string | null; base: string | null; dirName: string };
+  video: { exists: boolean; size: number; probe: VideoProbe | null };
+  nfo: { episode: NfoSlotInfo | null; show: NfoSlotInfo };
   images: MetadataImage[];
   extras: Array<{ file: string; url: string }>;
   fields: { episode: NfoFields; show: NfoFields };
   meta: Record<string, unknown> | null;
   ffmpeg: FfmpegInfo;
   covers: Array<{ file: string; index: number }>;
+  download: {
+    id: number;
+    channel_title: string;
+    message_id: number;
+    file_size: number;
+    finished_at: number | null;
+  } | null;
 }
 
 export interface FrameCandidate {

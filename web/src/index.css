@@ -2,6 +2,129 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ------------------------------------------------------------------ */
+/* 主题变量                                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * 浅色主题（默认）：html 不带 .dark 时生效。
+ * 深色主题：html.dark。
+ *
+ * 命名与 tailwind.config.js 里的颜色一一对应，值写成 "R G B" 三元组，
+ * 这样 Tailwind 的 /10、/50 这类透明度修饰符依然可用。
+ */
+:root {
+  color-scheme: light;
+
+  /* 主题自适应白：浅色主题下当作"主文字色"用 */
+  --white: 15 23 42;
+
+  --slate-50: 248 250 252;
+  --slate-100: 15 23 42;
+  --slate-200: 30 41 59;
+  --slate-300: 51 65 85;
+  --slate-400: 71 85 105;
+  --slate-500: 100 116 139;
+  --slate-600: 148 163 184;
+  --slate-700: 203 213 225;
+  --slate-800: 226 232 240;
+  --slate-900: 241 245 249;
+  --slate-950: 248 250 252;
+
+  --ink-950: 238 242 247;
+  --ink-900: 255 255 255;
+  --ink-850: 255 255 255;
+  --ink-800: 255 255 255;
+  --ink-700: 241 245 249;
+  --ink-600: 226 232 240;
+
+  --panel: 255 255 255;
+  --panel-hover: 248 250 252;
+
+  --brand-100: 12 74 110;
+  --brand-200: 7 89 133;
+  --brand-300: 3 105 161;
+  --brand-400: 2 132 199;
+  --brand-500: 14 165 233;
+  --brand-600: 56 189 248;
+
+  --violet-300: 109 40 217;
+  --violet-400: 124 58 237;
+  --violet-500: 139 92 246;
+
+  --ok: 4 120 87;
+  --warn: 180 83 9;
+  --err: 190 18 60;
+  --info: 3 105 161;
+  --onbrand: 255 255 255;
+
+  --brand-gradient: linear-gradient(135deg, #0e8fc9 0%, #5b3dd4 100%);
+  --grid-fade:
+    radial-gradient(1200px 600px at 15% -10%, rgba(14, 143, 201, 0.14), transparent 60%),
+    radial-gradient(900px 500px at 95% 0%, rgba(91, 61, 212, 0.12), transparent 55%);
+  --shadow-card: 0 1px 0 0 rgba(15, 23, 42, 0.03) inset, 0 12px 32px -14px rgba(15, 23, 42, 0.18);
+  --shadow-glow: 0 0 0 1px rgba(14, 143, 201, 0.28), 0 10px 40px -10px rgba(14, 143, 201, 0.35);
+  --shimmer-a: rgba(15, 23, 42, 0.03);
+  --shimmer-b: rgba(15, 23, 42, 0.08);
+}
+
+html.dark {
+  color-scheme: dark;
+
+  --white: 255 255 255;
+
+  --slate-50: 248 250 252;
+  --slate-100: 241 245 249;
+  --slate-200: 226 232 240;
+  --slate-300: 203 213 225;
+  --slate-400: 148 163 184;
+  --slate-500: 100 116 139;
+  --slate-600: 71 85 105;
+  --slate-700: 51 65 85;
+  --slate-800: 30 41 59;
+  --slate-900: 15 23 42;
+  --slate-950: 2 6 23;
+
+  --ink-950: 7 10 16;
+  --ink-900: 10 15 23;
+  --ink-850: 13 19 29;
+  --ink-800: 17 25 38;
+  --ink-700: 23 32 47;
+  --ink-600: 30 41 59;
+
+  --panel: 14 21 33;
+  --panel-hover: 17 26 40;
+
+  --brand-100: 207 241 254;
+  --brand-200: 165 227 253;
+  --brand-300: 125 214 251;
+  --brand-400: 76 196 245;
+  --brand-500: 42 171 238;
+  --brand-600: 30 147 207;
+
+  --violet-300: 196 181 253;
+  --violet-400: 167 139 250;
+  --violet-500: 124 92 255;
+
+  --ok: 110 231 183;
+  --warn: 252 211 77;
+  --err: 253 164 175;
+  --info: 125 211 252;
+  --onbrand: 255 255 255;
+
+  --brand-gradient: linear-gradient(135deg, #2aabee 0%, #7c5cff 100%);
+  --grid-fade:
+    radial-gradient(1200px 600px at 15% -10%, rgba(42, 171, 238, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 95% 0%, rgba(124, 92, 255, 0.14), transparent 55%);
+  --shadow-card: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset, 0 12px 32px -12px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 0 1px rgba(42, 171, 238, 0.28), 0 10px 40px -8px rgba(42, 171, 238, 0.35);
+  --shimmer-a: rgba(255, 255, 255, 0.03);
+  --shimmer-b: rgba(255, 255, 255, 0.08);
+}
+
+/* ------------------------------------------------------------------ */
+/* 基础样式                                                            */
+/* ------------------------------------------------------------------ */
+
 @layer base {
   html,
   body,
@@ -11,9 +134,11 @@
 
   body {
     @apply bg-ink-950 text-slate-200 antialiased;
-    background-image: radial-gradient(1100px 560px at 12% -8%, rgba(42, 171, 238, 0.14), transparent 62%),
-      radial-gradient(900px 480px at 92% 2%, rgba(124, 92, 255, 0.12), transparent 58%);
+    background-image: var(--grid-fade);
     background-attachment: fixed;
+    transition:
+      background-color 0.25s ease,
+      color 0.25s ease;
   }
 
   ::selection {
@@ -28,13 +153,13 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.22);
+    background: rgba(148, 163, 184, 0.32);
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: content-box;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 163, 184, 0.38);
+    background: rgba(148, 163, 184, 0.5);
     background-clip: content-box;
   }
 
@@ -47,11 +172,15 @@
 
 @layer components {
   .card {
-    @apply rounded-2xl border border-white/[0.08] bg-[#0e1521]/85 shadow-card backdrop-blur-xl;
+    @apply rounded-2xl border border-white/[0.08] bg-panel/85 shadow-card backdrop-blur-xl;
   }
 
   .card-hover {
-    @apply transition-all duration-300 hover:border-brand-500/25 hover:bg-[#111a28]/90;
+    @apply transition-all duration-300 hover:border-brand-500/25;
+  }
+
+  .card-hover:hover {
+    background-color: var(--panel-hover);
   }
 
   .field {
@@ -70,7 +199,7 @@
   }
 
   .btn-primary {
-    @apply btn bg-brand-gradient text-white shadow-glow hover:brightness-110;
+    @apply btn bg-brand-gradient text-onbrand shadow-glow hover:brightness-110;
   }
 
   .btn-ghost {
@@ -78,7 +207,7 @@
   }
 
   .btn-danger {
-    @apply btn border border-rose-500/25 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20;
+    @apply btn border border-rose-500/25 bg-rose-500/10 text-err hover:bg-rose-500/20;
   }
 
   .chip {
@@ -90,9 +219,9 @@
     @apply animate-shimmer rounded-lg bg-[length:200%_100%];
     background-image: linear-gradient(
       90deg,
-      rgba(255, 255, 255, 0.03) 0%,
-      rgba(255, 255, 255, 0.08) 50%,
-      rgba(255, 255, 255, 0.03) 100%
+      var(--shimmer-a) 0%,
+      var(--shimmer-b) 50%,
+      var(--shimmer-a) 100%
     );
   }
 }

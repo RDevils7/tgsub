@@ -254,10 +254,17 @@ export function fallbackFolderName(raw: string): string {
 
 const isVideoLike = (item: MediaLike): boolean => item.kind === "video" || item.kind === "gif";
 
-/** 剧集命名（解析到剧名）或兜底命名（一链接一文件夹）共用的视频文件名 */
+/**
+ * 剧集命名（解析到剧名）或兜底命名（一链接一文件夹）共用的视频文件名。
+ *
+ * 已经带出 SxxExx 集号时不再追加序号：剧名S01E05.mp4 就够了，
+ * 多一个「-05」既冗余又和集号重复。
+ * 只有在认不出集号（一条消息里多个视频）时才用序号区分：剧名-01.mp4。
+ */
 function videoFileName(dir: string, tag: string, order: number, count: number, ext: string): string {
-  if (count > 1) return `${dir}${tag}-${pad2(order + 1)}${ext}`;
-  return `${dir}${tag}${ext}`;
+  if (tag) return `${dir}${tag}${ext}`;
+  if (count > 1) return `${dir}-${pad2(order + 1)}${ext}`;
+  return `${dir}${ext}`;
 }
 
 /**

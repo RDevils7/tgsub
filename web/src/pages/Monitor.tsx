@@ -749,7 +749,7 @@ function HoverPreview({
         opacity: pos.ready ? 1 : 0,
         transition: "opacity 120ms ease-out",
       }}
-      className="pointer-events-auto z-[80] overflow-hidden rounded-xl border border-white/[0.12] bg-[#11161f] shadow-[0_24px_60px_-12px_rgba(0,0,0,0.85)]"
+      className="pointer-events-auto z-[80] overflow-hidden rounded-xl border border-white/[0.12] bg-ink-800/95 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.45)]"
     >
       <div className="flex items-center justify-between gap-2 border-b border-white/[0.07] px-3.5 py-2">
         <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-slate-300">{item.channel_title}</span>
@@ -835,7 +835,7 @@ function Detail({
       <span className="w-[76px] shrink-0 text-slate-600">{label}</span>
       <span
         className={`min-w-0 flex-1 break-all ${mono ? "font-mono" : ""} ${
-          highlight ? "text-emerald-300" : "text-slate-300"
+          highlight ? "text-ok" : "text-slate-300"
         }`}
       >
         {value}

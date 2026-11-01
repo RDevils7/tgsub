@@ -341,7 +341,7 @@ export default function Subscriptions() {
 
             <Field label="适用频道" hint="不选择则对所有启用的频道生效">
               {channels.length === 0 ? (
-                <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-[12px] text-amber-200/90">
+                <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-[12px] text-warn/90">
                   <IconAlert className="h-3.5 w-3.5" />
                   还没有添加频道，订阅将不会匹配到任何消息。
                 </div>

@@ -242,6 +242,20 @@ check("同一链接多个视频按序号区分", () => {
   const plan = planFileNames("两个片段合集", [oneVideo[0], { ...oneVideo[0], fileName: "b.mp4" }], { artCount: 0 });
   assert.deepEqual(plan.map((p) => p.name), ["两个片段合集-01.mp4", "两个片段合集-02.mp4"]);
 });
+check("解析出集号时不再追加序号后缀", () => {
+  // 之前会落成「我的妈妈徐秋曼S01E05-05.mp4」，集号重复了
+  const plan = planFileNames("《我的妈妈徐秋曼》S01E05 连载中 全系列完整版", oneVideo, { artCount: 0 });
+  assert.equal(plan[0].name, "我的妈妈徐秋曼S01E05.mp4");
+  assert.equal(plan[0].dir, "我的妈妈徐秋曼");
+  assert.equal(plan[0].episode, 5);
+});
+check("同一条消息里多个视频按集号排序命名，不带序号", () => {
+  const plan = planFileNames("《美人局》第4-5集 连载中", [
+    { ...oneVideo[0], fileName: "a.mp4" },
+    { ...oneVideo[0], fileName: "b.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.name), ["美人局S01E04.mp4", "美人局S01E05.mp4"]);
+});
 check("关掉兜底命名 / 没有视频 / 空正文时不建文件夹", () => {
   assert.equal(planFileNames(looseText, oneVideo, { looseFolder: false })[0].dir, null);
   assert.equal(planFileNames("今天的照片", [{ kind: "photo", fileName: "a.jpg", mimeType: "image/jpeg" }])[0].dir, null);

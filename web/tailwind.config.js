@@ -1,27 +1,72 @@
+/**
+ * 主题说明
+ * ------------------------------------------------------------------
+ * 所有颜色都走 CSS 变量，变量定义在 src/index.css：
+ *   - :root     → 浅色主题
+ *   - .dark     → 深色主题（body 上由 useTheme 切换 html 的 class）
+ *
+ * 约定（两个主题下含义一致）：
+ *   - slate-100 / white  = 最主要的文字
+ *   - slate-400          = 次要文字
+ *   - slate-500/600/700  = 弱化 / 占位 / 禁用文字
+ *   - ink-950            = 页面底色，ink-900 = 输入框 / 侧栏底色
+ *   - ok / warn / err / info = 状态文字色（徽章、提示）
+ *
+ * 深色主题里 slate 由亮到暗，浅色主题里由暗到亮——数字越小越显眼。
+ */
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
-        ink: {
-          950: "#070a10",
-          900: "#0a0f17",
-          850: "#0d131d",
-          800: "#111926",
-          700: "#17202f",
-          600: "#1e293b",
+        /* 主题自适应白：深色主题=纯白，浅色主题=深色文字 */
+        white: "rgb(var(--white) / <alpha-value>)",
+        slate: {
+          50: "rgb(var(--slate-50) / <alpha-value>)",
+          100: "rgb(var(--slate-100) / <alpha-value>)",
+          200: "rgb(var(--slate-200) / <alpha-value>)",
+          300: "rgb(var(--slate-300) / <alpha-value>)",
+          400: "rgb(var(--slate-400) / <alpha-value>)",
+          500: "rgb(var(--slate-500) / <alpha-value>)",
+          600: "rgb(var(--slate-600) / <alpha-value>)",
+          700: "rgb(var(--slate-700) / <alpha-value>)",
+          800: "rgb(var(--slate-800) / <alpha-value>)",
+          900: "rgb(var(--slate-900) / <alpha-value>)",
+          950: "rgb(var(--slate-950) / <alpha-value>)",
         },
+        ink: {
+          950: "rgb(var(--ink-950) / <alpha-value>)",
+          900: "rgb(var(--ink-900) / <alpha-value>)",
+          850: "rgb(var(--ink-850) / <alpha-value>)",
+          800: "rgb(var(--ink-800) / <alpha-value>)",
+          700: "rgb(var(--ink-700) / <alpha-value>)",
+          600: "rgb(var(--ink-600) / <alpha-value>)",
+        },
+        /* 卡片 / 面板底色 */
+        panel: "rgb(var(--panel) / <alpha-value>)",
         brand: {
-          300: "#7dd6fb",
-          400: "#4cc4f5",
-          500: "#2aabee",
-          600: "#1e93cf",
+          100: "rgb(var(--brand-100) / <alpha-value>)",
+          200: "rgb(var(--brand-200) / <alpha-value>)",
+          300: "rgb(var(--brand-300) / <alpha-value>)",
+          400: "rgb(var(--brand-400) / <alpha-value>)",
+          500: "rgb(var(--brand-500) / <alpha-value>)",
+          600: "rgb(var(--brand-600) / <alpha-value>)",
         },
         violet: {
-          400: "#9b8cff",
-          500: "#7c5cff",
+          300: "rgb(var(--violet-300) / <alpha-value>)",
+          400: "rgb(var(--violet-400) / <alpha-value>)",
+          500: "rgb(var(--violet-500) / <alpha-value>)",
         },
+        /* 状态色（文字 / 徽章） */
+        ok: "rgb(var(--ok) / <alpha-value>)",
+        warn: "rgb(var(--warn) / <alpha-value>)",
+        err: "rgb(var(--err) / <alpha-value>)",
+        info: "rgb(var(--info) / <alpha-value>)",
+        /* 品牌渐变上的文字，始终为白色 */
+        onbrand: "rgb(var(--onbrand) / <alpha-value>)",
       },
       fontFamily: {
         sans: [
@@ -36,13 +81,12 @@ export default {
         mono: ["JetBrains Mono", "SFMono-Regular", "Consolas", "monospace"],
       },
       boxShadow: {
-        card: "0 1px 0 0 rgba(255,255,255,0.04) inset, 0 12px 32px -12px rgba(0,0,0,0.6)",
-        glow: "0 0 0 1px rgba(42,171,238,0.28), 0 10px 40px -8px rgba(42,171,238,0.35)",
+        card: "var(--shadow-card)",
+        glow: "var(--shadow-glow)",
       },
       backgroundImage: {
-        "brand-gradient": "linear-gradient(135deg, #2aabee 0%, #7c5cff 100%)",
-        "grid-fade":
-          "radial-gradient(1200px 600px at 15% -10%, rgba(42,171,238,0.16), transparent 60%), radial-gradient(900px 500px at 95% 0%, rgba(124,92,255,0.14), transparent 55%)",
+        "brand-gradient": "var(--brand-gradient)",
+        "grid-fade": "var(--grid-fade)",
       },
       keyframes: {
         "fade-up": {

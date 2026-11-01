@@ -10,8 +10,10 @@ import {
   IconInbox,
   IconLink,
   IconMenu,
+  IconMoon,
   IconPlay,
   IconSettings,
+  IconSun,
   IconTag,
   IconX,
 } from "./components/icons";
@@ -24,6 +26,7 @@ import Monitor from "./pages/Monitor";
 import Metadata from "./pages/Metadata";
 import SettingsPage from "./pages/Settings";
 import { formatCountdown } from "./utils";
+import { useTheme } from "./hooks/useTheme";
 
 type PageKey =
   | "dashboard"
@@ -69,6 +72,7 @@ function Shell() {
   const [scanState, setScanState] = useState<ScanState | null>(null);
   const [scanning, setScanning] = useState(false);
   const toast = useToast();
+  const { theme, toggle } = useTheme();
 
   const navigate = useCallback((next: PageKey) => {
     window.location.hash = `/${next}`;
@@ -129,7 +133,7 @@ function Shell() {
       >
         <div className="flex items-center gap-2.5 px-5 py-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-gradient shadow-glow">
-            <svg viewBox="0 0 24 24" className="h-[18px] w-[18px] text-white" fill="currentColor">
+            <svg viewBox="0 0 24 24" className="h-[18px] w-[18px] text-onbrand" fill="currentColor">
               <path d="M4 11.6 20.3 5l-2.2 13-5.2-3.7-2.6 2.6-.4-4.2z" />
             </svg>
           </div>
@@ -227,6 +231,15 @@ function Shell() {
             </div>
 
             <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={toggle}
+                title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+                aria-label={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              >
+                {theme === "dark" ? <IconSun className="h-3.5 w-3.5" /> : <IconMoon className="h-3.5 w-3.5" />}
+                {theme === "dark" ? "亮色" : "暗色"}
+              </Button>
               <Badge className="hidden border-white/[0.07] bg-white/[0.03] text-slate-400 sm:inline-flex">
                 <StatusDot className={scanState?.scanning ? "bg-brand-400 animate-pulse" : "bg-emerald-400"} />
                 {scanState?.scanning

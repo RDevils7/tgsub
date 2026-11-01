@@ -216,16 +216,16 @@ export function CropDialog({
                   />
                 </div>
                 <div
-                  className="absolute cursor-move border border-white/90"
+                  className="absolute cursor-move border border-[#fff]/90"
                   style={{ left: px.x, top: px.y, width: px.w, height: px.h }}
                   onPointerDown={(event) => startDrag(event, "move")}
                 >
                   {/* 三分线，构图参考 */}
                   <div className="pointer-events-none absolute inset-0 opacity-40">
-                    <div className="absolute left-1/3 top-0 h-full w-px bg-white/70" />
-                    <div className="absolute left-2/3 top-0 h-full w-px bg-white/70" />
-                    <div className="absolute top-1/3 left-0 w-full h-px bg-white/70" />
-                    <div className="absolute top-2/3 left-0 w-full h-px bg-white/70" />
+                    <div className="absolute left-1/3 top-0 h-full w-px bg-[#fff]/70" />
+                    <div className="absolute left-2/3 top-0 h-full w-px bg-[#fff]/70" />
+                    <div className="absolute top-1/3 left-0 w-full h-px bg-[#fff]/70" />
+                    <div className="absolute top-2/3 left-0 w-full h-px bg-[#fff]/70" />
                   </div>
                 </div>
                 {(
@@ -239,7 +239,7 @@ export function CropDialog({
                   <span
                     key={mode}
                     onPointerDown={(event) => startDrag(event, mode)}
-                    className={`absolute h-3 w-3 rounded-full border border-black/40 bg-white shadow ${cls}`}
+                    className={`absolute h-3 w-3 rounded-full border border-black/40 bg-[#fff] shadow ${cls}`}
                     style={{
                       left: (mode.includes("w") ? px.x : px.x + px.w) - 6,
                       top: (mode.includes("n") ? px.y : px.y + px.h) - 6,

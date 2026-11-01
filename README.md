@@ -71,6 +71,8 @@
 
 - **按正文剧集命名**：正文里写了《剧名》和集数的短剧自动归档，例如 `《美人局》第4集 …` → `美人局/美人局S01E04.mp4`；
   一条消息含多集（`第1-7集`）时拆成 `S01E01` ~ `S01E07`。没有《剧名》的文件仍按路径模板保存。
+  文件名里已经带出 `S01E01` 这类集号时不会再追加 `-01` 序号后缀（集号重复没意义），
+  只有认不出集号、一条消息里塞了多个视频时才用 `剧名-01.mp4` 区分。
 - **边下边生成元信息**：视频落盘后在剧集目录写出 Emby 可直接读取的文件，扫描即出海报、简介、集数。
 
 - **认不出标题时一个链接一个文件夹**：正文里没有《剧名》这类标题、但带视频的消息，单独建一个文件夹，
@@ -105,8 +107,14 @@
 
 ### 元数据编辑
 
-- **独立的「元数据」页**：左侧列出所有已下载视频，右侧分三块编辑——基本信息（标题 / 剧名 / 季集 / 首播 / 简介 / 标签）、
-  图片（poster、landscape、fanart、thumb、banner）、NFO 原文；顶部同时显示时长、分辨率、编码、码率、帧率。
+- **按文件夹聚合的目录树**：一个文件夹 = 一条记录，首级显示剧集信息（`tvshow.nfo` + 剧集封面），
+  点左侧箭头展开后，子级逐条列出该目录里的每个视频（单集信息）。文件夹 / 单集两种层级都能编辑、
+  换图、生成 NFO，点顶部「单集 / 剧集(tvshow)」可切换编辑目标。
+- **不只是下载的文件**：元数据页支持「手动添加」服务器上的本地视频文件或视频目录（服务端目录浏览），
+  登记后与项目下载的文件共用同一套编辑逻辑，同样能生成 NFO、抽帧做封面。
+  路径写入 `media_sources` 表，允许操作的范围限定在下载目录与已登记来源内，其它路径一律拒绝。
+- **一键生成**：选中文件夹或视频点「一键生成」，自动按文件名解析剧名 / 季 / 集，为每个视频写单集 NFO、
+  补一份 `tvshow.nfo`，目录里没有封面时用 ffmpeg 随机截帧补齐横版 / 竖版封面。
 - **表单改 NFO 不破坏手写内容**：保存时只替换目标标签，`<uniqueid>`、注释、自定义标签原样保留；
   检测到嵌套标签（如 `<actor>`）时会禁用表单，只能用原文编辑，避免误伤。
 - **ffmpeg 截帧当封面**：播放器拖到任意时间点截图，或一键抽 8 张候选帧挑选；目标尺寸按图片类型自动缩放，
@@ -118,10 +126,19 @@
 - **图片来源四种**：视频截帧、上传本地图片、消息原图（下载时用的那 3 张）、复制目录里已有的图；
   剧集级与单集级（`剧名S01E04-poster.jpg`）都能设置，改完在 Emby 里「刷新元数据 → 替换现有图片」即可生效。
 
+### 亮色 / 暗色主题
+
+- 顶部工具栏有「亮色 / 暗色」切换按钮，选择记在浏览器 `localStorage`，刷新后保持。
+- 首次打开跟随系统（`prefers-color-scheme`），并在 React 挂载前用内联脚本定好主题，避免刷新时闪一下默认深色。
+- 全部配色走 CSS 变量（`web/src/index.css` 的 `:root` / `html.dark` 两套），Tailwind 侧用 `darkMode: "class"`，
+  颜色写成 `rgb(var(--x) / <alpha-value>)` 形式，`/10`、`/50` 这类透明度修饰符照常可用。
+  语义约定：数字越小越显眼（`slate-100` 最强 → `slate-700` 最弱），`white` 是主题自适应的对比色
+  （深色主题=纯白，浅色主题=深色文字），`ok / warn / err / info` 是状态色。
+
 ### 管理界面
 
 概览统计、频道列表、订阅关键词、监控历史、手动下载、下载记录、设置（含在线登录 Telegram）。
-React 18 + Vite + TailwindCSS，无 UI 框架，深色玻璃质感，桌面与移动端均可用。
+React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双主题，桌面与移动端均可用。
 
 ### Telegram 机器人
 
@@ -452,6 +469,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 前端与机器人共用同一套 REST 接口，默认无鉴权（公网部署请开 Basic Auth 或放在反向代理之后）。
 
+> 元数据接口用 `key` 定位目标，而不是数据库 ID —— `key` 是绝对路径的 base64url 编码。
+> 这样「项目下载的文件」与「手动添加的本地文件 / 目录」可以共用同一套编辑逻辑。
+> `key` 可操作的范围限定在下载目录与已登记的媒体来源内，越界路径一律返回 403。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（容器健康探针用） |
@@ -476,17 +497,21 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | GET | `/api/messages/:id/preview` | 悬停预览：完整正文 + 3 张封面 |
 | GET | `/api/messages/cover/:file` | 封面图（带文件名白名单校验，防目录穿越） |
 | DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
-| GET | `/api/metadata/items` | 可编辑的已下载视频列表（`q`、`limit`、`offset`） |
-| GET | `/api/metadata/:id` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
-| PUT | `/api/metadata/:id/meta` | 按表单保存单集 / 剧集 NFO（只替换目标标签） |
-| GET / PUT | `/api/metadata/:id/nfo/:kind` | 读取 / 覆盖 NFO 原文（`kind=episode\|show`） |
-| POST | `/api/metadata/:id/frame` | 用 ffmpeg 截取 `at` 秒那一帧写成指定图片（可带 `crop` 归一化框选） |
-| POST | `/api/metadata/:id/frame/preview` | 取 `at` 秒的原始画面，供页面框选用 |
-| POST | `/api/metadata/:id/frames` | 均匀抽一组候选帧，供页面挑选 |
-| POST | `/api/metadata/:id/image` | 上传图片（二进制 body，`name` / `scope` / `fit` / `crop` 查询参数） |
-| POST | `/api/metadata/:id/image/copy`、`image/from-cover` | 复制已有图片 / 用消息原图替换 |
-| DELETE | `/api/metadata/:id/image/:scope/:name` | 删除某张图片 |
-| GET | `/api/metadata/:id/video` | 视频流（支持 Range，供页面拖进度条选帧） |
+| GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`） |
+| GET | `/api/metadata/sources`、POST、`DELETE /:id` | 手动添加的媒体来源（本地视频文件 / 视频目录） |
+| GET | `/api/metadata/browse?path=` | 服务端目录浏览（列子目录与视频文件，供「手动添加」对话框用） |
+| GET | `/api/metadata/detail?key=` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
+| POST | `/api/metadata/generate` | 一键生成：按当前目标写单集 NFO + `tvshow.nfo`，缺封面时随机截帧 |
+| PUT | `/api/metadata/meta` | 按表单保存单集 / 剧集 NFO（只替换目标标签） |
+| GET / PUT | `/api/metadata/nfo` | 读取 / 覆盖 NFO 原文（`key` + `kind=episode\|show`） |
+| POST | `/api/metadata/frame` | 用 ffmpeg 截取 `at` 秒那一帧写成指定图片（可带 `crop` 归一化框选） |
+| POST | `/api/metadata/frame/preview` | 取 `at` 秒的原始画面，供页面框选用 |
+| POST | `/api/metadata/frames` | 均匀抽一组候选帧，供页面挑选 |
+| POST | `/api/metadata/image` | 上传图片（二进制 body，`key` / `name` / `scope` / `fit` / `crop` 查询参数） |
+| POST | `/api/metadata/image/copy`、`image/from-cover` | 复制已有图片 / 用消息原图替换 |
+| DELETE | `/api/metadata/image?key=&scope=&name=` | 删除某张图片 |
+| GET | `/api/metadata/video?key=` | 视频流（支持 Range，供页面拖进度条选帧） |
+| GET | `/api/metadata/extras?key=&file=` | 目录里的其它图片（只读，带后缀白名单） |
 | GET | `/api/metadata/tools/status` | ffmpeg / sharp 可用性（`refresh=1` 强制重新探测） |
 | GET / PUT | `/api/settings` | 读取 / 保存界面设置 |
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
@@ -539,6 +564,7 @@ tgsub/
 │   │   │   ├── direct.ts       # 按链接 / 频道+消息 ID 直接下载
 │   │   │   ├── media.ts        # 媒体信息解析、路径生成
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）
+│   │   │   ├── mediatree.ts    # 媒体目录树：下载文件 + 手动来源按文件夹聚合
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
 │   │   │   ├── emby.ts         # nfo 生成、三张封面裁剪合成
 │   │   │   ├── nfo.ts          # NFO 解析与就地改写（只替换目标标签）
@@ -551,8 +577,9 @@ tgsub/
 │   └── src/
 │       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、元数据、设置
 │       ├── components/         # UI 基础组件、图标、Toast
+│       ├── hooks/useTheme.ts   # 亮色 / 暗色主题（localStorage 持久化）
 │       ├── api.ts / types.ts / utils.ts
-│       └── index.css           # Tailwind 主题
+│       └── index.css           # 主题 CSS 变量（:root 浅色 / html.dark 深色）
 ├── scripts/                    # 自检与诊断脚本（见下）
 ├── data/                       # 运行时数据（不提交）：数据库、session、封面缓存、日志
 ├── downloads/                  # 运行时下载目录（不提交）：视频 / 图片 / nfo / 封面

@@ -77,23 +77,23 @@ export function parseKeywords(raw: string): string[] {
 export function statusMeta(status: string): { label: string; className: string; dot: string } {
   switch (status) {
     case "done":
-      return { label: "已完成", className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20", dot: "bg-emerald-400" };
+      return { label: "已完成", className: "bg-emerald-500/10 text-ok border-emerald-500/20", dot: "bg-emerald-400" };
     case "downloading":
       return { label: "下载中", className: "bg-brand-500/10 text-brand-300 border-brand-500/25", dot: "bg-brand-400" };
     case "queued":
-      return { label: "排队中", className: "bg-amber-500/10 text-amber-300 border-amber-500/20", dot: "bg-amber-400" };
+      return { label: "排队中", className: "bg-amber-500/10 text-warn border-amber-500/20", dot: "bg-amber-400" };
     case "paused":
-      return { label: "已暂停", className: "bg-sky-500/10 text-sky-300 border-sky-500/20", dot: "bg-sky-400" };
+      return { label: "已暂停", className: "bg-sky-500/10 text-info border-sky-500/20", dot: "bg-sky-400" };
     case "stopped":
-      return { label: "已停止", className: "bg-zinc-500/10 text-zinc-300 border-zinc-500/20", dot: "bg-zinc-400" };
+      return { label: "已停止", className: "bg-zinc-500/10 text-err border-zinc-500/20", dot: "bg-zinc-400" };
     case "failed":
-      return { label: "失败", className: "bg-rose-500/10 text-rose-300 border-rose-500/20", dot: "bg-rose-400" };
+      return { label: "失败", className: "bg-rose-500/10 text-err border-rose-500/20", dot: "bg-rose-400" };
     case "skipped":
       return { label: "已跳过", className: "bg-slate-500/10 text-slate-400 border-slate-500/20", dot: "bg-slate-400" };
     case "ok":
-      return { label: "成功", className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20", dot: "bg-emerald-400" };
+      return { label: "成功", className: "bg-emerald-500/10 text-ok border-emerald-500/20", dot: "bg-emerald-400" };
     case "error":
-      return { label: "异常", className: "bg-rose-500/10 text-rose-300 border-rose-500/20", dot: "bg-rose-400" };
+      return { label: "异常", className: "bg-rose-500/10 text-err border-rose-500/20", dot: "bg-rose-400" };
     case "running":
       return { label: "扫描中", className: "bg-brand-500/10 text-brand-300 border-brand-500/25", dot: "bg-brand-400" };
     default:
@@ -107,13 +107,13 @@ export function logKindMeta(kind: string): { label: string; className: string; d
     case "hit":
       return {
         label: "已命中",
-        className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/20",
+        className: "bg-emerald-500/10 text-ok border-emerald-500/20",
         dot: "bg-emerald-400",
       };
     case "filtered":
       return {
         label: "已过滤",
-        className: "bg-amber-500/10 text-amber-300 border-amber-500/20",
+        className: "bg-amber-500/10 text-warn border-amber-500/20",
         dot: "bg-amber-400",
       };
     case "miss":

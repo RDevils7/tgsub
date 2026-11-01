@@ -73,6 +73,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_unique
 CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status, id);
 CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at DESC);
 
+/* 手动添加的媒体来源：用户在元数据页手动选中的视频文件 / 视频目录。
+   这些路径不在下载目录内，但用户明确要求为其生成元数据，故单独登记。 */
+CREATE TABLE IF NOT EXISTS media_sources (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  path       TEXT NOT NULL UNIQUE,
+  kind       TEXT NOT NULL,
+  title      TEXT,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scan_runs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   channel_id    INTEGER NOT NULL,

@@ -173,7 +173,7 @@ export default function Manual() {
                     <Badge
                       className={
                         entry.result.queued > 0
-                          ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                          ? "border-emerald-500/20 bg-emerald-500/10 text-ok"
                           : "border-white/10 bg-white/5 text-slate-400"
                       }
                     >
@@ -186,7 +186,7 @@ export default function Manual() {
                     </Badge>
                   )}
                   {entry.status === "error" && (
-                    <Badge className="border-rose-500/20 bg-rose-500/10 text-rose-300">
+                    <Badge className="border-rose-500/20 bg-rose-500/10 text-err">
                       <StatusDot className="bg-rose-400" /> 失败
                     </Badge>
                   )}
@@ -202,7 +202,7 @@ export default function Manual() {
                     {entry.result.queued > 0 && (
                       <>
                         <span className="text-slate-700">·</span>
-                        <span className="text-emerald-300">入队 {entry.result.queued}</span>
+                        <span className="text-ok">入队 {entry.result.queued}</span>
                       </>
                     )}
                     {entry.result.existing > 0 && (
@@ -214,7 +214,7 @@ export default function Manual() {
                     {entry.result.skipped > 0 && (
                       <>
                         <span className="text-slate-700">·</span>
-                        <span className="text-amber-300/80">跳过 {entry.result.skipped}</span>
+                        <span className="text-warn/80">跳过 {entry.result.skipped}</span>
                       </>
                     )}
                     {entry.result.saveDir && (
@@ -238,7 +238,7 @@ export default function Manual() {
                     ℹ️ 该频道已加入频道列表并保持停用，需要定时扫描可在「频道」页面启用
                   </p>
                 )}
-                {entry.error && <p className="mt-1.5 text-[11px] leading-relaxed text-rose-300/80">{entry.error}</p>}
+                {entry.error && <p className="mt-1.5 text-[11px] leading-relaxed text-err/80">{entry.error}</p>}
               </div>
             ))}
           </div>

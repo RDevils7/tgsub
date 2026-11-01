@@ -324,12 +324,12 @@ export default function Settings() {
     : bot?.running
       ? {
           dot: "bg-emerald-400",
-          tone: "border-emerald-500/25 bg-emerald-500/10 text-emerald-300",
+          tone: "border-emerald-500/25 bg-emerald-500/10 text-ok",
           label: `在线 · @${bot.username ?? bot.userId ?? "bot"}`,
         }
       : bot?.error
-        ? { dot: "bg-rose-400", tone: "border-rose-500/25 bg-rose-500/10 text-rose-300", label: "连接失败" }
-        : { dot: "bg-amber-400", tone: "border-amber-500/25 bg-amber-500/10 text-amber-300", label: "连接中…" };
+        ? { dot: "bg-rose-400", tone: "border-rose-500/25 bg-rose-500/10 text-err", label: "连接失败" }
+        : { dot: "bg-amber-400", tone: "border-amber-500/25 bg-amber-500/10 text-warn", label: "连接中…" };
 
   return (
     <div className="space-y-5">
@@ -346,12 +346,12 @@ export default function Settings() {
             </div>
           </div>
           {isLoggedIn ? (
-            <Badge className="border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+            <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">
               <StatusDot className="bg-emerald-400" />
               已登录
             </Badge>
           ) : (
-            <Badge className="border-amber-500/20 bg-amber-500/10 text-amber-300">
+            <Badge className="border-amber-500/20 bg-amber-500/10 text-warn">
               <StatusDot className="bg-amber-400" />
               未登录
             </Badge>
@@ -363,7 +363,7 @@ export default function Settings() {
             <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
               <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-gradient text-[13px] font-semibold text-white">
+                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-gradient text-[13px] font-semibold text-onbrand">
                   {(auth?.me?.firstName || auth?.me?.username || "T").slice(0, 1).toUpperCase()}
                 </div>
                 <div>
@@ -394,7 +394,7 @@ export default function Settings() {
             <div className="space-y-3">
               {auth?.sessionState === "dead" && (
                 <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3.5 py-3">
-                  <p className="text-[12.5px] font-medium text-amber-200">本地登录凭据已被 Telegram 判定失效</p>
+                  <p className="text-[12.5px] font-medium text-warn">本地登录凭据已被 Telegram 判定失效</p>
                   <p className="mt-1 text-[11.5px] leading-relaxed text-slate-400">
                     常见原因是重启时旧进程还没退出、新旧连接共用了同一个 authKey。先点「重试连接」，多数情况能直接恢复，不必重新扫码。
                     {auth.error && <span className="ml-1 text-slate-500">（{auth.error}）</span>}
@@ -434,7 +434,7 @@ export default function Settings() {
                     </div>
                   ) : (
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                      <div className="flex h-[168px] w-[168px] shrink-0 items-center justify-center rounded-xl bg-white p-2">
+                      <div className="flex h-[168px] w-[168px] shrink-0 items-center justify-center rounded-xl bg-[#fff] p-2">
                         {qr.qrDataUrl ? (
                           <img src={qr.qrDataUrl} alt="Telegram 登录二维码" className="h-full w-full" />
                         ) : (
@@ -470,7 +470,7 @@ export default function Settings() {
               )}
 
               {qr?.status === "error" && qr.error && (
-                <p className="text-[11.5px] leading-relaxed text-rose-300/80">{qr.error}</p>
+                <p className="text-[11.5px] leading-relaxed text-err/80">{qr.error}</p>
               )}
 
               <div className="flex items-center gap-2">
@@ -574,11 +574,11 @@ export default function Settings() {
               )}
 
               {!auth?.configured && (
-                <p className="text-[11.5px] leading-relaxed text-amber-300/80">
+                <p className="text-[11.5px] leading-relaxed text-warn/80">
                   当前为「自定义 API」模式但尚未填写 api_id / api_hash，请在下方补全，或切换回内置凭证。
                 </p>
               )}
-              {auth?.error && <p className="text-[11.5px] leading-relaxed text-rose-300/80">{auth.error}</p>}
+              {auth?.error && <p className="text-[11.5px] leading-relaxed text-err/80">{auth.error}</p>}
             </div>
           )}
         </div>
@@ -625,7 +625,7 @@ export default function Settings() {
 
         {draft.credential_mode === "builtin" ? (
           <div className="mt-3 space-y-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] px-3.5 py-3">
-            <p className="text-[12.5px] font-medium text-emerald-200/90">无需申请 api_id / api_hash</p>
+            <p className="text-[12.5px] font-medium text-ok/90">无需申请 api_id / api_hash</p>
             <p className="text-[11.5px] leading-relaxed text-slate-400">
               使用公开的 Telegram Desktop 官方客户端应用标识（与 tdl 等工具一致），登录时手机扫码即可。
               设备指纹会自动对齐到 Desktop 平台，避免「凭证平台与设备不匹配」带来的额外风控。
@@ -645,7 +645,7 @@ export default function Settings() {
                 当前生效：{data.credential.label} · api_id {data.credential.apiId}
               </p>
             )}
-            <p className="text-[11px] leading-relaxed text-amber-300/70">
+            <p className="text-[11px] leading-relaxed text-warn/70">
               提示：公开凭证被大量用户共用，其账号信任度低于你自行申请的应用。若后续能申请到 api_id，
               切换为「自定义 API」会更稳妥。
             </p>
@@ -702,7 +702,7 @@ export default function Settings() {
       {/* 扫描策略 */}
       <section className="card p-5">
         <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-ok">
             <IconSpark className="h-4 w-4" />
           </span>
           <div>
@@ -769,7 +769,7 @@ export default function Settings() {
       {/* 下载 */}
       <section className="card p-5">
         <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-amber-300">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-warn">
             <IconDownload className="h-4 w-4" />
           </span>
           <div>
@@ -963,7 +963,7 @@ export default function Settings() {
       <section className="card p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-ok">
               <IconBot className="h-4 w-4" />
             </span>
             <div>
@@ -1021,7 +1021,7 @@ export default function Settings() {
         </div>
 
         {bot?.error && draft.bot_enabled && (
-          <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.07] px-3.5 py-2.5 text-[11.5px] leading-relaxed text-rose-300">
+          <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.07] px-3.5 py-2.5 text-[11.5px] leading-relaxed text-err">
             {bot.error}
           </p>
         )}

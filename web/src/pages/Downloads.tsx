@@ -90,7 +90,7 @@ function DownloadStats({ item }: { item: DownloadItem }) {
           总大小 <span className="text-slate-300">{formatBytes(total)}</span>
         </span>
         <Dot />
-        <span className="text-amber-300/80">等待下载（串行队列）</span>
+        <span className="text-warn/80">等待下载（串行队列）</span>
       </p>
     );
   }
@@ -107,7 +107,7 @@ function DownloadStats({ item }: { item: DownloadItem }) {
             <span className="text-slate-400">{formatBytes(total)}</span>
           </span>
           <Dot />
-          <span className={item.status === "paused" ? "text-sky-300/80" : "text-zinc-400"}>
+          <span className={item.status === "paused" ? "text-info/80" : "text-err"}>
             {item.status === "paused" ? "已暂停" : "已停止"}
             <span className="text-slate-600">（继续后从头下载）</span>
           </span>
@@ -463,7 +463,7 @@ export default function Downloads() {
 
                     <DownloadStats item={item} />
                     {item.error && (
-                      <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-rose-300/80">{item.error}</p>
+                      <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-err/80">{item.error}</p>
                     )}
                   </div>
 

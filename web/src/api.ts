@@ -9,7 +9,9 @@ import type {
   MessagePreview,
   MessageLog,
   MetadataDetail,
-  MetadataListItem,
+  MetadataFolderItem,
+  MetadataSource,
+  BrowseResult,
   FrameCandidate,
   CropRect,
   NfoFields,
@@ -178,38 +180,60 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 
   /* ------------------------------ 元数据 ------------------------------ */
+  /** 文件夹列表：一个文件夹一条记录，展开后是里面的每个视频 */
   metadataItems: (params: { q?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
-    return request<{ items: MetadataListItem[]; total: number; limit: number; offset: number }>(
+    return request<{ items: MetadataFolderItem[]; total: number; limit: number; offset: number }>(
       `/metadata/items?${qs}`,
     );
   },
-  metadataDetail: (id: number) => request<MetadataDetail>(`/metadata/${id}`),
+  /** 手动添加的媒体来源 */
+  metadataSources: () => request<{ items: MetadataSource[] }>("/metadata/sources"),
+  addMetadataSource: (path: string, title?: string) =>
+    request<{ ok: boolean; source: { id: number; path: string; kind: "dir" | "file"; title: string | null } }>(
+      "/metadata/sources",
+      { method: "POST", body: JSON.stringify({ path, title }) },
+    ),
+  removeMetadataSource: (id: number) =>
+    request<{ ok: boolean }>(`/metadata/sources/${id}`, { method: "DELETE" }),
+  /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录 */
+  metadataBrowse: (path?: string) =>
+    request<BrowseResult>(`/metadata/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+  /** 一键生成元数据：单集 NFO + tvshow.nfo + 缺封面时随机截帧 */
+  generateMetadata: (key: string) =>
+    request<{ ok: boolean; nfoCount: number; coverCount: number; files: number }>("/metadata/generate", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+  metadataDetail: (key: string) => request<MetadataDetail>(`/metadata/detail?key=${encodeURIComponent(key)}`),
   metadataTools: (refresh = false) =>
     request<{ ffmpeg: FfmpegInfo; sharp: boolean; settings: { ffmpeg_path: string } }>(
       `/metadata/tools/status${refresh ? "?refresh=1" : ""}`,
     ),
-  saveMetaFields: (id: number, kind: "episode" | "show", fields: NfoFields) =>
-    request<{ ok: boolean; nfo: string; fields: NfoFields }>(`/metadata/${id}/meta`, {
+  saveMetaFields: (key: string, kind: "episode" | "show", fields: NfoFields) =>
+    request<{ ok: boolean; nfo: string; fields: NfoFields }>("/metadata/meta", {
       method: "PUT",
-      body: JSON.stringify({ kind, fields }),
+      body: JSON.stringify({ key, kind, fields }),
     }),
-  readNfo: (id: number, kind: "episode" | "show") =>
-    request<{ exists: boolean; file: string; content: string }>(`/metadata/${id}/nfo/${kind}`),
-  saveNfoRaw: (id: number, kind: "episode" | "show", content: string) =>
-    request<{ ok: boolean }>(`/metadata/${id}/nfo`, {
+  readNfo: (key: string, kind: "episode" | "show") =>
+    request<{ exists: boolean; file: string; content: string }>(
+      `/metadata/nfo?key=${encodeURIComponent(key)}&kind=${kind}`,
+    ),
+  saveNfoRaw: (key: string, kind: "episode" | "show", content: string) =>
+    request<{ ok: boolean }>("/metadata/nfo", {
       method: "PUT",
-      body: JSON.stringify({ kind, content }),
+      body: JSON.stringify({ key, kind, content }),
     }),
-  deleteImage: (id: number, scope: ImageScope, name: ImageName) =>
-    request<{ ok: boolean; removed: boolean }>(`/metadata/${id}/image/${scope}/${name}`, {
-      method: "DELETE",
-    }),
+  deleteImage: (key: string, scope: ImageScope, name: ImageName) =>
+    request<{ ok: boolean; removed: boolean }>(
+      `/metadata/image?key=${encodeURIComponent(key)}&scope=${scope}&name=${name}`,
+      { method: "DELETE" },
+    ),
   copyImage: (
-    id: number,
+    key: string,
     input: {
       fromScope: ImageScope;
       fromName: ImageName;
@@ -219,51 +243,56 @@ export const api = {
       crop?: CropRect | null;
     },
   ) =>
-    request<{ ok: boolean; url: string }>(`/metadata/${id}/image/copy`, {
+    request<{ ok: boolean; url: string }>("/metadata/image/copy", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ key, ...input }),
     }),
   useCoverImage: (
-    id: number,
+    key: string,
     input: { file: string; scope: ImageScope; name: ImageName; fit?: string; crop?: CropRect | null },
   ) =>
-    request<{ ok: boolean; url: string }>(`/metadata/${id}/image/from-cover`, {
+    request<{ ok: boolean; url: string }>("/metadata/image/from-cover", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ key, ...input }),
     }),
   captureFrame: (
-    id: number,
+    key: string,
     input: { at: number; scope: ImageScope; name: ImageName; fit?: string; crop?: CropRect | null },
   ) =>
-    request<{ ok: boolean; at: number; url: string }>(`/metadata/${id}/frame`, {
+    request<{ ok: boolean; at: number; url: string }>("/metadata/frame", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ key, ...input }),
     }),
   /** 取某一时间点的原始画面，供「框选画面」预览 */
-  framePreview: (id: number, at: number) =>
+  framePreview: (key: string, at: number) =>
     request<{ ok: boolean; at: number; width: number | null; height: number | null; url: string }>(
-      `/metadata/${id}/frame/preview`,
-      { method: "POST", body: JSON.stringify({ at }) },
+      "/metadata/frame/preview",
+      { method: "POST", body: JSON.stringify({ key, at }) },
     ),
-  frameCandidates: (id: number, count = 8) =>
-    request<{ items: FrameCandidate[]; duration: number }>(`/metadata/${id}/frames`, {
+  frameCandidates: (key: string, count = 8) =>
+    request<{ items: FrameCandidate[]; duration: number }>("/metadata/frames", {
       method: "POST",
-      body: JSON.stringify({ count }),
+      body: JSON.stringify({ key, count }),
     }),
   /** 上传图片：直接以二进制 body 提交，服务端按规格缩放写入（默认留黑边，不裁图） */
   uploadImage: async (
-    id: number,
+    key: string,
     scope: ImageScope,
     name: ImageName,
     file: File,
     opts: { fit?: string; crop?: CropRect | null } = {},
   ) => {
-    const params = new URLSearchParams({ scope, name, fit: opts.fit ?? "contain" });
+    const params = new URLSearchParams({
+      key,
+      scope,
+      name,
+      fit: opts.fit ?? "contain",
+    });
     if (opts.crop) {
       const { x, y, width, height } = opts.crop;
       params.set("crop", [x, y, width, height].map((n) => n.toFixed(6)).join(","));
     }
-    const res = await fetch(`/api/metadata/${id}/image?${params.toString()}`, {
+    const res = await fetch(`/api/metadata/image?${params.toString()}`, {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: file,

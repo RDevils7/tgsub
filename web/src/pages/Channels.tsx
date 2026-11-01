@@ -8,7 +8,7 @@ import { formatRelative } from "../utils";
 function ChannelAvatar({ title }: { title: string }) {
   const initial = (title || "?").replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1).toUpperCase() || "?";
   return (
-    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-gradient text-[14px] font-semibold text-white shadow-glow">
+    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-gradient text-[14px] font-semibold text-onbrand shadow-glow">
       {initial}
     </div>
   );
@@ -157,7 +157,7 @@ export default function Channels() {
                     <h3 className="truncate text-[14px] font-medium text-white">{channel.title}</h3>
                     {channel.username && <span className="text-[12px] text-slate-500">@{channel.username}</span>}
                     {channel.enabled ? (
-                      <Badge className="border-emerald-500/20 bg-emerald-500/10 text-emerald-300">
+                      <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">
                         <StatusDot className="bg-emerald-400" /> 监控中
                       </Badge>
                     ) : (
@@ -177,8 +177,8 @@ export default function Channels() {
                   </div>
                   {channel.last_error && (
                     <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-rose-500/15 bg-rose-500/[0.06] px-2.5 py-1.5">
-                      <IconAlert className="mt-0.5 h-3 w-3 shrink-0 text-rose-300" />
-                      <p className="text-[11.5px] leading-relaxed text-rose-200/85">{channel.last_error}</p>
+                      <IconAlert className="mt-0.5 h-3 w-3 shrink-0 text-err" />
+                      <p className="text-[11.5px] leading-relaxed text-err/85">{channel.last_error}</p>
                     </div>
                   )}
                 </div>
