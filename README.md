@@ -159,20 +159,116 @@ Error: EACCES: permission denied, open '/data/.session-secret'
 #### 拉取镜像卡在某个百分比不动？
 
 `docker compose pull` 卡在 `78.55MB / 78.57MB` 这类「差一点点就完成」的位置，
-是**镜像站回源失败或限速**导致的，不是镜像有问题 —— 那一层传到 99% 时连接被切断，
-Docker 会从头重传，于是永远出不来。
+或者进度条十几分钟不动，是**镜像站回源失败或限速**导致的，不是镜像有问题 ——
+那一层传到 99% 时连接被切断，Docker 会从头重传，于是永远出不来。
 
-按下面顺序处理：
+> 根本原因：国内网络到 `registry-1.docker.io` / `production.cloudflare.docker.com`
+> 的 DNS 解析经常被污染，指向无法完成 TLS 握手的 IP，导致大层拉取直接挂死。
+> 这台镜像 122.63MB / 14 层，其中 L2 (47.57MB) 与 L7 (42.51MB) 两层占了 90MB，
+> 卡住几乎都发生在这两层上。
+
+按下面顺序处理，**推荐先用方案 A**：
+
+##### 方案 A：给 Docker 配镜像加速器（改一次，永久生效）
+
+Docker Hub 的镜像会被加速器代理，拉取速度提升明显。
+
+| NAS 品牌 | 操作路径 |
+| --- | --- |
+| 群晖 | Container Manager → 注册表 → 右上「设置」→ 新增 → 填 `https://docker.1ms.run` → 勾选启用 |
+| 威联通 | Container Station → 设置 → Docker Hub → 镜像仓库 → 添加 `https://docker.1ms.run` |
+| 绿联 | Docker → 设置 → 镜像源 → 添加 `https://docker.1ms.run` |
+| 飞牛 | Docker 管理器 → 镜像源 → 添加 `https://docker.1ms.run` |
+| 极空间 | Docker → 高级模式 → 设置 → 镜像加速 → 填 `https://docker.1ms.run` |
+
+**群晖 / Linux 通用（SSH）**：
+
+```bash
+# 群晖
+sudo vi /var/packages/ContainerManager/etc/dockerd.json
+# 其他 Linux NAS
+sudo vi /etc/docker/daemon.json
+```
+
+写入（注意逗号，文件里已有其他字段时要合并）：
+
+```json
+{
+  "registry-mirrors": ["https://docker.1ms.run", "https://docker.1panel.live"]
+}
+```
+
+然后重启 Docker：
+
+```bash
+sudo synoservicectl --restart pkgctl-ContainerManager   # 群晖
+sudo systemctl restart docker                           # 其他
+```
+
+验证是否生效：
+
+```bash
+docker info | grep -A2 "Registry Mirrors"
+```
+
+##### 方案 B：compose 里直接加加速器前缀
+
+不改 NAS 全局设置，只改这一个项目。在 `docker-compose.yml` 的 `image:` 前面加前缀：
+
+```yaml
+image: docker.1ms.run/rdevils7/tgsub:latest
+```
+
+> 注意：这样拉下来的镜像在 NAS 上会带 `docker.1ms.run/` 前缀，
+> `docker images` 里看到的是 `docker.1ms.run/rdevils7/tgsub:latest`。
+> 功能完全一样，只是本地镜像名不同。
+
+##### 方案 C：换仓库
+
+把 compose 的 `image:` 改成 `ghcr.io/rdevils7/tgsub:latest` 再试。
+
+##### 方案 D：完全离线导入（网络实在不行时）
+
+在能连上 Docker Hub 的电脑上把镜像导出成 tar，再传到 NAS 导入：
+
+```bash
+# 有 Docker 的电脑
+docker pull rdevils7/tgsub:latest
+docker save rdevils7/tgsub:latest -o tgsub-amd64.tar
+# 传到 NAS 后
+docker load -i tgsub-amd64.tar
+```
+
+> 仓库根目录已备好现成的离线归档（标准 `docker save` 格式，14 层全部通过 sha256 校验）：
+>
+> | 文件 | 架构 | 大小 | 适用机型 |
+> | --- | --- | --- | --- |
+> | `tgsub-amd64-docker-archive.tar.gz` | amd64 | 120.49MB | 群晖 / 威联通 Intel、AMD 机型 |
+> | `tgsub-arm64-docker-archive.tar.gz` | arm64 | 112.99MB | ARM 机型（部分绿联、极空间、飞牛） |
+>
+> 无需自备 Docker，NAS 上直接导入：
+>
+> ```bash
+> # 传到 NAS 后（二选一）
+> gunzip -c tgsub-amd64-docker-archive.tar.gz | docker load
+> # 或先压成 .tar 再导入（部分旧版 Docker 不认 .tar.gz）
+> gunzip tgsub-amd64-docker-archive.tar.gz && docker load -i tgsub-amd64-docker-archive.tar
+> ```
+>
+> 导入后本地镜像名是 `rdevils7/tgsub:latest`，compose 不用改。
+> 不知道 NAS 是哪种架构？在 NAS 上执行 `uname -m`，
+> 输出 `x86_64` 用 amd64，输出 `aarch64` 用 arm64。
+
+##### 其他补充手段
 
 | 做法 | 说明 |
 | --- | --- |
-| 换 Docker Hub 加速器 | NAS「设置 → 常规 → 镜像加速」里填 `https://docker.1ms.run`（或 `docker.xuanyuan.me` / `dockerpull.org`），保存后重新拉取 |
-| 换镜像仓库 | 把 compose 的 `image:` 改成 `ghcr.io/rdevils7/tgsub:latest` 再试 |
-| 多拉几次 | 限速是随机的，重试往往能挤进去 |
 | 手动分步拉取 | `docker pull rdevils7/tgsub:latest` 观察卡在哪一层，再 `docker compose up -d` |
+| 多拉几次 | 限速是随机的，重试往往能挤进去 |
+| 调高超时 | `/etc/docker/daemon.json` 里加 `"max-concurrent-downloads": 3`，避免多路并发互相挤带宽 |
 
-> 镜像体积已从 151MB 优化到约 113MB（剥离了 ffmpeg 之外的 ffprobe 静态二进制，
-> 单层从 71MB 降到约 33MB），卡住的概率和等待时间都明显下降。
+> 镜像体积已从 151MB 优化到约 122MB（剥离了 ffprobe 静态二进制，
+> 单层从 71MB 降到约 42MB），卡住的概率和等待时间都明显下降。
 
 ### 5. 启动
 

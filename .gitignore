@@ -24,3 +24,8 @@ Thumbs.db
 
 # 开发过程的界面截图只留在本地，不进仓库
 docs/
+
+# 离线镜像归档（120MB+，按需本地生成，见 README「方案 D」）
+tgsub-*-docker-archive.tar.gz
+tgsub-*-docker-archive.tar
+amd64.json

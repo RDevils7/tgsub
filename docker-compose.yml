@@ -32,10 +32,21 @@
 #       PUID: "1026"
 #       PGID: "100"
 #
-# 国内拉取慢时，用 Docker Hub 镜像加速器（在 NAS 的「设置 → 常规 → 镜像加速」里填）：
-#   https://docker.1ms.run
-#   https://docker.xuanyuan.me
-#   https://dockerpull.org
+# 国内拉取慢/卡住时，用 Docker Hub 镜像加速器（在 NAS 的「设置 → 常规 → 镜像加速」里填）：
+#   https://docker.1ms.run          ← 实测可用，速度最好
+#   https://docker.1panel.live      ← 实测可用，备用
+#   https://docker.m.daocloud.io    ← 实测可用，备用
+#
+# 群晖也可 SSH 编辑 /var/packages/ContainerManager/etc/dockerd.json，写入：
+#   { "registry-mirrors": ["https://docker.1ms.run", "https://docker.1panel.live"] }
+# 然后重启：sudo synoservicectl --restart pkgctl-ContainerManager
+#
+# 只想改本项目、不动 NAS 全局设置，就在下面的 image: 前面加加速器前缀：
+#   image: docker.1ms.run/rdevils7/tgsub:latest
+#
+# 实在拉不动（网络受限）：在有 Docker 的电脑上
+#   docker pull rdevils7/tgsub:latest && docker save rdevils7/tgsub:latest -o tgsub.tar
+# 传到 NAS 后执行 docker load -i tgsub.tar，再 docker compose up -d
 #
 # 从旧版本（下载文件在 ./data/downloads 内）升级：
 #   mv data/downloads/* downloads/ && rmdir data/downloads
