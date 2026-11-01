@@ -11,6 +11,7 @@ import {
   deriveSeriesFromText,
   fallbackFolderName,
   parseCaptionMeta,
+  ordinalFromFileName,
   parseFileNameMarks,
   parseSeriesCaption,
   planFileNames,
@@ -286,6 +287,119 @@ check("同一条消息里多个视频按集号排序命名，不带序号", () =
   ], { artCount: 0 });
   assert.deepEqual(plan.map((p) => p.name), ["美人局S01E04.mp4", "美人局S01E05.mp4"]);
 });
+check("中文数字集数也能认", () => {
+  assert.deepEqual(parseSeriesCaption("《美人局》第一集 连载中")?.episodes, [1]);
+  assert.deepEqual(parseSeriesCaption("《美人局》第十二集 连载中")?.episodes, [12]);
+  assert.deepEqual(parseSeriesCaption("《美人局》第一至三集 连载中")?.episodes, [1, 2, 3]);
+});
+
+check("从原始文件名里取裸序号", () => {
+  assert.equal(ordinalFromFileName("01.mp4"), 1);
+  assert.equal(ordinalFromFileName("02 - 片段.mp4"), 2);
+  assert.equal(ordinalFromFileName("片段_03.mp4"), 3);
+  assert.equal(ordinalFromFileName("美人局 12.mp4"), 12);
+  // 数字后面直接跟着文字时不是序号
+  assert.equal(ordinalFromFileName("2048真实故事改编 - 妈妈我爱你.mp4"), null);
+  assert.equal(ordinalFromFileName("1080p.mp4"), null);
+  assert.equal(ordinalFromFileName("S01E02.mp4"), null);
+  assert.equal(ordinalFromFileName("VID_20240101_1203.mp4"), null);
+  // Telegram 客户端的 video-123.mp4 / 我们自己合成的 photo-456.jpg：数字是 id，不是序号
+  assert.equal(ordinalFromFileName("video-123.mp4"), null);
+  assert.equal(ordinalFromFileName("photo-456.jpg"), null);
+  // 超过集数尺度的数字不算
+  assert.equal(ordinalFromFileName("片段 128.mp4"), null);
+});
+
+check("一个链接多个视频按原始文件名顺序对集号", () => {
+  // 相册的消息顺序是 04/02/03/01，真实顺序要看文件名
+  const plan = planFileNames("《美人局》第1-4集 连载中", [
+    { ...oneVideo[0], fileName: "04.mp4" },
+    { ...oneVideo[0], fileName: "02.mp4" },
+    { ...oneVideo[0], fileName: "03.mp4" },
+    { ...oneVideo[0], fileName: "01.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.name), [
+    "美人局S01E04.mp4",
+    "美人局S01E02.mp4",
+    "美人局S01E03.mp4",
+    "美人局S01E01.mp4",
+  ]);
+  assert.deepEqual(plan.map((p) => p.episode), [4, 2, 3, 1]);
+});
+
+check("正文没写集数时用文件名序号当集号", () => {
+  const plan = planFileNames("《美人局》第四集 连载中", [
+    { ...oneVideo[0], fileName: "3 - 片段.mp4" },
+    { ...oneVideo[0], fileName: "1 - 片段.mp4" },
+    { ...oneVideo[0], fileName: "2 - 片段.mp4" },
+  ], { artCount: 0 });
+  // 正文声明了第4集但视频有 3 个：按文件名序号从 4 顺延，而不是按相册顺序
+  assert.deepEqual(plan.map((p) => p.episode), [6, 4, 5]);
+  assert.deepEqual(plan.map((p) => p.name), [
+    "美人局S01E06.mp4",
+    "美人局S01E04.mp4",
+    "美人局S01E05.mp4",
+  ]);
+});
+
+check("正文没写集数时序号直接当集号", () => {
+  const plan = planFileNames("《美人局》连载中", [
+    { ...oneVideo[0], fileName: "03.mp4" },
+    { ...oneVideo[0], fileName: "01.mp4" },
+    { ...oneVideo[0], fileName: "02.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.name), [
+    "美人局S01E03.mp4",
+    "美人局S01E01.mp4",
+    "美人局S01E02.mp4",
+  ]);
+});
+
+check("文件名里的中文数字集号", () => {
+  const plan = planFileNames("《美人局》连载中", [
+    { ...oneVideo[0], fileName: "美人局 第二集.mp4" },
+    { ...oneVideo[0], fileName: "美人局 第一集.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.episode), [2, 1]);
+  assert.deepEqual(plan.map((p) => p.name), ["美人局S01E02.mp4", "美人局S01E01.mp4"]);
+});
+
+check("序号跨度太大时不采信", () => {
+  // 三个文件名里的数字差了几百，不像「一集一个文件」的序号，按消息顺序来
+  const plan = planFileNames("《美人局》第1-3集 连载中", [
+    { ...oneVideo[0], fileName: "美人局 31.mp4" },
+    { ...oneVideo[0], fileName: "美人局 3.mp4" },
+    { ...oneVideo[0], fileName: "美人局 88.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.episode), [1, 2, 3]);
+});
+
+check("文件名序号重复或缺失时退回消息顺序", () => {
+  const dup = planFileNames("《美人局》第1-3集 连载中", [
+    { ...oneVideo[0], fileName: "01.mp4" },
+    { ...oneVideo[0], fileName: "01.mp4" },
+    { ...oneVideo[0], fileName: "02.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(dup.map((p) => p.episode), [1, 2, 3]);
+  // 有一个文件没序号，整体不采信
+  const partial = planFileNames("《美人局》第1-3集 连载中", [
+    { ...oneVideo[0], fileName: "03.mp4" },
+    { ...oneVideo[0], fileName: "video.mp4" },
+    { ...oneVideo[0], fileName: "01.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(partial.map((p) => p.episode), [1, 2, 3]);
+});
+
+check("认不出剧名时序号后缀也按原文件名排", () => {
+  const plan = planFileNames("老板今天又发飙了，速看 #日常 完整版 https://t.me/abc/123", [
+    { ...oneVideo[0], fileName: "2.mp4" },
+    { ...oneVideo[0], fileName: "1.mp4" },
+  ], { artCount: 0 });
+  assert.deepEqual(plan.map((p) => p.name.endsWith("-01.mp4")), [false, true]);
+  assert.equal(plan[0].name, "老板今天又发飙了，速看 完整版-02.mp4");
+  assert.equal(plan[1].name, "老板今天又发飙了，速看 完整版-01.mp4");
+});
+
 check("关掉兜底命名 / 没有视频 / 空正文时不建文件夹", () => {
   assert.equal(planFileNames(looseText, oneVideo, { looseFolder: false })[0].dir, null);
   assert.equal(planFileNames("今天的照片", [{ kind: "photo", fileName: "a.jpg", mimeType: "image/jpeg" }])[0].dir, null);

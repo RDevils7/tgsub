@@ -54,10 +54,12 @@ interface MarkMatch {
 const MARK_SE = /\bS(\d{1,2})\s*[._-]?\s*E(?:P)?\s*(\d{1,4})\b/i;
 /** S01E01-E10（一个文件里含多集） */
 const MARK_SE_RANGE = /\bS(\d{1,2})\s*[._-]?\s*E(?:P)?\s*(\d{1,4})\s*[-~—–]\s*E?(?:P)?\s*(\d{1,4})\b/i;
-/** 第1-10集 */
-const MARK_CN_RANGE = /第\s*([0-9]{1,4})\s*[-~—–－至到]\s*([0-9]{1,4})\s*[集话話期]/;
-/** 第1集 / 第1、2集 */
-const MARK_CN_LIST = /第\s*([0-9]{1,4}(?:\s*[,，、和及/]\s*[0-9]{1,4})*)\s*[集话話期]/;
+/** 集数可以写阿拉伯数字，也可以写中文数字（第一集 / 第十二集） */
+const CN_EP_NUM = "(?:[0-9]{1,4}|[零一两二三四五六七八九十]{1,4})";
+/** 第1-10集 / 第一至十集 */
+const MARK_CN_RANGE = new RegExp(`第\\s*(${CN_EP_NUM})\\s*[-~—–－至到]\\s*(${CN_EP_NUM})\\s*[集话話期]`);
+/** 第1集 / 第1、2集 / 第一集 */
+const MARK_CN_LIST = new RegExp(`第\\s*(${CN_EP_NUM}(?:\\s*[,，、和及/]\\s*${CN_EP_NUM})*)\\s*[集话話期]`);
 /** EP1-10 */
 const MARK_EP_RANGE = /\bEP?\s*(\d{1,4})\s*[-~—–]\s*(\d{1,4})\b/i;
 /** EP1 / E1 */
@@ -66,8 +68,10 @@ const MARK_EP = /\b(?:EP|E)\s*(\d{1,4})\b/i;
 /** 抹掉文本里的集数标记，只留下剧名候选 */
 const STRIP_SE =
   /\bS\d{1,2}\s*[._-]?\s*E(?:P)?\s*\d{1,4}(?:\s*[-~—–]\s*E?(?:P)?\s*\d{1,4})?/gi;
-const STRIP_CN =
-  /第\s*[0-9]{1,4}\s*(?:[-~—–－至到]\s*[0-9]{1,4})?(?:\s*[,，、和及/]\s*[0-9]{1,4})*\s*[集话話期]/g;
+const STRIP_CN = new RegExp(
+  `第\\s*${CN_EP_NUM}\\s*(?:[-~—–－至到]\\s*${CN_EP_NUM})?(?:\\s*[,，、和及/]\\s*${CN_EP_NUM})*\\s*[集话話期]`,
+  "g",
+);
 const STRIP_EP = /\bEP?\s*\d{1,4}(?:\s*[-~—–]\s*\d{1,4})?/gi;
 const STRIP_SEASON = /第\s*[0-9一二三四五六七八九十]{1,3}\s*季/g;
 
@@ -182,9 +186,9 @@ function parseMarks(text: string): MarkMatch | null {
 
   const cnRange = MARK_CN_RANGE.exec(text);
   if (cnRange) {
-    const from = Number(cnRange[1]);
-    const to = Number(cnRange[2]);
-    if (Number.isFinite(from) && Number.isFinite(to) && to >= from && to - from <= 500) {
+    const from = toEpisodeNumber(cnRange[1]);
+    const to = toEpisodeNumber(cnRange[2]);
+    if (from !== null && to !== null && to >= from && to - from <= 500) {
       return {
         season: null,
         episode: null,
@@ -200,8 +204,8 @@ function parseMarks(text: string): MarkMatch | null {
   if (cnList) {
     const list = cnList[1]
       .split(/[,，、和及/]+/)
-      .map((part) => Number(part.trim()))
-      .filter((n) => Number.isFinite(n) && n > 0);
+      .map((part) => toEpisodeNumber(part))
+      .filter((n): n is number => n !== null && n > 0);
     if (list.length === 1) {
       // 「第1集」这种单集写法走这里，跟 EP1 / S01E01 一样当成单集
       return {
@@ -334,6 +338,47 @@ export interface FileNameMarks {
   season: number | null;
   episode: number | null;
   range: { from: number; to: number } | null;
+  /** 文件名里的裸序号（`01.mp4`、`xxx-03.mp4`），用于一个链接里多个视频的先后 */
+  ordinal: number | null;
+}
+
+/** 去掉扩展名，只留主名 */
+function stemOf(fileName: string): string {
+  const raw = String(fileName ?? "").trim();
+  const ext = path.extname(raw);
+  return ext && /^\.[A-Za-z0-9]{1,5}$/.test(ext) ? raw.slice(0, -ext.length).trim() : raw;
+}
+
+/**
+ * 文件名开头的序号：`01.mp4`、`02 - 片段.mp4`、`3_标题.mp4`。
+ * 后面必须紧跟分隔符或结尾，避免把「2048 真实故事」「1080p」里的数字当序号。
+ */
+const LEAD_ORDINAL_RE = /^0*([0-9]{1,3})\s*(?=$|[-_.、．,:：;；|｜#\s])/;
+/** 文件名结尾的序号：`第4集-03.mp4`、`标题 12.mp4`（前面必须有分隔符） */
+const TAIL_ORDINAL_RE = /(?:^|[-_.、．,:：;；|｜#\s])0*([0-9]{1,3})$/;
+
+/** 序号只在「集数尺度」内才算：`01`~`99` */
+const ORDINAL_MAX = 99;
+/**
+ * 我们自己（和 Telegram 客户端）合成出来的名字：`video-123.mp4`、`photo-456.jpg`。
+ * 里面的数字是文档/消息 id，不是序号，绝不能拿来排顺序或当集号。
+ */
+const SYNTHETIC_NAME_RE = /^(?:photo|video|audio|voice|gif|document|file)-\d+$/i;
+
+/**
+ * 从原始文件名里取「第几个」。集数标记（第X集 / EPx / S01E01）不算在内，
+ * 那些由 parseMarks 处理；这里只认裸序号。
+ */
+export function ordinalFromFileName(fileName: string): number | null {
+  const stem = stemOf(fileName);
+  if (!stem || SYNTHETIC_NAME_RE.test(stem)) return null;
+  const lead = LEAD_ORDINAL_RE.exec(stem);
+  const tail = lead ? null : TAIL_ORDINAL_RE.exec(stem);
+  const matched = lead ?? tail;
+  if (!matched) return null;
+  const value = Number(matched[1]);
+  if (!Number.isFinite(value) || value < 1 || value > ORDINAL_MAX) return null;
+  return value;
 }
 
 /**
@@ -344,12 +389,14 @@ export interface FileNameMarks {
  * 集数标记前面的那一段（按 - _ 等符号切开后取最后一段）就是剧名。
  */
 export function parseFileNameMarks(fileName: string): FileNameMarks {
-  const empty: FileNameMarks = { series: "", season: null, episode: null, range: null };
   const raw = String(fileName ?? "").trim();
+  // 裸序号与集数标记分开取：一个链接里多个视频时，序号用来定先后
+  const ordinal = ordinalFromFileName(raw);
+  const empty: FileNameMarks = { series: "", season: null, episode: null, range: null, ordinal };
   if (!raw) return empty;
 
-  const ext = path.extname(raw);
-  const stem = ext && /^\.[A-Za-z0-9]{1,5}$/.test(ext) ? raw.slice(0, -ext.length) : raw;
+  const stem = stemOf(raw);
+  if (!stem) return empty;
   const marks = parseMarks(stem);
   if (!marks) return empty;
 
@@ -362,6 +409,7 @@ export function parseFileNameMarks(fileName: string): FileNameMarks {
     season: marks.season,
     episode: marks.episode,
     range: marks.range,
+    ordinal,
   };
 }
 
@@ -539,15 +587,49 @@ interface VideoSlot {
 }
 
 /**
+ * 一条消息里的多个视频，按原始文件名里的序号排出「第几个」。
+ *
+ * 相册的消息顺序不等于真实播放顺序：转发、补发、批量上传都会让 id 递增
+ * 和作者的本意对不上，而文件名里的 01/02/03 才是原作者写的顺序。
+ * 只有「每条视频都带序号、且序号互不相同」时才采信 —— 缺一个就退回消息顺序，
+ * 避免猜出一半、把剩下的挤到错位。
+ *
+ * 返回值按 media 下标给出名次（0 起）；不采信时返回 null。
+ */
+function ordinalRanks(fileMarks: FileNameMarks[], videoCount: number): number[] | null {
+  if (videoCount < 2) return null;
+  const nums: number[] = [];
+  for (const marks of fileMarks) {
+    if (marks.ordinal === null || marks.ordinal === undefined) return null;
+    nums.push(marks.ordinal);
+  }
+  if (new Set(nums).size !== nums.length) return null;
+  // 序号之间差得太远，说明抓到的不是「一集一个文件」的序号（可能是别的数字），不采信
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  if (max - min > Math.max(20, videoCount * 3)) return null;
+  const sorted = nums
+    .map((num, index) => ({ num, index }))
+    .sort((a, b) => a.num - b.num || a.index - b.index);
+  const ranks = new Array<number>(videoCount).fill(0);
+  sorted.forEach((entry, rank) => {
+    ranks[entry.index] = rank;
+  });
+  return ranks;
+}
+
+/**
  * 集号优先级：
  * 1. 文件名里自带的集号（第X集 / EP X / S01E01）最准；
- * 2. 正文声明的范围与视频数对得上时按顺序一一对应；
- * 3. 正文声明了范围但视频数对不上，从首集顺延；
- * 4. 都认不出就没有集号（走「剧名-01」序号兜底）。
+ * 2. 正文声明了范围且只有一个文件：这个文件本身就是合集；
+ * 3. 正文声明的集数按视频顺序（顺序优先取文件名里的序号）一一对应；
+ * 4. 正文没写集数、但文件名里有裸序号：直接用序号当集号；
+ * 5. 都认不出就没有集号（走「剧名-01」序号兜底）。
  */
 function resolveSlots(
   fileMarks: FileNameMarks[],
   videoCount: number,
+  ranks: number[] | null,
   groupEpisodes: number[],
   groupSeason: number,
   groupRange: { from: number; to: number } | null,
@@ -555,6 +637,7 @@ function resolveSlots(
 ): VideoSlot[] {
   return fileMarks.map((marks, order) => {
     const season = marks.season ?? groupSeason;
+    const rank = ranks ? ranks[order] : order;
     // 只有一条消息、一个视频，正文又写了集数区间：
     // 说明这个文件本身就是合集，用 S01E01-E10 这种范围名，Emby 才认得出
     if (singleMessage && videoCount === 1 && groupRange) {
@@ -567,13 +650,17 @@ function resolveSlots(
       return { season, episode: null, range: marks.range };
     }
     if (!groupEpisodes.length) {
+      // 正文没说集数，但文件名里有序号：用序号当集号，Emby 才能按顺序排
+      if (ranks && marks.ordinal !== null && marks.ordinal > 0) {
+        return { season, episode: marks.ordinal, range: null };
+      }
       return { season, episode: null, range: null };
     }
     // 集数列表与视频数对得上就一一对应，否则从首集顺延
     if (groupEpisodes.length === videoCount) {
-      return { season, episode: groupEpisodes[order], range: null };
+      return { season, episode: groupEpisodes[rank], range: null };
     }
-    return { season, episode: groupEpisodes[0] + order, range: null };
+    return { season, episode: groupEpisodes[0] + rank, range: null };
   });
 }
 
@@ -632,9 +719,13 @@ export function planFileNames(
   const groupRange = captionInfo?.range ?? null;
   // 消息条数：一条消息里通常就是一个文件，多条消息就是相册
   const singleMessage = (options.messageCount ?? media.length) <= 1;
+  const videoMarks = videoIndexes.map(({ index }) => fileMarks[index]);
+  // 一个链接里多个视频时，先后顺序以原始文件名里的序号为准
+  const ranks = ordinalRanks(videoMarks, videoCount);
   const slots = resolveSlots(
-    videoIndexes.map(({ index }) => fileMarks[index]),
+    videoMarks,
     videoCount,
+    ranks,
     groupEpisodes,
     groupSeason,
     groupRange,
@@ -645,10 +736,12 @@ export function planFileNames(
     const slot = slots[order];
     const tag = series ? episodeTag(slot.season, slot.episode, slot.range) : "";
     const ext = extensionOf(item);
+    // 没有集号时用名次做后缀，保证「剧名-01」也按原文件名排序
+    const placed = ranks ? ranks[order] : order;
     plan[index] = {
       dir,
       // 没有集数时退化为「剧名-01」/「剧名」，保证同一条消息内不重名
-      name: videoFileName(dir, tag, order, videoCount, ext),
+      name: videoFileName(dir, tag, placed, videoCount, ext),
       episode: slot.episode,
       season: slot.season,
       isVideo: true,
