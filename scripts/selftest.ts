@@ -1132,9 +1132,12 @@ async function platformChecks(): Promise<void> {
   const { parsePlatformLink, detectPlatform, splitPlatformLinks, hasPlatformLink } = await import(
     "../server/src/platform/detect"
   );
-  const { cookieToNetscape, formatSelector, explainYtdlpError } = await import(
-    "../server/src/platform/ytdlp"
+  const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank } =
+    await import("../server/src/platform/ytdlp");
+  const { parseCookiePairs, summarizeCookie, describeCookie, humanAge } = await import(
+    "../server/src/platform/cookie"
   );
+  const { assetName, normalizeTag } = await import("../server/src/platform/updater");
 
   check("B站长链接认出 BV 号", () => {
     const link = parsePlatformLink("https://www.bilibili.com/video/BV1xx411c7mD?p=2&t=10");
@@ -1176,8 +1179,21 @@ async function platformChecks(): Promise<void> {
     assert.equal(short?.platform, "xiaohongshu");
   });
 
+  check("YouTube 各种链接形态", () => {
+    assert.equal(parsePlatformLink("https://www.youtube.com/watch?v=dQw4w9WgXcQ")?.id, "dQw4w9WgXcQ");
+    assert.equal(parsePlatformLink("https://youtu.be/dQw4w9WgXcQ?t=30")?.id, "dQw4w9WgXcQ");
+    assert.equal(parsePlatformLink("https://www.youtube.com/shorts/abc123XYZ_-")?.id, "abc123XYZ_-");
+    assert.equal(parsePlatformLink("https://www.youtube.com/embed/dQw4w9WgXcQ")?.id, "dQw4w9WgXcQ");
+    assert.equal(parsePlatformLink("https://m.youtube.com/watch?v=dQw4w9WgXcQ")?.platform, "youtube");
+    // 频道页认不出视频 ID，但仍然交给 yt-dlp 判定（它会报「不像单条视频」）
+    const channel = parsePlatformLink("https://www.youtube.com/@someChannel");
+    assert.equal(channel?.platform, "youtube");
+    assert.equal(channel?.id, null);
+    // 冒充域名
+    assert.equal(detectPlatform("https://notyoutube.com/watch?v=abc"), null);
+  });
+
   check("别的站不接", () => {
-    assert.equal(detectPlatform("https://www.youtube.com/watch?v=abc"), null);
     assert.equal(detectPlatform("https://t.me/asc2256/10500"), null);
     // 冒充域名：notbilibili.com 不是 B站
     assert.equal(detectPlatform("https://notbilibili.com/video/BV1xx411c7mD"), null);
@@ -1233,6 +1249,78 @@ async function platformChecks(): Promise<void> {
     // 认不出的错误原样带出来，不要吞掉
     const other = explainYtdlpError("ERROR: 某个没见过的错误", "bilibili");
     assert.ok(other.includes("某个没见过的错误"));
+    // YouTube 的两种专属失败要说清「该改代理 / 该填 Cookie」
+    const bot = explainYtdlpError("ERROR: Sign in to confirm you're not a bot", "youtube");
+    assert.ok(bot.includes("机器人") || bot.includes("Cookie"));
+    const geo = explainYtdlpError("ERROR: The uploader has not made this video available in your country", "youtube");
+    assert.ok(geo.includes("地区"));
+    const net = explainYtdlpError("ERROR: Unable to download webpage: urlopen error timed out", "youtube");
+    assert.ok(net.includes("代理"));
+  });
+
+  check("Cookie 串解析与体检", () => {
+    const pairs = parseCookiePairs("SESSDATA=abc%2C123; bili_jct=xyz;\n空项; =bad");
+    assert.equal(pairs.length, 2);
+    assert.equal(pairs[0].name, "SESSDATA");
+    // 只按第一个 = 切分，值里带着 = 不影响
+    assert.equal(parseCookiePairs("a=b=c")[0].value, "b=c");
+
+    const ok = summarizeCookie("SESSDATA=1; bili_jct=2; buvid3=3", "bilibili");
+    assert.equal(ok.count, 3);
+    assert.equal(ok.missing.length, 0);
+    assert.ok(describeCookie(ok).includes("3 项"));
+
+    const lacking = summarizeCookie("buvid3=3; bili_jct=2", "bilibili");
+    assert.deepEqual(lacking.missing, ["SESSDATA"]);
+    assert.ok(describeCookie(lacking).includes("缺 SESSDATA"));
+
+    // 键名大小写不敏感（浏览器复制出来的大小写不完全统一）
+    assert.equal(summarizeCookie("sessdata=1; BILI_JCT=2", "bilibili").missing.length, 0);
+    // YouTube 认 SID / SAPISID 任意一个
+    assert.equal(summarizeCookie("SID=abc; HSID=1", "youtube").missing.length, 0);
+    assert.equal(summarizeCookie("PREF=xx", "youtube").missing.length, 1);
+  });
+
+  check("Cookie 保存时间的相对描述", () => {
+    const now = Date.UTC(2026, 0, 10, 12, 0, 0);
+    assert.equal(humanAge(now - 5_000, now), "刚刚");
+    assert.equal(humanAge(now - 12 * 60_000, now), "12 分钟前");
+    assert.equal(humanAge(now - 3 * 3600_000, now), "3 小时前");
+    assert.equal(humanAge(now - 5 * 86400_000, now), "5 天前");
+    assert.equal(humanAge(null, now), null);
+  });
+
+  check("yt-dlp 版本比较与 JS 运行时判断", () => {
+    assert.equal(versionRank("2025.11.12"), 20251112);
+    assert.equal(versionRank("随便"), 0);
+    // --js-runtimes 从 2025.10.22 才有，老版本传了会直接报未知参数
+    assert.equal(supportsJsRuntime("2025.10.21"), false);
+    assert.equal(supportsJsRuntime("2025.10.22"), true);
+    assert.equal(supportsJsRuntime("2026.01.03"), true);
+    assert.equal(supportsJsRuntime(null), false);
+  });
+
+  check("更新用的文件名与 tag 归一化", () => {
+    assert.equal(assetName("win32", "x64"), "yt-dlp.exe");
+    assert.equal(assetName("linux", "x64"), "yt-dlp");
+    assert.equal(assetName("linux", "arm64"), "yt-dlp_linux_aarch64");
+    assert.equal(assetName("linux", "arm"), "yt-dlp_linux_armv7l");
+    assert.equal(assetName("darwin", "arm64"), "yt-dlp_macos");
+    assert.equal(normalizeTag("v2025.11.12"), "2025.11.12");
+    assert.equal(normalizeTag(" 2025.11.12 "), "2025.11.12");
+  });
+
+  check("第三方代理只影响 yt-dlp，坏地址不传下去", () => {
+    assert.deepEqual(platformProxyArg(""), []);
+    assert.deepEqual(platformProxyArg("http://192.168.5.2:7890"), [
+      "--proxy",
+      "http://192.168.5.2:7890",
+    ]);
+    // 不带协议按 socks5 处理，和 Telegram 那套规则一致
+    assert.deepEqual(platformProxyArg("192.168.5.2:7890"), ["--proxy", "socks5://192.168.5.2:7890"]);
+    // 解析不了就不加参数，别让一个脏值把下载全搞挂
+    assert.deepEqual(platformProxyArg("socks5://:7890"), []);
+    assert.deepEqual(platformProxyArg("ftp://1.2.3.4:21"), []);
   });
 }
 

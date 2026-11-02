@@ -4,8 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getSettings } from "../db";
-import { PlatformId } from "../types";
+import { env } from "../env";
+import { PlatformId, PLATFORM_LABEL } from "../types";
 import { ffmpegInfo } from "../tg/ffmpeg";
+import { normalizeProxyUrl, parseProxy } from "../lib/netprobe";
 
 /**
  * yt-dlp 封装：B站 / 抖音 / 小红书都交给它。
@@ -24,16 +26,24 @@ export interface YtdlpInfo {
   path: string | null;
   version: string | null;
   /** 从哪里找到的，界面上给用户看 */
-  source: "custom" | "bundled" | "path" | null;
+  source: "custom" | "local" | "bundled" | "path" | null;
   error: string | null;
 }
 
 const BUNDLED = "/usr/local/bin/yt-dlp";
 
+/** 自动更新下载到这里：data 目录是挂载卷，容器重建后不会丢 */
+export function localBinaryPath(): string {
+  return path.join(env.dataDir, "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+}
+
 function candidates(custom: string): Array<{ file: string; source: YtdlpInfo["source"] }> {
   const list: Array<{ file: string; source: YtdlpInfo["source"] }> = [];
   const trimmed = custom.trim();
   if (trimmed) list.push({ file: trimmed, source: "custom" });
+  // 自动更新下来的版本要盖过镜像内置的那个
+  const local = localBinaryPath();
+  if (fs.existsSync(local)) list.push({ file: local, source: "local" });
   if (process.platform !== "win32") list.push({ file: BUNDLED, source: "bundled" });
   // PATH 里的名字：Windows 带 .exe，其余不带
   list.push({ file: process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp", source: "path" });
@@ -64,6 +74,48 @@ function runOnce(file: string, args: string[], timeoutMs: number): Promise<{ cod
       resolve({ code: code ?? -1, out, err });
     });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 代理与 YouTube 的 JS 运行时                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * yt-dlp 专用代理参数。
+ *
+ * 和 Telegram 的 `proxy_url` 分开：B站 / 抖音 / 小红书 在墙内直连最快，
+ * 混用一个代理反而绕远路；只有 YouTube 必须挂代理。
+ * 地址解析复用 netprobe 的 parseProxy，免得两套规则。
+ */
+export function platformProxyArg(raw = getSettings().platform_proxy): string[] {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  if (!parseProxy(text)) return [];
+  return ["--proxy", normalizeProxyUrl(text)];
+}
+
+/** yt-dlp 从 2025.10.22 起才有 --js-runtimes；老版本传了会直接报未知参数 */
+const JS_RUNTIME_SINCE = 20251022;
+
+export function versionRank(version: string | null): number {
+  const m = /(\d{4})\.(\d{2})\.(\d{2})/.exec(version ?? "");
+  if (!m) return 0;
+  return Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]);
+}
+
+/**
+ * YouTube 现在要靠 JS 运行时解密 nsig，否则拿不到高清格式。
+ * 镜像里自带 node，版本够就显式告诉 yt-dlp 用哪个。
+ */
+export function supportsJsRuntime(version: string | null): boolean {
+  return versionRank(version) >= JS_RUNTIME_SINCE;
+}
+
+/** 平台相关的通用参数 */
+function platformArgs(platform: PlatformId, version: string | null): string[] {
+  const args = platformProxyArg();
+  if (platform === "youtube" && supportsJsRuntime(version)) args.push("--js-runtimes", "node");
+  return args;
 }
 
 let cache: { at: number; info: YtdlpInfo } | null = null;
@@ -118,6 +170,7 @@ const COOKIE_DOMAIN: Record<PlatformId, string> = {
   bilibili: ".bilibili.com",
   douyin: ".douyin.com",
   xiaohongshu: ".xiaohongshu.com",
+  youtube: ".youtube.com",
 };
 
 /**
@@ -244,13 +297,14 @@ export async function probePlatform(
 ): Promise<PlatformProbe> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.5 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.6 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const args = [
     "--dump-single-json",
     "--no-playlist",
     "--no-warnings",
+    ...platformArgs(platform, info.version),
     "--socket-timeout",
     "20",
     url,
@@ -313,7 +367,7 @@ export async function downloadPlatform(
 ): Promise<PlatformDownloadResult> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.5 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.6 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const ffmpeg = await ffmpegInfo().catch(() => null);
@@ -331,6 +385,7 @@ export async function downloadPlatform(
     "3",
     "--socket-timeout",
     "20",
+    ...platformArgs(opts.platform, info.version),
     "-f",
     formatSelector(opts.quality),
     "--merge-output-format",
@@ -449,7 +504,20 @@ function newestVideo(dir: string): string | null {
  */
 export function explainYtdlpError(raw: string, platform: PlatformId): string {
   const text = (raw || "").replace(/\s+/g, " ").trim();
-  const label = platform === "bilibili" ? "B站" : platform === "douyin" ? "抖音" : "小红书";
+  const label = PLATFORM_LABEL[platform] ?? platform;
+  const youtube = platform === "youtube";
+  if (/Sign in to confirm|not a bot|confirm your age|age-restricted/i.test(text)) {
+    return youtube
+      ? "YouTube 判定为机器人/需要年龄验证：请填入已登录的 Cookie，并确认代理 IP 不是被标记的机房 IP"
+      : `${label}要求登录：请在设置 → 第三方平台里填入新鲜 Cookie（浏览器登录后复制整串）`;
+  }
+  if (
+    /not available in your country|not made this video available|blocked it in your country|geo.?restrict/i.test(
+      text,
+    )
+  ) {
+    return "该视频在当前地区不可用：把「第三方平台代理」换到其他地区节点再试";
+  }
   if (/Fresh cookies|login required|Sign in|需要登录|cookies are needed|account/i.test(text)) {
     return `${label}要求登录：请在设置 → 第三方平台里填入新鲜 Cookie（浏览器登录后复制整串）`;
   }
@@ -462,8 +530,10 @@ export function explainYtdlpError(raw: string, platform: PlatformId): string {
   if (/format is not available|Requested format/i.test(text)) {
     return `该链接没有所选清晰度，把画质改成「最高」再试`;
   }
-  if (/Unable to download|urlopen error|timed out|Connection/i.test(text)) {
-    return `网络连接失败：确认容器能直连 ${label}（大陆网络不需要代理）`;
+  if (/Unable to download|urlopen error|timed out|Connection|Tunnel connection failed/i.test(text)) {
+    return youtube
+      ? "连不上 YouTube：请在「第三方平台代理」里填一个可用代理（大陆网络必须走代理）"
+      : `网络连接失败：确认容器能直连 ${label}（大陆网络不需要代理）`;
   }
   const firstError = text.split("ERROR:").pop()?.trim() || text;
   return firstLine(firstError) || `${label}解析失败`;
@@ -476,5 +546,5 @@ function firstLine(text: string): string {
 
 /** 日志里给用户看的平台名 */
 export function platformName(platform: PlatformId): string {
-  return platform === "bilibili" ? "B站" : platform === "douyin" ? "抖音" : "小红书";
+  return PLATFORM_LABEL[platform] ?? platform;
 }

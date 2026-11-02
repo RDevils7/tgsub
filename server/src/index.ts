@@ -27,6 +27,7 @@ import { logsRouter } from "./routes/logs";
 import { platformRouter } from "./routes/platform";
 import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
+import { startYtdlpAutoUpdate } from "./platform/updater";
 
 const app = express();
 app.disable("x-powered-by");
@@ -209,9 +210,14 @@ setTimeout(() => void startBot(), 8000).unref();
 // 启动后按上限收拾一次缓存：上一次进程可能是被强杀的，没来得及清理
 setTimeout(() => requestCacheTrim(0), 4000).unref();
 
+// yt-dlp 的解析规则月月在变：按设置的间隔自己去 GitHub 看新版
+// （首检延迟在 startYtdlpAutoUpdate 内部，避开启动时的重连高峰）
+const stopYtdlpUpdate = startYtdlpAutoUpdate();
+
 async function shutdown(signal: string) {
   logger.info({ signal }, "正在关闭");
   clearInterval(scheduler);
+  stopYtdlpUpdate();
   downloader.stop();
   await stopBot().catch(() => undefined);
 

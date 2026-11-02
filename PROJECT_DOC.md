@@ -384,13 +384,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.0.5` | 打 `v1.0.5` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.6` | 打 `v1.0.6` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.5
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.6
 docker compose up -d
 ```
 
@@ -554,27 +554,34 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
 | ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
-| 第三方平台 | 关 | B站 / 抖音 / 小红书 下载开关；清晰度、存放子目录、是否写 nfo；三个平台的 Cookie 加密保存 |
-| yt-dlp 路径 | 空 | 留空自动查找（镜像内置 `/usr/local/bin/yt-dlp` → PATH）；卡片上显示实际路径、来源与版本 |
+| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存 |
+| 第三方平台代理 | 空 | 只给 yt-dlp 用（`--proxy`），与上面 Telegram 的代理互相独立；YouTube 与检查更新必须填 |
+| yt-dlp 自动更新 | 开 | 到点去 GitHub 看新版，有就下到 `data/bin` 并切过去（先 `--version` 校验，失败回滚） |
+| yt-dlp 检查间隔 | 24 | 单位小时，1–720 |
+| yt-dlp 路径 | 空 | 留空自动查找（`data/bin` → 镜像内置 `/usr/local/bin/yt-dlp` → PATH）；卡片上显示实际路径、来源、版本与最新版本 |
 
 路径模板变量：`{date}`（按天分目录）、`{channel}`、`{name}`、`{id}`。
 带《剧名》的剧集不走模板，直接落在 `<下载根>/<剧名>/`。
 
 ---
 
-## 第三方平台下载（B站 / 抖音 / 小红书，1.0.5）
+## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.6）
 
-**为什么用 yt-dlp 而不是自己写接口**：三个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
-小红书 `x-s`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，我们只负责喂 Cookie、读进度。
+**为什么用 yt-dlp 而不是自己写接口**：这几个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
+小红书 `x-s`、YouTube `nsig`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，
+我们只负责喂 Cookie、读进度，并让它自己保持最新。
 
 **代码结构**
 
 | 文件 | 职责 |
 | --- | --- |
-| `server/src/platform/detect.ts` | 纯函数：域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore）、批量拆链接、去重键 |
-| `server/src/platform/ytdlp.ts` | 定位二进制与 `--version` 探测、Cookie → Netscape cookies.txt、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、错误中文化 |
+| `server/src/platform/detect.ts` | 纯函数：域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore、YouTube `v`/`shorts`/`embed`/`youtu.be`）、批量拆链接、去重键 |
+| `server/src/platform/ytdlp.ts` | 定位二进制（手填 → `data/bin` → 镜像内置 → PATH）、`--version` 探测、Cookie → Netscape、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、代理参数、YouTube JS runtime 判断、错误中文化 |
+| `server/src/platform/cookie.ts` | 纯函数：`parseCookiePairs` / `summarizeCookie` / `describeCookie` / `humanAge`，给「状态可见」用 |
+| `server/src/platform/updater.ts` | GitHub Release 查询、按平台选资产、流式下载、`--version` 校验后原子替换、`data/bin` 优先、定时检查 |
 | `server/src/platform/jobs.ts` | 解析后写 `downloads`（`source='platform'`）、目录规划、去重与失败复用 |
-| `server/src/routes/platform.ts` | `GET /api/platform/status`、`POST /probe`、`POST /task`、`POST /refresh` |
+| `server/src/lib/netprobe.ts` | `downloadFile()`：走同一套代理握手，跟随 3xx，body 流式落盘（更新二进制用） |
+| `server/src/routes/platform.ts` | `GET /api/platform/status`、`POST /probe`、`POST /task`、`POST /refresh`、`POST /update` |
 | `server/src/tg/downloader.ts` | `run()` 开头按 `row.source` 分流到 `runPlatform()`，其余（暂停/停止/重试/收尾）完全复用 |
 
 **关键决策**
@@ -588,12 +595,30 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   接口只回「N 项，首项 <name>」。传空字符串 = 清除，传掩码 = 不变。
 - **扩展名**：由 yt-dlp 决定（mkv/webm 都可能），下载完成后回填 `save_name` / `file_name`。
 - **目录**：`<platform_dir>/<平台>/<作者>/<标题> [ID]/`，每条视频一个目录，避免 `tvshow.nfo` 互相覆盖。
+- **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`。
+  国内平台直连最快，YouTube 与「检查更新」必须走它；`parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
+- **YouTube 的 JS 运行时**：`--js-runtimes node` 是 yt-dlp 2025.10.22 才有的参数，老版本传了会直接报未知参数，
+  所以先用 `versionRank()` 比较版本，够了才加；镜像自带 Node，不需要额外装 deno。
+
+**自更新设计（1.0.6）**
+
+| 环节 | 做法 |
+| --- | --- |
+| 查版本 | `GET api.github.com/repos/yt-dlp/yt-dlp/releases/latest` 取 `tag_name`，JSON 解析失败时退化成正则 |
+| 选资产 | `yt-dlp.exe` / `yt-dlp_linux_aarch64` / `yt-dlp_linux_armv7l` / `yt-dlp_macos` / `yt-dlp` |
+| 下载 | `downloadFile()` 流式写 `data/bin/yt-dlp.download`，超时 45s（空闲计时）、上限 128MB |
+| 校验 | 先 `--version`，拿不到版本号就删除临时文件、**保留旧版本** |
+| 替换 | 旧文件改名 `.bak` → 新文件改名到位 → chmod 755 → 删 `.bak`；任一步失败自动回滚 |
+| 生效 | `clearYtdlpCache()` 后重新探测；`data/bin` 在候选列表里排在内置二进制之前 |
+| 定时 | `startYtdlpAutoUpdate()`：启动 90s 后首检，之后每小时 tick 判断是否到 `ytdlp_check_hours` |
+| 状态 | `ytdlp_check_at` / `ytdlp_latest` / `ytdlp_updated_at` / `ytdlp_check_error` 落库，重启后界面仍有记录 |
 
 **镜像**：`Dockerfile` 按 `TARGETARCH` 下载 `yt-dlp_linux` / `yt-dlp_linux_aarch64` 到 `/usr/local/bin/yt-dlp`，
 用 node 的 fetch 下载（不额外装 curl），失败即构建失败；`--build-arg INSTALL_YTDLP=0` 可跳过。
+镜像里的那份是「兜底」，实际生效的可能是 `data/bin` 里自动更新下来的那份。
 
-**自检**：`platformChecks()` 11 项（链接识别、冒充域名、中文标点、去重、Cookie 格式、画质映射、错误文案），
-全部是纯函数，不依赖网络与二进制。
+**自检**：`platformChecks()` 20 项（链接识别含 YouTube 四种形态、冒充域名、中文标点、去重、Cookie 格式与体检、
+画质映射、错误文案含 YouTube 专属两类、版本比较、资产名、代理参数），全部是纯函数，不依赖网络与二进制。
 
 ---
 
@@ -826,14 +851,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.5
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.6
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.5 && git push origin v1.0.5    # 发布 v1.0.5 / latest 两个标签
+git tag v1.0.6 && git push origin v1.0.6    # 发布 v1.0.5 / latest 两个标签
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

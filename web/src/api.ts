@@ -20,6 +20,8 @@ import type {
   PlatformStatus,
   PlatformTask,
   YtdlpInfo,
+  EngineUpdateResult,
+  EngineUpdateState,
   NetProbeReport,
   ProxyStatus,
   MetadataDetail,
@@ -163,6 +165,7 @@ export const api = {
       platform_cookie_bilibili?: string;
       platform_cookie_douyin?: string;
       platform_cookie_xiaohongshu?: string;
+      platform_cookie_youtube?: string;
     },
   ) =>
     request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState; emby?: { apiKeySet: boolean; apiKeyHint: string | null } }>("/settings", {
@@ -181,7 +184,11 @@ export const api = {
   /** 解析并入队 */
   platformTask: (url: string) =>
     request<PlatformTask>("/platform/task", { method: "POST", body: JSON.stringify({ url }) }),
-  platformRefresh: () => request<{ ytdlp: YtdlpInfo }>("/platform/refresh", { method: "POST" }),
+  platformRefresh: () => request<{ ytdlp: YtdlpInfo; update: EngineUpdateState }>("/platform/refresh", {
+    method: "POST",
+  }),
+  /** 立即检查 yt-dlp 新版本，有就下载并切换 */
+  platformUpdate: () => request<EngineUpdateResult>("/platform/update", { method: "POST" }),
 
   /* ------------------------------ Emby 入库 ------------------------------ */
   embyStatus: () => request<EmbyStatus>("/emby/status"),

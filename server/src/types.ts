@@ -169,16 +169,29 @@ export interface AppSettings {
   platform_dir: string;
   /** 第三方视频也写 .nfo + 截帧封面，供 Emby 识别 */
   platform_meta: boolean;
+  /**
+   * 只给 yt-dlp 用的代理（Telegram 那条 proxy_url 不动）。
+   * 下 B站 / 抖音 / 小红书一般留空；下 YouTube 通常必须填。
+   */
+  platform_proxy: string;
+  /** 定时检查 yt-dlp 新版本，有就自动下载到 data/bin */
+  ytdlp_auto_update: boolean;
+  /** 多久检查一次（小时），默认 24 */
+  ytdlp_check_hours: number;
 }
 
 /** 支持的第三方平台 */
-export type PlatformId = "bilibili" | "douyin" | "xiaohongshu";
+export type PlatformId = "bilibili" | "douyin" | "xiaohongshu" | "youtube";
 
 export const PLATFORM_LABEL: Record<PlatformId, string> = {
   bilibili: "B站",
   douyin: "抖音",
   xiaohongshu: "小红书",
+  youtube: "YouTube",
 };
+
+/** 界面与日志里的统一顺序 */
+export const PLATFORM_IDS: PlatformId[] = ["bilibili", "douyin", "xiaohongshu", "youtube"];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   credential_mode: "builtin",
@@ -211,4 +224,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   platform_quality: "1080",
   platform_dir: "第三方",
   platform_meta: true,
+  platform_proxy: "",
+  ytdlp_auto_update: true,
+  ytdlp_check_hours: 24,
 };

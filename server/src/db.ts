@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { env } from "./env";
 import { logger } from "./logger";
 import { AppSettings, DEFAULT_SETTINGS, PlatformId } from "./types";
+import { describeCookie, summarizeCookie } from "./platform/cookie";
 
 export const db = new Database(env.dbFile);
 db.pragma("journal_mode = WAL");
@@ -476,6 +477,15 @@ const PLATFORM_COOKIE_KEY: Record<PlatformId, string> = {
   bilibili: "platform_cookie_bilibili",
   douyin: "platform_cookie_douyin",
   xiaohongshu: "platform_cookie_xiaohongshu",
+  youtube: "platform_cookie_youtube",
+};
+
+/** Cookie 保存时间单独记，界面上显示「3 天前」，过期时好判断是不是该重填 */
+const PLATFORM_COOKIE_AT_KEY: Record<PlatformId, string> = {
+  bilibili: "platform_cookie_bilibili_at",
+  douyin: "platform_cookie_douyin_at",
+  xiaohongshu: "platform_cookie_xiaohongshu_at",
+  youtube: "platform_cookie_youtube_at",
 };
 
 export function getPlatformCookie(platform: PlatformId): string {
@@ -492,15 +502,33 @@ export function getPlatformCookie(platform: PlatformId): string {
 export function setPlatformCookie(platform: PlatformId, cookie: string): void {
   const value = cookie.trim();
   setSetting(PLATFORM_COOKIE_KEY[platform], value ? encryptSecret(value) : "");
+  setSetting(PLATFORM_COOKIE_AT_KEY[platform], value ? String(Date.now()) : "");
 }
 
-export function getPlatformCookieHint(platform: PlatformId): { set: boolean; hint: string | null } {
+export interface PlatformCookieState {
+  set: boolean;
+  /** 一行摘要：`6 项 · SESSDATA / bili_jct` */
+  hint: string | null;
+  /** 键值对数量 */
+  count: number;
+  /** 缺失的必要项（如 B站缺 SESSDATA） */
+  missing: string[];
+  /** 保存时间（毫秒），旧版本存的不带时间，为 null */
+  savedAt: number | null;
+}
+
+export function getPlatformCookieHint(platform: PlatformId): PlatformCookieState {
   const cookie = getPlatformCookie(platform);
-  if (!cookie) return { set: false, hint: null };
-  // Cookie 是一长串 k=v，末四位通常没意义，改成显示「条目数 + 首段名字」更有辨识度
-  const pairs = cookie.split(";").map((s) => s.trim()).filter(Boolean);
-  const first = pairs[0]?.split("=")[0] ?? "";
-  return { set: true, hint: `${pairs.length} 项${first ? `，首项 ${first}` : ""}` };
+  if (!cookie) return { set: false, hint: null, count: 0, missing: [], savedAt: null };
+  const summary = summarizeCookie(cookie, platform);
+  const at = Number(getSetting(PLATFORM_COOKIE_AT_KEY[platform]) ?? 0);
+  return {
+    set: true,
+    hint: describeCookie(summary),
+    count: summary.count,
+    missing: summary.missing,
+    savedAt: Number.isFinite(at) && at > 0 ? at : null,
+  };
 }
 
 /* ------------------------------------------------------------------ */

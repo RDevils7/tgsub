@@ -1,4 +1,5 @@
 import dns from "node:dns/promises";
+import fs from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
 import { APP_VERSION } from "../version";
@@ -118,6 +119,8 @@ export function telegramProxyUnsupported(raw: string): boolean {
 interface Reader {
   read(n: number): Promise<Buffer>;
   readUntil(delimiter: string): Promise<string>;
+  /** 取走缓冲区里剩下的字节（响应头之后很可能已经混进了 body） */
+  drain(): Buffer;
   /** 拆掉监听：握手用的临时 reader 必须让位，否则后续数据会被它吞掉 */
   detach(): void;
 }
@@ -196,6 +199,11 @@ function makeReader(socket: net.Socket): Reader {
     async readUntil(delimiter) {
       const out = (await request({ kind: "delim", delim: delimiter })) as string;
       return out;
+    },
+    drain() {
+      const out = buf;
+      buf = Buffer.alloc(0);
+      return Buffer.from(out);
     },
     detach() {
       socket.removeListener("data", onData);
@@ -530,6 +538,147 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
   } finally {
     socket.destroy();
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 大文件下载（自动更新 yt-dlp 用）                                      */
+/* ------------------------------------------------------------------ */
+
+export interface FileDownloadResult {
+  bytes: number;
+  finalUrl: string;
+  /** 服务端给的大小，没给就是 null */
+  contentLength: number | null;
+}
+
+export interface FileDownloadOptions {
+  proxy?: ParsedProxy | null;
+  timeoutMs?: number;
+  /** 上限，防止误下成一个巨大的 HTML 或死循环 */
+  maxBytes?: number;
+  verifyTls?: boolean;
+  onProgress?: (got: number, total: number) => void;
+}
+
+/**
+ * 把远端文件流式写进 dest。
+ *
+ * 与 httpRequest 的差别：body 不进内存，而是 pipe 到文件；跟随 3xx
+ * （GitHub Release 会跳到 objects.githubusercontent.com）。
+ * 代理、TLS、握手逻辑与 httpRequest 完全共用同一套。
+ */
+export async function downloadFile(
+  rawUrl: string,
+  dest: string,
+  options: FileDownloadOptions = {},
+): Promise<FileDownloadResult> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
+  let current = rawUrl;
+
+  for (let hop = 0; hop < 6; hop += 1) {
+    const url = new URL(current);
+    const isHttps = url.protocol === "https:";
+    const host = url.hostname;
+    const port = Number(url.port || (isHttps ? 443 : 80));
+    const pathname = `${url.pathname || "/"}${url.search}`;
+
+    let socket = await openChannel(options.proxy ?? null, host, port, timeoutMs);
+    if (isHttps) socket = await wrapTls(socket, host, timeoutMs, options.verifyTls ?? true);
+    const reader = makeReader(socket);
+    socket.setTimeout(timeoutMs);
+
+    socket.write(
+      [
+        `GET ${pathname} HTTP/1.1`,
+        `Host: ${host}`,
+        `User-Agent: tgsub/${APP_VERSION} (yt-dlp updater)`,
+        "Accept: */*",
+        "Accept-Encoding: identity",
+        "Connection: close",
+      ].join("\r\n") + "\r\n\r\n",
+    );
+
+    let head: string;
+    try {
+      head = await reader.readUntil("\r\n\r\n");
+    } catch (err) {
+      reader.detach();
+      socket.destroy();
+      throw err;
+    }
+
+    const lines = head.split("\r\n");
+    const status = Number(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(lines[0] ?? "")?.[1] ?? 0);
+    const headers: Record<string, string> = {};
+    for (const line of lines.slice(1)) {
+      const idx = line.indexOf(":");
+      if (idx > 0) headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+    }
+
+    if (status >= 300 && status < 400 && headers.location) {
+      reader.detach();
+      socket.destroy();
+      current = new URL(headers.location, current).toString();
+      continue;
+    }
+
+    if (status !== 200) {
+      reader.detach();
+      socket.destroy();
+      throw new Error(`下载失败：HTTP ${status || "无响应"}`);
+    }
+
+    const total = Number(headers["content-length"] ?? 0) || null;
+    if (total && total > maxBytes) {
+      reader.detach();
+      socket.destroy();
+      throw new Error(`文件过大（${Math.round(total / 1024 / 1024)}MB），已取消`);
+    }
+
+    // 头部之后缓冲区里已经可能混了 body：暂停 → 取走 → 让位 → 塞回 → pipe
+    socket.pause();
+    const leftover = reader.drain();
+    reader.detach();
+
+    const ws = fs.createWriteStream(dest);
+    let got = 0;
+    // pipe 阶段没有 makeReader 兜底，单独挂一个空闲超时
+    socket.setTimeout(timeoutMs, () => {
+      socket.destroy(new Error("下载超时"));
+    });
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const done = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        if (err) {
+          ws.destroy();
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+      socket.on("data", (chunk: Buffer) => {
+        got += chunk.length;
+        options.onProgress?.(got, total ?? 0);
+        if (got > maxBytes) done(new Error("文件超过大小上限，已中断"));
+      });
+      socket.once("error", (err) => done(err));
+      ws.once("error", (err) => done(err));
+      ws.once("finish", () => done());
+      if (leftover.length) socket.unshift(leftover);
+      socket.pipe(ws);
+    });
+
+    if (total && got < total) {
+      throw new Error(`下载不完整（${got}/${total} 字节）`);
+    }
+    return { bytes: got, finalUrl: current, contentLength: total };
+  }
+
+  throw new Error("重定向次数过多，已放弃");
 }
 
 export interface ProbeSite {

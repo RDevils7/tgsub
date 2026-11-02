@@ -248,24 +248,57 @@ export interface AppSettings {
   platform_dir: string;
   /** 第三方视频也写 nfo + 封面 */
   platform_meta: boolean;
+  /** 只给 yt-dlp 用的代理；下 YouTube 通常必须填 */
+  platform_proxy: string;
+  /** 定时检查 yt-dlp 新版本 */
+  ytdlp_auto_update: boolean;
+  /** 检查间隔（小时） */
+  ytdlp_check_hours: number;
   has_session?: boolean;
 }
 
 /* ------------------------------ 第三方平台 ------------------------------ */
 
-export type PlatformId = "bilibili" | "douyin" | "xiaohongshu";
+export type PlatformId = "bilibili" | "douyin" | "xiaohongshu" | "youtube";
 
 export interface YtdlpInfo {
   available: boolean;
   path: string | null;
   version: string | null;
-  source: "custom" | "bundled" | "path" | null;
+  source: "custom" | "local" | "bundled" | "path" | null;
   error: string | null;
+}
+
+export interface EngineUpdateState {
+  current: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  checkedAt: number | null;
+  updatedAt: number | null;
+  lastError: string | null;
+  busy: boolean;
+  /** 0–1；-1 表示正在检查 */
+  progress: number;
+  autoUpdate: boolean;
+  checkHours: number;
 }
 
 export interface PlatformCookieState {
   set: boolean;
   hint: string | null;
+  count?: number;
+  missing?: string[];
+  savedAt?: number | null;
+}
+
+export interface PlatformInfo {
+  id: PlatformId;
+  label: string;
+  cookieSet: boolean;
+  cookieHint: string | null;
+  cookieCount: number;
+  cookieMissing: string[];
+  cookieSavedAt: number | null;
 }
 
 export interface PlatformStatus {
@@ -274,8 +307,20 @@ export interface PlatformStatus {
   dir: string;
   root: string;
   meta: boolean;
+  proxy: string;
   ytdlp: YtdlpInfo;
-  platforms: Array<{ id: PlatformId; label: string; cookieSet: boolean; cookieHint: string | null }>;
+  update: EngineUpdateState;
+  platforms: PlatformInfo[];
+}
+
+export interface EngineUpdateResult {
+  ok: boolean;
+  updated: boolean;
+  from: string | null;
+  to: string | null;
+  error: string | null;
+  ytdlp: YtdlpInfo;
+  update: EngineUpdateState;
 }
 
 export interface PlatformProbe {
@@ -365,6 +410,7 @@ export interface SettingsResponse {
   platform?: {
     cookies: Record<string, PlatformCookieState>;
     ytdlp: YtdlpInfo;
+    update: EngineUpdateState;
   };
 }
 

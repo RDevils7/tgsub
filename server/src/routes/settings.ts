@@ -17,25 +17,24 @@ import { getBuiltinApp } from "../tg/credentials";
 import { normalizeEmbyUrl } from "../tg/embyapi";
 import { normalizeProxyUrl } from "../lib/netprobe";
 import { withLiveProgress } from "../tg/downloader";
-import { AppSettings, Download, PlatformId } from "../types";
+import { AppSettings, Download, PLATFORM_IDS } from "../types";
 import { asyncHandler, clampInt } from "../lib/http";
 import { APP_VERSION } from "../version";
-import { ytdlpInfo, clearYtdlpCache } from "../platform/ytdlp";
+import { clearYtdlpCache } from "../platform/ytdlp";
+import { engineState } from "../platform/updater";
 
 export const settingsRouter = Router();
 
 const MASK = "••••••••";
 
-const PLATFORMS: PlatformId[] = ["bilibili", "douyin", "xiaohongshu"];
+const PLATFORMS = PLATFORM_IDS;
 
-/** 设置页要的第三方平台状态：Cookie 只回「有没有配」，yt-dlp 回版本与来源 */
-async function platformSnapshot(): Promise<{
-  cookies: Record<string, { set: boolean; hint: string | null }>;
-  ytdlp: Awaited<ReturnType<typeof ytdlpInfo>>;
-}> {
-  const cookies: Record<string, { set: boolean; hint: string | null }> = {};
+/** 设置页要的第三方平台状态：Cookie 只回「有没有配 + 摘要」，yt-dlp 回版本与更新状态 */
+async function platformSnapshot() {
+  const cookies: Record<string, ReturnType<typeof getPlatformCookieHint>> = {};
   for (const id of PLATFORMS) cookies[id] = getPlatformCookieHint(id);
-  return { cookies, ytdlp: await ytdlpInfo() };
+  const { info, update } = await engineState();
+  return { cookies, ytdlp: info, update };
 }
 
 settingsRouter.get(
@@ -137,8 +136,13 @@ settingsRouter.put(
         .join("\n");
     }
 
-    /* 第三方平台（B站 / 抖音 / 小红书） */
+    /* 第三方平台（B站 / 抖音 / 小红书 / YouTube） */
     if (body.platform_enabled !== undefined) patch.platform_enabled = Boolean(body.platform_enabled);
+    if (typeof body.platform_proxy === "string") patch.platform_proxy = normalizeProxyUrl(body.platform_proxy);
+    if (body.ytdlp_auto_update !== undefined) patch.ytdlp_auto_update = Boolean(body.ytdlp_auto_update);
+    if (body.ytdlp_check_hours !== undefined) {
+      patch.ytdlp_check_hours = clampInt(body.ytdlp_check_hours, 1, 720, current.ytdlp_check_hours);
+    }
     if (typeof body.ytdlp_path === "string") patch.ytdlp_path = body.ytdlp_path.trim();
     if (typeof body.platform_quality === "string") {
       const quality = body.platform_quality.trim().toLowerCase();

@@ -22,6 +22,7 @@ const HOSTS: Array<{ platform: PlatformId; host: string[] }> = [
   { platform: "bilibili", host: ["bilibili.com", "b23.tv"] },
   { platform: "douyin", host: ["douyin.com", "iesdouyin.com"] },
   { platform: "xiaohongshu", host: ["xiaohongshu.com", "xhslink.com"] },
+  { platform: "youtube", host: ["youtube.com", "youtu.be", "youtube-nocookie.com"] },
 ];
 
 /** 补协议后解析；不是合法 URL 返回 null */
@@ -69,6 +70,15 @@ export function extractPlatformId(platform: PlatformId, url: URL): string | null
     // https://www.iesdouyin.com/share/video/7xxxxxxxx/
     const share = pathname.match(/\/share\/(?:video|note)\/(\d{6,})/);
     return share ? share[1] : null;
+  }
+  if (platform === "youtube") {
+    // watch?v=ID / shorts/ID / live/ID / embed/ID；youtu.be/ID 走路径
+    const v = url.searchParams.get("v");
+    if (v && /^[A-Za-z0-9_-]{6,}$/.test(v)) return v;
+    const path = pathname.match(/\/(?:shorts|live|embed|v)\/([A-Za-z0-9_-]{6,})/);
+    if (path) return path[1];
+    const short = pathname.match(/^\/([A-Za-z0-9_-]{6,})\/?$/);
+    return short ? short[1] : null;
   }
   const note = pathname.match(/\/(?:explore|discovery\/item|item)\/([0-9a-zA-Z]{8,})/);
   return note ? note[1] : null;

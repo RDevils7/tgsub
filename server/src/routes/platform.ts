@@ -2,40 +2,50 @@ import { Router } from "express";
 import { getPlatformCookieHint, getPlatformCookie, getSettings } from "../db";
 import { asyncHandler } from "../lib/http";
 import { logger } from "../logger";
-import { PLATFORM_LABEL, PlatformId } from "../types";
+import { PLATFORM_IDS, PLATFORM_LABEL } from "../types";
 import { parsePlatformLink } from "../platform/detect";
 import { enqueuePlatformLink, platformRootDir } from "../platform/jobs";
 import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
+import { engineState, updateYtdlp } from "../platform/updater";
 
 /**
- * 第三方平台（B站 / 抖音 / 小红书）
+ * 第三方平台（B站 / 抖音 / 小红书 / YouTube）
  *
- *   GET  /status  引擎与 Cookie 状态，设置页与下载页都用
- *   POST /probe   只解析，不下载（用户可能只想看看是什么视频）
- *   POST /task    解析 + 入队，返回任务 id
+ *   GET  /status   引擎版本、更新状态、Cookie 状态；设置页与下载页都用
+ *   POST /probe    只解析，不下载（用户可能只想看看是什么视频）
+ *   POST /task     解析 + 入队，返回任务 id
+ *   POST /update   立刻检查 yt-dlp 新版本并下载
  *
  * Cookie 不在这里写，走 PUT /api/settings（和 session/bot token 一样加密落盘）。
  */
 
 export const platformRouter = Router();
 
-const PLATFORMS: PlatformId[] = ["bilibili", "douyin", "xiaohongshu"];
-
 platformRouter.get(
   "/status",
   asyncHandler(async (_req, res) => {
     const settings = getSettings();
-    const info = await ytdlpInfo();
+    const { info, update } = await engineState();
     res.json({
       enabled: settings.platform_enabled,
       quality: settings.platform_quality,
       dir: settings.platform_dir,
       root: platformRootDir(),
       meta: settings.platform_meta,
+      proxy: settings.platform_proxy,
       ytdlp: info,
-      platforms: PLATFORMS.map((id) => {
-        const hint = getPlatformCookieHint(id);
-        return { id, label: PLATFORM_LABEL[id], cookieSet: hint.set, cookieHint: hint.hint };
+      update,
+      platforms: PLATFORM_IDS.map((id) => {
+        const state = getPlatformCookieHint(id);
+        return {
+          id,
+          label: PLATFORM_LABEL[id],
+          cookieSet: state.set,
+          cookieHint: state.hint,
+          cookieCount: state.count,
+          cookieMissing: state.missing,
+          cookieSavedAt: state.savedAt,
+        };
       }),
     });
   }),
@@ -47,7 +57,7 @@ platformRouter.post(
     const url = String((req.body ?? {}).url ?? "").trim();
     const link = parsePlatformLink(url);
     if (!link) {
-      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 链接" });
+      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
       return;
     }
     const probe = await probePlatform(link.url, link.platform, getPlatformCookie(link.platform));
@@ -61,7 +71,7 @@ platformRouter.post(
     const url = String((req.body ?? {}).url ?? "").trim();
     const link = parsePlatformLink(url);
     if (!link) {
-      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 链接" });
+      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
       return;
     }
     const task = await enqueuePlatformLink(link);
@@ -76,6 +86,16 @@ platformRouter.post(
     clearYtdlpCache();
     const info = await ytdlpInfo(true);
     logger.info({ available: info.available, version: info.version, source: info.source }, "重新探测 yt-dlp");
-    res.json({ ytdlp: info });
+    res.json({ ytdlp: info, update: (await engineState()).update });
+  }),
+);
+
+/** 手动检查更新：有新版本就下载并切换，没有就只回版本信息 */
+platformRouter.post(
+  "/update",
+  asyncHandler(async (_req, res) => {
+    const result = await updateYtdlp();
+    const { info, update } = await engineState();
+    res.json({ ...result, ytdlp: info, update });
   }),
 );
