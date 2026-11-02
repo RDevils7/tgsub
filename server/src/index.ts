@@ -24,6 +24,7 @@ import { embyRouter } from "./routes/emby";
 import { cacheRouter } from "./routes/cache";
 import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
+import { platformRouter } from "./routes/platform";
 import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
 
@@ -79,6 +80,7 @@ app.use("/api/settings", settingsRouter);
 app.use("/api/emby", embyRouter);
 app.use("/api/cache", cacheRouter);
 app.use("/api/logs", logsRouter);
+app.use("/api/platform", platformRouter);
 app.use("/api", systemRouter);
 
 app.use("/api", (_req, res) => {

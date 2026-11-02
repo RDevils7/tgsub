@@ -93,8 +93,8 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 # 版本号：与 package.json / server/src/version.ts 保持一致。
-# /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.0.4 → 1.0.4 / 1.0 / latest）。
-ARG APP_VERSION=1.0.4
+# /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.0.5 → v1.0.5 / latest）。
+ARG APP_VERSION=1.0.5
 
 ENV NODE_ENV=production \
     PORT=6789 \
@@ -119,6 +119,25 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /downloads \
  && chown -R node:node /data /downloads /app
+
+# yt-dlp：B站 / 抖音 / 小红书的下载引擎（约 30MB，自带 Python 运行时）。
+# 这三个平台的播放地址都要签名，自己实现会随平台改版失效，交给 yt-dlp 跟版更稳。
+# 用 node 下载以免额外装 curl；TARGETARCH 由 buildx 自动注入。
+# 本地构建如果访问不了 GitHub，可以 --build-arg INSTALL_YTDLP=0 跳过（第三方下载功能不可用）。
+ARG TARGETARCH
+ARG INSTALL_YTDLP=1
+RUN set -eux; \
+    if [ "$INSTALL_YTDLP" = "1" ]; then \
+      case "${TARGETARCH:-amd64}" in \
+        arm64) asset=yt-dlp_linux_aarch64 ;; \
+        *)     asset=yt-dlp_linux ;; \
+      esac; \
+      node -e "const fs=require('fs');const a=process.argv[1];fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/'+a).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);const b=Buffer.from(await r.arrayBuffer());if(b.length<1e6)throw new Error('文件过小，可能是错误页');fs.writeFileSync('/usr/local/bin/yt-dlp',b,{mode:0o755});console.log('已下载 '+a+'，'+b.length+' 字节')}).catch(e=>{console.error(e);process.exit(1)})" "$asset"; \
+      chmod +x /usr/local/bin/yt-dlp; \
+      /usr/local/bin/yt-dlp --version; \
+    else \
+      echo "跳过 yt-dlp 安装"; \
+    fi
 
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json

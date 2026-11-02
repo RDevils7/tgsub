@@ -61,6 +61,10 @@ export interface Download {
   save_name: string | null;
   /** Emby 元信息（剧名/季/集/简介/标签等），下载完成后据此生成 nfo 与封面 */
   emby_json: string | null;
+  /** 任务来源：telegram = 频道媒体，platform = B站/抖音/小红书（yt-dlp） */
+  source: string;
+  /** 第三方任务的原链接 */
+  source_url: string | null;
 }
 
 export interface ScanRun {
@@ -155,7 +159,26 @@ export interface AppSettings {
    * 超过后按最后写入时间从旧到新自动清理；0 = 不限制，也不自动清理。
    */
   cache_limit_mb: number;
+  /** 启用第三方平台下载（B站 / 抖音 / 小红书），引擎是 yt-dlp */
+  platform_enabled: boolean;
+  /** yt-dlp 可执行文件路径；留空则自动查找（镜像内置 → PATH） */
+  ytdlp_path: string;
+  /** 清晰度上限：best / 1080 / 720 / 480 */
+  platform_quality: string;
+  /** 第三方视频存到下载目录下的哪个子目录，留空表示直接放根目录 */
+  platform_dir: string;
+  /** 第三方视频也写 .nfo + 截帧封面，供 Emby 识别 */
+  platform_meta: boolean;
 }
+
+/** 支持的第三方平台 */
+export type PlatformId = "bilibili" | "douyin" | "xiaohongshu";
+
+export const PLATFORM_LABEL: Record<PlatformId, string> = {
+  bilibili: "B站",
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+};
 
 export const DEFAULT_SETTINGS: AppSettings = {
   credential_mode: "builtin",
@@ -183,4 +206,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bot_notify: true,
   ffmpeg_path: "",
   cache_limit_mb: 512,
+  platform_enabled: false,
+  ytdlp_path: "",
+  platform_quality: "1080",
+  platform_dir: "第三方",
+  platform_meta: true,
 };

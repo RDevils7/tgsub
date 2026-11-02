@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../components/ui";
 import FfmpegStatusPanel from "../components/FfmpegStatusPanel";
+import PlatformPanel from "../components/PlatformPanel";
 import EmbyNotifyPanel from "../components/EmbyNotifyPanel";
 import {
   IconAlert,
@@ -1211,6 +1212,9 @@ export default function Settings() {
 
       {/* Emby 入库通知：下载完成后自动让 Emby 增量扫描 */}
       <EmbyNotifyPanel />
+
+      {/* 第三方平台：B站 / 抖音 / 小红书，引擎 yt-dlp */}
+      <PlatformPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
       <section className="card p-5">

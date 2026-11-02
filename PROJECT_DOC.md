@@ -384,13 +384,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.0.4` | 打 `v1.0.4` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.5` | 打 `v1.0.5` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.4
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.5
 docker compose up -d
 ```
 
@@ -554,9 +554,46 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
 | ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
+| 第三方平台 | 关 | B站 / 抖音 / 小红书 下载开关；清晰度、存放子目录、是否写 nfo；三个平台的 Cookie 加密保存 |
+| yt-dlp 路径 | 空 | 留空自动查找（镜像内置 `/usr/local/bin/yt-dlp` → PATH）；卡片上显示实际路径、来源与版本 |
 
 路径模板变量：`{date}`（按天分目录）、`{channel}`、`{name}`、`{id}`。
 带《剧名》的剧集不走模板，直接落在 `<下载根>/<剧名>/`。
+
+---
+
+## 第三方平台下载（B站 / 抖音 / 小红书，1.0.5）
+
+**为什么用 yt-dlp 而不是自己写接口**：三个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
+小红书 `x-s`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，我们只负责喂 Cookie、读进度。
+
+**代码结构**
+
+| 文件 | 职责 |
+| --- | --- |
+| `server/src/platform/detect.ts` | 纯函数：域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore）、批量拆链接、去重键 |
+| `server/src/platform/ytdlp.ts` | 定位二进制与 `--version` 探测、Cookie → Netscape cookies.txt、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、错误中文化 |
+| `server/src/platform/jobs.ts` | 解析后写 `downloads`（`source='platform'`）、目录规划、去重与失败复用 |
+| `server/src/routes/platform.ts` | `GET /api/platform/status`、`POST /probe`、`POST /task`、`POST /refresh` |
+| `server/src/tg/downloader.ts` | `run()` 开头按 `row.source` 分流到 `runPlatform()`，其余（暂停/停止/重试/收尾）完全复用 |
+
+**关键决策**
+
+- **任务复用 downloads 表**：`channel_id` 指向保留频道「第三方链接」（`ensurePlatformChannel()`，`enabled=0` 不参与扫描），
+  列表、统计、暂停/停止/重试、Emby 收尾全部现成。
+- **进度**：`--progress-template "download:@@TGSUB %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.speed)s"`，
+  yt-dlp 自带进度条格式随版本变，自定义模板才稳定。
+- **中断**：暂停/停止调用 `AbortController.abort()` → SIGTERM，2 秒后 SIGKILL；随后清理 `.part` / `.ytdl` 残片。
+- **Cookie**：与 session 同级加密（`setPlatformCookie` / `getPlatformCookie`），不进 AppSettings，
+  接口只回「N 项，首项 <name>」。传空字符串 = 清除，传掩码 = 不变。
+- **扩展名**：由 yt-dlp 决定（mkv/webm 都可能），下载完成后回填 `save_name` / `file_name`。
+- **目录**：`<platform_dir>/<平台>/<作者>/<标题> [ID]/`，每条视频一个目录，避免 `tvshow.nfo` 互相覆盖。
+
+**镜像**：`Dockerfile` 按 `TARGETARCH` 下载 `yt-dlp_linux` / `yt-dlp_linux_aarch64` 到 `/usr/local/bin/yt-dlp`，
+用 node 的 fetch 下载（不额外装 curl），失败即构建失败；`--build-arg INSTALL_YTDLP=0` 可跳过。
+
+**自检**：`platformChecks()` 11 项（链接识别、冒充域名、中文标点、去重、Cookie 格式、画质映射、错误文案），
+全部是纯函数，不依赖网络与二进制。
 
 ---
 
@@ -789,14 +826,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.4
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.5
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.4 && git push origin v1.0.4    # 发布 v1.0.4 / latest 两个标签
+git tag v1.0.5 && git push origin v1.0.5    # 发布 v1.0.5 / latest 两个标签
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

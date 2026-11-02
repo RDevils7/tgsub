@@ -15,6 +15,11 @@ import type {
   CacheStats,
   BotTestResult,
   FfmpegStatus,
+  PlatformId,
+  PlatformProbe,
+  PlatformStatus,
+  PlatformTask,
+  YtdlpInfo,
   NetProbeReport,
   ProxyStatus,
   MetadataDetail,
@@ -151,11 +156,32 @@ export const api = {
     request<{ ok: boolean; count: number; scope: string }>(`/messages?scope=${scope}`, { method: "DELETE" }),
 
   settings: () => request<SettingsResponse>("/settings"),
-  saveSettings: (patch: Partial<AppSettings> & { bot_token?: string; emby_api_key?: string }) =>
+  saveSettings: (
+    patch: Partial<AppSettings> & {
+      bot_token?: string;
+      emby_api_key?: string;
+      platform_cookie_bilibili?: string;
+      platform_cookie_douyin?: string;
+      platform_cookie_xiaohongshu?: string;
+    },
+  ) =>
     request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState; emby?: { apiKeySet: boolean; apiKeyHint: string | null } }>("/settings", {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+
+  /* ------------------------------ 第三方平台 ------------------------------ */
+  platformStatus: () => request<PlatformStatus>("/platform/status"),
+  /** 只解析不下载 */
+  platformProbe: (url: string) =>
+    request<{ platform: PlatformId; label: string; probe: PlatformProbe }>("/platform/probe", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  /** 解析并入队 */
+  platformTask: (url: string) =>
+    request<PlatformTask>("/platform/task", { method: "POST", body: JSON.stringify({ url }) }),
+  platformRefresh: () => request<{ ytdlp: YtdlpInfo }>("/platform/refresh", { method: "POST" }),
 
   /* ------------------------------ Emby 入库 ------------------------------ */
   embyStatus: () => request<EmbyStatus>("/emby/status"),

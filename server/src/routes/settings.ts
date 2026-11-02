@@ -1,5 +1,15 @@
 import { Router } from "express";
-import { db, getEmbyKeyHint, getSession, getSettings, setBotToken, setEmbyApiKey, updateSettings } from "../db";
+import {
+  db,
+  getEmbyKeyHint,
+  getPlatformCookieHint,
+  getSession,
+  getSettings,
+  setBotToken,
+  setEmbyApiKey,
+  setPlatformCookie,
+  updateSettings,
+} from "../db";
 import { env } from "../env";
 import { disconnectClient } from "../tg/client";
 import { getBotState, restartBot } from "../tg/bot";
@@ -7,13 +17,26 @@ import { getBuiltinApp } from "../tg/credentials";
 import { normalizeEmbyUrl } from "../tg/embyapi";
 import { normalizeProxyUrl } from "../lib/netprobe";
 import { withLiveProgress } from "../tg/downloader";
-import { AppSettings, Download } from "../types";
+import { AppSettings, Download, PlatformId } from "../types";
 import { asyncHandler, clampInt } from "../lib/http";
 import { APP_VERSION } from "../version";
+import { ytdlpInfo, clearYtdlpCache } from "../platform/ytdlp";
 
 export const settingsRouter = Router();
 
 const MASK = "••••••••";
+
+const PLATFORMS: PlatformId[] = ["bilibili", "douyin", "xiaohongshu"];
+
+/** 设置页要的第三方平台状态：Cookie 只回「有没有配」，yt-dlp 回版本与来源 */
+async function platformSnapshot(): Promise<{
+  cookies: Record<string, { set: boolean; hint: string | null }>;
+  ytdlp: Awaited<ReturnType<typeof ytdlpInfo>>;
+}> {
+  const cookies: Record<string, { set: boolean; hint: string | null }> = {};
+  for (const id of PLATFORMS) cookies[id] = getPlatformCookieHint(id);
+  return { cookies, ytdlp: await ytdlpInfo() };
+}
 
 settingsRouter.get(
   "/",
@@ -37,6 +60,7 @@ settingsRouter.get(
       paths: { dataDir: env.dataDir, downloadDir: env.downloadDir, dbFile: env.dbFile },
       version: APP_VERSION,
       bot: getBotState(),
+      platform: await platformSnapshot(),
     });
   }),
 );
@@ -113,6 +137,32 @@ settingsRouter.put(
         .join("\n");
     }
 
+    /* 第三方平台（B站 / 抖音 / 小红书） */
+    if (body.platform_enabled !== undefined) patch.platform_enabled = Boolean(body.platform_enabled);
+    if (typeof body.ytdlp_path === "string") patch.ytdlp_path = body.ytdlp_path.trim();
+    if (typeof body.platform_quality === "string") {
+      const quality = body.platform_quality.trim().toLowerCase();
+      patch.platform_quality = ["best", "1080", "720", "480"].includes(quality)
+        ? quality
+        : current.platform_quality;
+    }
+    if (typeof body.platform_dir === "string") {
+      // 只允许一级目录名：去掉分隔符，避免填成 ../../etc
+      const dir = body.platform_dir
+        .trim()
+        .replace(/[\\/]+/g, "")
+        .replace(/^\.+/, "")
+        .slice(0, 40);
+      patch.platform_dir = dir || "第三方";
+    }
+    if (body.platform_meta !== undefined) patch.platform_meta = Boolean(body.platform_meta);
+
+    // Cookie 和 session 同级：加密落盘。传掩码 = 不改，传空字符串 = 清除
+    for (const id of PLATFORMS) {
+      const value = body[`platform_cookie_${id}`];
+      if (typeof value === "string" && value !== MASK) setPlatformCookie(id, value);
+    }
+
     // Emby API Key 和 bot token 一样单独加密落盘；传空字符串 = 清除，传掩码 = 保持不变
     if (typeof body.emby_api_key === "string" && body.emby_api_key !== MASK) {
       setEmbyApiKey(body.emby_api_key);
@@ -125,6 +175,9 @@ settingsRouter.put(
 
     const before = { ...current };
     const next = updateSettings(patch);
+
+    // 换了 yt-dlp 路径要重新探测，否则界面还显示旧的「未安装」
+    if (before.ytdlp_path !== next.ytdlp_path) clearYtdlpCache();
 
     if (
       before.api_id !== next.api_id ||
@@ -160,6 +213,7 @@ settingsRouter.put(
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
       emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
       bot: getBotState(),
+      platform: await platformSnapshot(),
     });
   }),
 );

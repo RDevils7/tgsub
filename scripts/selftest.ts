@@ -1120,6 +1120,122 @@ function cacheChecks(): void {
   });
 }
 
+console.log("\n第三方平台：链接识别、Cookie 与 yt-dlp 参数");
+
+/**
+ * B站 / 抖音 / 小红书 的链接识别与 yt-dlp 参数拼装。
+ *
+ * 这些平台最容易出问题的地方是「链接认错了」和「Cookie 拼错了」，
+ * 所以这里全部用纯函数验证，不依赖网络与二进制。
+ */
+async function platformChecks(): Promise<void> {
+  const { parsePlatformLink, detectPlatform, splitPlatformLinks, hasPlatformLink } = await import(
+    "../server/src/platform/detect"
+  );
+  const { cookieToNetscape, formatSelector, explainYtdlpError } = await import(
+    "../server/src/platform/ytdlp"
+  );
+
+  check("B站长链接认出 BV 号", () => {
+    const link = parsePlatformLink("https://www.bilibili.com/video/BV1xx411c7mD?p=2&t=10");
+    assert.equal(link?.platform, "bilibili");
+    assert.equal(link?.id, "BV1xx411c7mD");
+    // p 参数必须保留（分P），否则会下错集
+    assert.ok(link?.url.includes("p=2"));
+  });
+
+  check("B站 av 号与番剧 ep 号", () => {
+    assert.equal(parsePlatformLink("https://www.bilibili.com/video/av170001")?.id, "av170001");
+    assert.equal(parsePlatformLink("https://www.bilibili.com/bangumi/play/ep123456")?.id, "ep123456");
+  });
+
+  check("B站短链认不出 ID 但平台认得对", () => {
+    const link = parsePlatformLink("https://b23.tv/abcd123");
+    assert.equal(link?.platform, "bilibili");
+    assert.equal(link?.id, null);
+    assert.ok(link?.key.includes("b23.tv"));
+  });
+
+  check("抖音长链 / 分享链 / 短链", () => {
+    assert.equal(parsePlatformLink("https://www.douyin.com/video/7300000000000000000")?.id, "7300000000000000000");
+    assert.equal(
+      parsePlatformLink("https://www.iesdouyin.com/share/video/7300000000000000000/")?.id,
+      "7300000000000000000",
+    );
+    const short = parsePlatformLink("https://v.douyin.com/iRxAbCd/");
+    assert.equal(short?.platform, "douyin");
+    assert.equal(short?.id, null);
+  });
+
+  check("小红书笔记链接与短链", () => {
+    assert.equal(
+      parsePlatformLink("https://www.xiaohongshu.com/explore/64f0c2b1000000001e02a3b4?xsec_token=abc")?.id,
+      "64f0c2b1000000001e02a3b4",
+    );
+    const short = parsePlatformLink("http://xhslink.com/a/AbCdEf");
+    assert.equal(short?.platform, "xiaohongshu");
+  });
+
+  check("别的站不接", () => {
+    assert.equal(detectPlatform("https://www.youtube.com/watch?v=abc"), null);
+    assert.equal(detectPlatform("https://t.me/asc2256/10500"), null);
+    // 冒充域名：notbilibili.com 不是 B站
+    assert.equal(detectPlatform("https://notbilibili.com/video/BV1xx411c7mD"), null);
+    assert.equal(parsePlatformLink("随便一段话"), null);
+  });
+
+  check("中文标点被清掉，混排文字里能挑出链接", () => {
+    const link = parsePlatformLink("https://www.bilibili.com/video/BV1xx411c7mD，");
+    assert.equal(link?.id, "BV1xx411c7mD");
+    const list = splitPlatformLinks(
+      "看这个 https://www.bilibili.com/video/BV1xx411c7mD 还有 https://v.douyin.com/iRxAbCd/ 挺好",
+    );
+    assert.equal(list.length, 2);
+    assert.equal(list[0].platform, "bilibili");
+    assert.equal(list[1].platform, "douyin");
+    assert.equal(hasPlatformLink("只有一句话"), false);
+  });
+
+  check("同一段文字里重复链接只算一次", () => {
+    const list = splitPlatformLinks(
+      "https://www.bilibili.com/video/BV1xx411c7mD https://www.bilibili.com/video/BV1xx411c7mD?spm=1",
+    );
+    assert.equal(list.length, 1);
+  });
+
+  check("Cookie 转 Netscape 格式", () => {
+    const text = cookieToNetscape("SESSDATA=abc%2C123; bili_jct=xyz; 空项; =bad", "bilibili");
+    const lines = text.split("\n").filter((line) => line && !line.startsWith("#"));
+    assert.equal(lines.length, 2, "只有两个有效 k=v");
+    assert.ok(lines[0].startsWith(".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tabc%2C123"));
+    // 值里带 = 时只按第一个 = 切分
+    assert.ok(lines[1].endsWith("\tbili_jct\txyz"));
+    const douyin = cookieToNetscape("ttwid=1", "douyin");
+    assert.ok(douyin.includes(".douyin.com"));
+  });
+
+  check("画质映射成 yt-dlp 的格式串", () => {
+    assert.equal(formatSelector("best"), "bv*+ba/b");
+    assert.equal(formatSelector(""), "bv*+ba/b");
+    assert.equal(formatSelector("1080"), "bv*[height<=1080]+ba/b[height<=1080]/b");
+    assert.equal(formatSelector("720p"), "bv*[height<=720]+ba/b[height<=720]/b");
+    // 脏数据不能把 -f 变成非法参数
+    assert.equal(formatSelector("超清"), "bv*+ba/b");
+  });
+
+  check("yt-dlp 报错翻成能照做的中文", () => {
+    const login = explainYtdlpError("ERROR: [Douyin] xxx: Fresh cookies (not yet expired) are needed", "douyin");
+    assert.ok(login.includes("Cookie"), "应提示去填 Cookie");
+    const risk = explainYtdlpError("ERROR: [BiliBili] xxx: HTTP Error 412: Precondition Failed", "bilibili");
+    assert.ok(risk.includes("风控"));
+    const fmt = explainYtdlpError("ERROR: Requested format is not available", "xiaohongshu");
+    assert.ok(fmt.includes("画质"));
+    // 认不出的错误原样带出来，不要吞掉
+    const other = explainYtdlpError("ERROR: 某个没见过的错误", "bilibili");
+    assert.ok(other.includes("某个没见过的错误"));
+  });
+}
+
 console.log("\n网络与代理：地址解析");
 
 function proxyChecks(): void {
@@ -1211,6 +1327,7 @@ async function main(): Promise<void> {
     ["Emby 入库用例", () => embyNotifyChecks()],
     ["缓存清理用例", () => cacheChecks()],
     ["网络代理用例", () => proxyChecks()],
+    ["第三方平台用例", () => platformChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
   ];
   for (const [name, run] of suites) {

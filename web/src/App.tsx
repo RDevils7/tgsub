@@ -58,7 +58,7 @@ const TITLES: Record<PageKey, { title: string; desc: string }> = {
   channels: { title: "频道", desc: "管理需要定时扫描的 Telegram 频道" },
   subscriptions: { title: "订阅关键词", desc: "命中关键词后自动下载整条消息的文件" },
   monitor: { title: "监控历史", desc: "每条被扫描到的消息及其命中结果，可追溯到原消息" },
-  manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接，直接下载，不用等关键词命中" },
+  manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接或 B站 / 抖音 / 小红书 链接，直接下载" },
   downloads: { title: "下载记录", desc: "查看、重试与导出已抓取的文件" },
   metadata: { title: "元数据", desc: "编辑已下载视频的 NFO 与封面，可从视频截图" },
   logs: { title: "日志", desc: "服务运行日志，排障时最先该看的地方" },

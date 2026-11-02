@@ -238,7 +238,70 @@ export interface AppSettings {
   ffmpeg_path: string;
   /** 缓存目录（covers + frames）上限，单位 MB；0 = 不限制也不自动清理 */
   cache_limit_mb: number;
+  /** 第三方平台（B站 / 抖音 / 小红书）下载开关 */
+  platform_enabled: boolean;
+  /** yt-dlp 路径，留空自动查找（镜像内置 → PATH） */
+  ytdlp_path: string;
+  /** 清晰度上限：best / 1080 / 720 / 480 */
+  platform_quality: string;
+  /** 第三方视频存放的子目录名 */
+  platform_dir: string;
+  /** 第三方视频也写 nfo + 封面 */
+  platform_meta: boolean;
   has_session?: boolean;
+}
+
+/* ------------------------------ 第三方平台 ------------------------------ */
+
+export type PlatformId = "bilibili" | "douyin" | "xiaohongshu";
+
+export interface YtdlpInfo {
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  source: "custom" | "bundled" | "path" | null;
+  error: string | null;
+}
+
+export interface PlatformCookieState {
+  set: boolean;
+  hint: string | null;
+}
+
+export interface PlatformStatus {
+  enabled: boolean;
+  quality: string;
+  dir: string;
+  root: string;
+  meta: boolean;
+  ytdlp: YtdlpInfo;
+  platforms: Array<{ id: PlatformId; label: string; cookieSet: boolean; cookieHint: string | null }>;
+}
+
+export interface PlatformProbe {
+  platform: PlatformId;
+  id: string;
+  title: string;
+  uploader: string;
+  duration: number | null;
+  thumbnail: string | null;
+  description: string;
+  uploadedAt: number | null;
+  webpageUrl: string;
+  filesize: number | null;
+}
+
+export interface PlatformTask {
+  platform: PlatformId;
+  url: string;
+  id: string | null;
+  title: string;
+  uploader: string;
+  duration: number | null;
+  taskId: number | null;
+  existing: boolean;
+  saveDir: string;
+  filesize: number | null;
 }
 
 /* ------------------------------ 缓存 ------------------------------ */
@@ -298,6 +361,11 @@ export interface SettingsResponse {
   bot?: BotState;
   /** Emby API Key 只回掩码 */
   emby?: { apiKeySet: boolean; apiKeyHint: string | null };
+  /** 第三方平台：Cookie 状态 + yt-dlp 版本 */
+  platform?: {
+    cookies: Record<string, PlatformCookieState>;
+    ytdlp: YtdlpInfo;
+  };
 }
 
 /* ------------------------------ 网络与代理 ------------------------------ */

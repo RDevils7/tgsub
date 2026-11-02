@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { env } from "./env";
 import { logger } from "./logger";
-import { AppSettings, DEFAULT_SETTINGS } from "./types";
+import { AppSettings, DEFAULT_SETTINGS, PlatformId } from "./types";
 
 export const db = new Database(env.dbFile);
 db.pragma("journal_mode = WAL");
@@ -151,6 +151,10 @@ ensureColumn("downloads", "emby_json", "TEXT");
 // 下载进度明细：已下载字节数 + 实际开始时间
 ensureColumn("downloads", "downloaded_bytes", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("downloads", "started_at", "INTEGER");
+// 任务来源：telegram = gramjs 下载频道媒体；platform = yt-dlp 下载第三方链接
+ensureColumn("downloads", "source", "TEXT NOT NULL DEFAULT 'telegram'");
+// 第三方任务的原链接（重试、去重、日志定位都靠它）
+ensureColumn("downloads", "source_url", "TEXT");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 
@@ -459,4 +463,63 @@ export function getEmbyKeyHint(): { set: boolean; hint: string | null } {
   const key = getEmbyApiKey();
   if (!key) return { set: false, hint: null };
   return { set: true, hint: key.length <= 6 ? "••••" : `••••${key.slice(-4)}` };
+}
+
+/* ------------------------------------------------------------------ */
+/* 第三方平台 Cookie：B站 / 抖音 / 小红书                                */
+/*                                                                     */
+/* Cookie 等同于登录态，和 session 一个级别：加密落盘、不放进            */
+/* AppSettings、接口只回「有没有配 + 末四位」。                           */
+/* ------------------------------------------------------------------ */
+
+const PLATFORM_COOKIE_KEY: Record<PlatformId, string> = {
+  bilibili: "platform_cookie_bilibili",
+  douyin: "platform_cookie_douyin",
+  xiaohongshu: "platform_cookie_xiaohongshu",
+};
+
+export function getPlatformCookie(platform: PlatformId): string {
+  const raw = getSetting(PLATFORM_COOKIE_KEY[platform]);
+  if (!raw) return "";
+  try {
+    return decryptSecret(raw);
+  } catch {
+    logger.warn({ platform }, "无法解密平台 Cookie，可能 SESSION_SECRET 已变更");
+    return "";
+  }
+}
+
+export function setPlatformCookie(platform: PlatformId, cookie: string): void {
+  const value = cookie.trim();
+  setSetting(PLATFORM_COOKIE_KEY[platform], value ? encryptSecret(value) : "");
+}
+
+export function getPlatformCookieHint(platform: PlatformId): { set: boolean; hint: string | null } {
+  const cookie = getPlatformCookie(platform);
+  if (!cookie) return { set: false, hint: null };
+  // Cookie 是一长串 k=v，末四位通常没意义，改成显示「条目数 + 首段名字」更有辨识度
+  const pairs = cookie.split(";").map((s) => s.trim()).filter(Boolean);
+  const first = pairs[0]?.split("=")[0] ?? "";
+  return { set: true, hint: `${pairs.length} 项${first ? `，首项 ${first}` : ""}` };
+}
+
+/* ------------------------------------------------------------------ */
+/* 第三方链接任务挂在保留频道下，复用下载队列与列表，但不参与定时扫描    */
+/* ------------------------------------------------------------------ */
+
+export const PLATFORM_CHANNEL_TITLE = "第三方链接";
+
+/** 取（必要时创建）第三方平台的保留频道 id */
+export function ensurePlatformChannel(): number {
+  const row = db
+    .prepare("SELECT id FROM channels WHERE title = ? AND tg_id IS NULL")
+    .get(PLATFORM_CHANNEL_TITLE) as { id: number } | undefined;
+  if (row) return row.id;
+  const res = db
+    .prepare(
+      "INSERT INTO channels(tg_id, username, title, enabled, last_scanned_id, created_at) VALUES(NULL, NULL, ?, 0, 0, ?)",
+    )
+    .run(PLATFORM_CHANNEL_TITLE, Date.now());
+  logger.info({ id: Number(res.lastInsertRowid) }, "已创建第三方链接保留频道");
+  return Number(res.lastInsertRowid);
 }

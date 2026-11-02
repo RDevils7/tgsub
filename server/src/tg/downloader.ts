@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { db, getSettings } from "../db";
+import { db, getPlatformCookie, getSettings } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
 import { Download } from "../types";
@@ -11,6 +11,8 @@ import { channelEntityKey } from "./entity";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 import { queueEmbyUpdate } from "./embyapi";
 import { requestCacheTrim } from "../cache";
+import { parsePlatformLink } from "../platform/detect";
+import { downloadPlatform, platformName } from "../platform/ytdlp";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -105,6 +107,8 @@ class DownloadQueue {
   private priority = new Set<number>();
   /** 插队后需要「让位」的任务重新排队时要插到它后面 */
   private jumpTarget: number | null = null;
+  /** 第三方任务（yt-dlp）的中断句柄：暂停/停止时 abort 子进程 */
+  private platformAbort = new Map<number, AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
 
@@ -158,6 +162,8 @@ class DownloadQueue {
     if (!row) return false;
     if (row.status === "downloading") {
       this.cancelIntent.set(id, "pause");
+      // 第三方任务没有「下一块数据」可等，直接掐子进程
+      this.platformAbort.get(id)?.abort();
       return true;
     }
     if (row.status !== "queued") return false;
@@ -176,6 +182,7 @@ class DownloadQueue {
     if (!row) return false;
     if (row.status === "downloading") {
       this.cancelIntent.set(id, "stop");
+      this.platformAbort.get(id)?.abort();
       return true;
     }
     if (row.status !== "queued" && row.status !== "paused") return false;
@@ -365,6 +372,11 @@ class DownloadQueue {
   private async run(id: number): Promise<void> {
     const row = stmtGet.get(id);
     if (!row || row.status !== "queued") return;
+    // 第三方链接（B站/抖音/小红书）走 yt-dlp，其余逻辑（暂停/停止/重试/收尾）照旧
+    if (row.source === "platform") {
+      await this.runPlatform(id, row);
+      return;
+    }
 
     const startedAt = Date.now();
     stmtSetStatus.run(startedAt, id);
@@ -561,6 +573,147 @@ class DownloadQueue {
         await finalizeMedia(fallback, row.emby_json);
       }
     }
+  }
+
+  /**
+   * 第三方平台任务：委托 yt-dlp 下载，进度/暂停/重试与 Telegram 任务共用一套状态机。
+   *
+   * 与 gramjs 的差别只有两处：
+   *   1. 进度来自子进程 stdout 的自定义 progress-template；
+   *   2. 中断靠 AbortController 杀进程，中断后要清掉 yt-dlp 留下的 .part 残片。
+   */
+  private async runPlatform(id: number, row: Download): Promise<void> {
+    const startedAt = Date.now();
+    stmtSetStatus.run(startedAt, id);
+    this.live.set(id, {
+      startedAt,
+      downloaded: 0,
+      total: row.file_size,
+      speed: 0,
+      lastAt: startedAt,
+      lastBytes: 0,
+    });
+
+    const meta = decodeMeta(row.emby_json);
+    const label = meta ? describeMeta(meta) : row.file_name;
+    const link = row.source_url ? parsePlatformLink(row.source_url) : null;
+    const dir = path.join(env.downloadDir, row.save_dir ?? "");
+    const logContext = {
+      id,
+      platform: link ? platformName(link.platform) : null,
+      series: meta?.series ?? null,
+      url: row.source_url ?? null,
+    };
+
+    const controller = new AbortController();
+    this.platformAbort.set(id, controller);
+
+    try {
+      if (!link) throw new Error("原链接无法识别，可能是短链已失效");
+      const settings = getSettings();
+      const cookie = getPlatformCookie(link.platform);
+
+      const result = await downloadPlatform(link.url, {
+        platform: link.platform,
+        cookie,
+        dir,
+        quality: settings.platform_quality,
+        signal: controller.signal,
+        onProgress: (downloaded, total, speed) => {
+          const now = Date.now();
+          const live = this.live.get(id);
+          if (live) {
+            live.downloaded = downloaded;
+            if (total > 0) live.total = total;
+            // yt-dlp 直接给瞬时速度，仍然做一次平滑，避免界面数字乱跳
+            live.speed = live.speed > 0 ? live.speed * 0.6 + speed * 0.4 : speed;
+            live.lastAt = now;
+            live.lastBytes = downloaded;
+          }
+          if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
+          this.lastProgressAt.set(id, now);
+          const t = total > 0 ? total : row.file_size;
+          const pct = t > 0 ? Math.min(99, Math.round((downloaded / t) * 100)) : 0;
+          stmtProgress.run(pct, downloaded, id);
+        },
+      });
+
+      const stat = await fs.promises.stat(result.file);
+      if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
+      stmtDone.run(stat.size, result.file, stat.size, Date.now(), id);
+      // yt-dlp 决定扩展名，回填真实文件名，列表与日志才不会显示成 .mp4
+      db.prepare("UPDATE downloads SET save_name = ?, file_name = ? WHERE id = ?").run(
+        path.basename(result.file),
+        path.basename(result.file),
+        id,
+      );
+      this.attempts.delete(id);
+      logger.info(
+        { ...logContext, file: relPathOf(result.file), size: stat.size },
+        `下载完成：${label} → ${relPathOf(result.file)}（${humanSize(stat.size)}）`,
+      );
+
+      if (getSettings().platform_meta) {
+        await finalizeMedia(result.file, row.emby_json);
+      }
+      queueEmbyUpdate(result.file, "Created");
+      requestCacheTrim();
+    } catch (err) {
+      // 用户点了暂停/停止：不是失败，别计入重试次数
+      if (controller.signal.aborted) {
+        await removePartialFiles(dir);
+        await this.applyCancel(id, this.cancelIntent.get(id) ?? "stop", row, null);
+        return;
+      }
+      const message = (err as Error)?.message || "下载失败";
+      const tried = this.attempts.get(id) ?? 0;
+      await removePartialFiles(dir);
+
+      if (tried < MAX_AUTO_RETRY) {
+        this.attempts.set(id, tried + 1);
+        logger.warn(
+          { ...logContext, err: message, attempt: tried + 1 },
+          `下载失败，稍后重试：${label}（${message}）`,
+        );
+        db.prepare(
+          "UPDATE downloads SET status = 'queued', progress = 0, downloaded_bytes = 0, started_at = NULL WHERE id = ?",
+        ).run(id);
+        setTimeout(() => {
+          if (!this.queue.includes(id)) this.queue.push(id);
+          this.pump();
+        }, 5000);
+        return;
+      }
+
+      const hint =
+        /Cookie|Cookie 过期|要求登录|风控/.test(message)
+          ? "（到设置 → 第三方平台更新 Cookie 后可点重试）"
+          : "";
+      stmtFail.run(`${message}${hint}`.slice(0, 500), Date.now(), id);
+      logger.error({ ...logContext, err: message }, `下载失败：${label}（${message}）`);
+    } finally {
+      this.platformAbort.delete(id);
+    }
+  }
+}
+
+/**
+ * 清掉 yt-dlp 中断后留下的残片。
+ *
+ * `.part` 是它自己的断点文件；`.part-Frag*` 是分片下载（抖音/小红书常见）。
+ * 保留这些文件没有意义 —— 我们的「继续」是重新 probe 再下，不是 yt-dlp 的续传。
+ */
+async function removePartialFiles(dir: string): Promise<void> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!/\.(part|ytdl)(-Frag\d+)?$/i.test(entry.name)) continue;
+    await fs.promises.unlink(path.join(dir, entry.name)).catch(() => undefined);
   }
 }
 
