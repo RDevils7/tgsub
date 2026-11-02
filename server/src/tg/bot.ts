@@ -43,6 +43,17 @@ let lastError: string | null = null;
 let startedAt: number | null = null;
 let identity: { username: string | null; userId: string | null } = { username: null, userId: null };
 
+/**
+ * 转发相册去重：把一条相册转发当成「一组」只下一次。
+ *
+ * 转发相册（grouped）时 gramjs 会把相册拆成多条 incoming 消息，每条都带同一个
+ * `groupedId`、但 `fwdFrom.channelPost` 各不相同。机器人若对每条都跑一次下载，
+ * 而 `fetchMessageGroup` 每次都会把整组重新捞回，就会出现「N 条正在解析 + 整组被
+ * 重复下载 N 次」。这里按 `频道ID:groupedId` 记一笔、短时间内只认第一条，其余静默跳过。
+ */
+const seenForwardAlbums = new Map<string, number>();
+const FORWARD_ALBUM_TTL = 60_000;
+
 /** gramjs 内置 DC 地址表（TCP 80 端口，Node 端默认走 TCPFull） */
 const DC_IP: Record<number, string> = {
   1: "149.154.175.53",
@@ -1056,6 +1067,15 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
     const fwdMessageId = fwd?.channelPost ?? null;
     if (fwdChannelId && fwdMessageId) {
       const includeImages = imageModeOn(userId);
+      // 相册（grouped）转发会被 gramjs 拆成多条消息、每条都带同一个 groupedId：
+      // 只认第一条，避免整组被重复解析 / 下载 N 次（N = 相册内媒体数）。
+      const gid = (msg as unknown as { groupedId?: unknown }).groupedId;
+      if (gid != null) {
+        const now = Date.now();
+        for (const [k, t] of seenForwardAlbums) if (now - t > FORWARD_ALBUM_TTL) seenForwardAlbums.delete(k);
+        if (seenForwardAlbums.has(`${fwdChannelId}:${String(gid)}`)) return;
+        seenForwardAlbums.set(`${fwdChannelId}:${String(gid)}`, now);
+      }
       await sendText(currentBot, peer, "📨 收到转发的频道消息，正在解析…");
       try {
         await sendText(
