@@ -25,6 +25,10 @@ const K_CHECK_AT = "ytdlp_check_at";
 const K_LATEST = "ytdlp_latest";
 const K_UPDATED_AT = "ytdlp_updated_at";
 const K_ERROR = "ytdlp_check_error";
+/** 上次失败后的重试时间：失败不该把整个检查周期等满 24 小时 */
+const K_RETRY_AT = "ytdlp_retry_at";
+
+const RETRY_DELAY_MS = 30 * 60_000;
 
 export interface EngineUpdateState {
   /** 当前生效的版本 */
@@ -161,6 +165,7 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       setSetting(K_CHECK_AT, String(Date.now()));
       setSetting(K_LATEST, latest);
       setSetting(K_ERROR, "");
+      setSetting(K_RETRY_AT, "");
 
       const currentRank = versionRank(from);
       const latestRank = versionRank(latest);
@@ -171,6 +176,8 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       const target = localBinaryPath();
       const tmp = `${target}.download`;
       await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      // 上次被强杀留下的半截文件：先删掉，免得占着空间还让人误会
+      await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
       progress = 0;
       const url = `${RELEASE_DL}/${latest}/${assetName()}`;
       logger.info({ from, to: latest, url }, "开始下载新版 yt-dlp");
@@ -199,11 +206,15 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       return { ok: true, updated: true, from, to: after.version ?? verified, error: null };
     } catch (err) {
       const message = (err as Error).message || String(err);
-      // 没配代理时最常见的其实就是「连不上 GitHub」，把该动的地方说清楚
-      const hint = /连接|超时|解析|TLS|拒绝|不可达|ETIMEDOUT|ENOTFOUND/i.test(message)
-        ? `${message}（检查更新需要访问 GitHub，可在「第三方平台代理」里填代理后重试）`
-        : message;
+      // 两类常见失败：连不上 GitHub（没配代理），和 data/bin 不可写（属主不对）
+      let hint = message;
+      if (/EACCES|EPERM|permission denied/i.test(message)) {
+        hint = `${message}（data/bin 不可写：容器内运行用户的 uid 需与 data 目录属主一致，见 README 的 PUID/PGID）`;
+      } else if (/连接|超时|解析|TLS|拒绝|不可达|ETIMEDOUT|ENOTFOUND/i.test(message)) {
+        hint = `${message}（检查更新需要访问 GitHub，可在「第三方平台代理」里填代理后重试）`;
+      }
       setSetting(K_ERROR, hint);
+      setSetting(K_RETRY_AT, String(Date.now() + RETRY_DELAY_MS));
       logger.warn({ err: message }, "yt-dlp 检查更新失败");
       return { ok: false, updated: false, from, to: null, error: hint };
     } finally {
@@ -248,8 +259,12 @@ const TICK_MS = 60 * 60 * 1000; // 每小时醒一次，实际间隔看设置
 function dueForCheck(): boolean {
   const settings = getSettings();
   if (!settings.ytdlp_auto_update) return false;
+  // 上次失败了：等重试时间到了就再试，不用把整个周期等满
+  const retryAt = readNumber(K_RETRY_AT);
+  if (retryAt && Date.now() < retryAt) return false;
   const at = readNumber(K_CHECK_AT);
   if (!at) return true;
+  if (retryAt) return true;
   const hours = Math.max(1, settings.ytdlp_check_hours || 24);
   return Date.now() - at >= hours * 3600_000;
 }
