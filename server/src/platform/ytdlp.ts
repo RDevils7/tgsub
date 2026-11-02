@@ -442,7 +442,7 @@ export async function probePlatform(
 
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.0 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.1 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const first = await dumpJson(info, platform, cookie, ["--flat-playlist", "--playlist-end", String(PLAYLIST_LIMIT)], url);
@@ -493,6 +493,16 @@ export interface PlatformDownloadResult {
 const PROGRESS_TAG = "@@TGSUB";
 
 /**
+ * 允许的合并容器，按优先级用 `/` 分隔。
+ *
+ * 写死 mp4 时，YouTube 的 VP9/AV1 视频 + Opus 音频会在合并阶段直接失败
+ * （ffmpeg: Could not find tag for codec opus in stream #1），
+ * 而 Opus 塞进 mp4 需要 `-strict -2`，不是所有 ffmpeg 构建都放行。
+ * 交给 yt-dlp 按编码挑：能 mp4 就 mp4（Emby 直读最省事），不兼容自动落 mkv。
+ */
+export const MERGE_CONTAINERS = "mp4/mkv";
+
+/**
  * 下载一条链接到 dir，返回最终文件绝对路径。
  *
  * 进度靠 `--progress-template`：yt-dlp 默认那套进度条格式随版本变，
@@ -504,7 +514,7 @@ export async function downloadPlatform(
 ): Promise<PlatformDownloadResult> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.0 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.1 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const ffmpeg = await ffmpegInfo().catch(() => null);
@@ -516,17 +526,23 @@ export async function downloadPlatform(
     "--no-warnings",
     "--newline",
     "--no-mtime",
+    // 代理经常在长连接上被掐断（SSL EOF），默认 3 次根本不够；
+    // 重试之间稍等一下，让代理先把连接恢复过来
     "--retries",
-    "3",
+    "10",
     "--fragment-retries",
+    "10",
+    "--retry-sleep",
     "3",
     "--socket-timeout",
-    "20",
+    "30",
     ...platformArgs(opts.platform, info.version),
     "-f",
     formatSelector(opts.quality),
+    // 只允许 mp4 会把 YouTube 常见的「VP9/AV1 + Opus」卡死在合并阶段
+    // （ffmpeg 报 Could not find tag for codec opus），给一个 mkv 兜底
     "--merge-output-format",
-    "mp4",
+    MERGE_CONTAINERS,
     "-P",
     opts.dir,
     // 标题里可能有 / 和表情：只截断长度，交给 yt-dlp 自己清理非法字符
@@ -667,14 +683,75 @@ export function explainYtdlpError(raw: string, platform: PlatformId): string {
   if (/format is not available|Requested format/i.test(text)) {
     return `该链接没有所选清晰度，把画质改成「最高」再试`;
   }
+  if (/No space left on device/i.test(text)) {
+    return "磁盘满了：清理下载目录或扩容后再试";
+  }
+  if (/Permission denied|EACCES/i.test(text)) {
+    return "写入失败：下载目录没有写权限（Docker 里把 PUID / PGID 改成目录属主 uid:gid）";
+  }
+  if (/ffmpeg (?:is )?not (?:found|installed)|Postprocessing: ffmpeg/i.test(text)) {
+    return "镜像里没有可用的 ffmpeg，无法合并音视频：确认用的是官方镜像（内置 ffmpeg），或在设置里填写 ffmpeg 路径";
+  }
+  // 代理掐长连接最典型的报错：YouTube 走多分片，被打断后重试次数不够就会直接放弃
+  if (
+    /SSL|UNEXPECTED_EOF|EOF occurred|certificate verify failed|CERTIFICATE_VERIFY_FAILED|Connection reset|Broken pipe|IncompleteRead|RemoteDisconnected|Connection aborted/i.test(
+      text,
+    )
+  ) {
+    return youtube
+      ? "下载中途 TLS 连接被中断（代理抖动或被限速）：已自动重试，仍失败就换一个更稳的代理节点，大文件避开高峰期"
+      : `${label}下载中途连接被断开：检查到 ${label} 的网络/代理是否稳定，重试一次通常能续上`;
+  }
+  // ffmpeg 合并失败：容器与编码不兼容（常见是 Opus 塞 mp4），或其中一路没下完整
+  if (
+    /Postprocessing|Could not find tag|codec not currently supported|Could not write header|Conversion failed|does not contain any stream|Invalid data found when processing|Error while opening|Error while decoding/i.test(
+      text,
+    )
+  ) {
+    return `音视频合并失败（ffmpeg）：${ffmpegReason(text)}。删掉该视频目录里的 .part / .webm / .m4a 残留再重试；反复失败请把完整日志发出来`;
+  }
   if (/Unable to download|urlopen error|timed out|Connection|Tunnel connection failed/i.test(text)) {
     return youtube
       ? "连不上 YouTube：请在「第三方平台代理」里填一个可用代理（大陆网络必须走代理）"
       : `网络连接失败：确认容器能直连 ${label}（大陆网络不需要代理）`;
   }
-  const firstError = text.split("ERROR:").pop()?.trim() || text;
-  return firstLine(firstError) || `${label}解析失败`;
+  return firstLine(pickErrorLine(text)) || `${label}解析失败`;
 }
+
+/** ffmpeg 的报错很长，挑出真正说明问题的那一行 */
+function pickErrorLine(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  const keys = [
+    /Could not find tag/i,
+    /codec not currently supported/i,
+    /Could not write header/i,
+    /Invalid data found/i,
+    /does not contain any stream/i,
+    /No space left/i,
+    /Permission denied/i,
+    /Conversion failed/i,
+    /ERROR:/i,
+  ];
+  for (const key of keys) {
+    const hit = [...lines].reverse().find((line) => key.test(line));
+    if (hit) return hit.replace(/^ERROR:\s*/i, "");
+  }
+  return lines[lines.length - 1];
+}
+
+/** 把 ffmpeg 的失败原因翻成人话 */
+function ffmpegReason(text: string): string {
+  const codec = text.match(/Could not find tag for codec (\w+)/i)?.[1];
+  if (codec) return `${codec} 编码装不进所选容器`;
+  if (/Invalid data found/i.test(text)) return "下载到的音轨/视频轨已损坏，多半是没下完整";
+  if (/does not contain any stream/i.test(text)) return "其中一路流是空的，文件没下完整";
+  return "ffmpeg 没能把音视频合并成文件";
+}
+
 
 function firstLine(text: string): string {
   const line = text.split(/\r?\n/)[0]?.trim() ?? "";

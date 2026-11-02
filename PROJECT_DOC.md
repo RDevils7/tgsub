@@ -384,13 +384,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.1.0` | 打 `v1.1.0` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.1.1` | 打 `v1.1.1` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.1.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.1.1
 docker compose up -d
 ```
 
@@ -605,6 +605,14 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   老库里若存过旧默认值 `1080`，启动时由 `migration_platform_quality_v106` 迁成 `best`，用户自选的 720/480 不动。
 - **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`。
   国内平台直连最快，YouTube 与「检查更新」必须走它；`parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
+- **下载与合并的稳定性（1.1.1）**：`--retries` / `--fragment-retries` 由 3 提到 10，
+  加 `--retry-sleep 3`，`--socket-timeout` 提到 30 —— 代理掐长连接时报
+  `[SSL: UNEXPECTED_EOF_WHILE_READING] ... Giving up after 3 retries` 的主因是重试预算太小。
+  合并容器由写死的 `mp4` 改成 `mp4/mkv`（`MERGE_CONTAINERS`）：YouTube 的 VP9/AV1 + Opus 组合
+  塞不进 mp4（ffmpeg: `Could not find tag for codec opus`），交给 yt-dlp 按编码挑，
+  不兼容自动落 mkv；能 mp4 时仍优先 mp4。`explainYtdlpError` 新增 TLS 中断、ffmpeg 合并失败
+  （从 ffmpeg 输出里挑 `Could not find tag` 等关键行，指出具体编码）、磁盘满、无写权限四类翻译，
+  不再把 `Postprocessing: Stream #1:0 -> #0:1 (copy)` 当错误抛给用户。
 - **元数据（1.1.0）**：`--dump-single-json` 里的字段直接映射到 nfo —— 标题、简介（`plot`）、UP主（`studio` + `tag`）、
   发布日期（`aired` / `premiered` / `year`）、原链接（`uniqueid type="platform"`）、分区（`categories` → `genre`）、
   时长（`duration` → `runtime`）、播放量与点赞（Emby 没有对应字段，追加在简介尾部的「播放 12.3 万 · 点赞 4567 · 时长 12:34」一行）。

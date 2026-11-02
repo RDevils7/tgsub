@@ -1132,7 +1132,7 @@ async function platformChecks(): Promise<void> {
   const { parsePlatformLink, detectPlatform, splitPlatformLinks, hasPlatformLink } = await import(
     "../server/src/platform/detect"
   );
-  const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank, playlistEntries, readPlaylist } =
+  const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank, playlistEntries, readPlaylist, MERGE_CONTAINERS } =
     await import("../server/src/platform/ytdlp");
   const { buildEpisodeNfo, decodeMeta } = await import("../server/src/tg/emby");
   const { parseCookiePairs, summarizeCookie, describeCookie, humanAge } = await import(
@@ -1292,6 +1292,21 @@ async function platformChecks(): Promise<void> {
     assert.ok(geo.includes("地区"));
     const net = explainYtdlpError("ERROR: Unable to download webpage: urlopen error timed out", "youtube");
     assert.ok(net.includes("代理"));
+    // 代理掐长连接：给出「换节点」而不是含糊的解析失败
+    const ssl = explainYtdlpError(
+      "ERROR: [download] Got error: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1085). Giving up after 3 retries",
+      "youtube",
+    );
+    assert.ok(ssl.includes("TLS") || ssl.includes("中断"), "SSL 中断要说清是连接被掐");
+    // ffmpeg 合并失败：要能指出 opus 装不进 mp4，而不是把最后一行 stream 映射丢出来
+    const merge = explainYtdlpError(
+      "ERROR: Postprocessing: Stream #1:0 -> #0:1 (copy)\n[mp4 @ 0x55] Could not find tag for codec opus in stream #1, codec not currently supported in container\nCould not write header for output file #0",
+      "youtube",
+    );
+    assert.ok(merge.includes("opus"), "应指出具体编码");
+    assert.ok(merge.includes("合并"), "应说明是合并阶段");
+    assert.ok(!merge.startsWith("Postprocessing:"), "不能把 ffmpeg 的 stream 映射当错误抛给用户");
+    assert.equal(MERGE_CONTAINERS, "mp4/mkv", "合并容器要给 mkv 兜底");
   });
 
   check("Cookie 串解析与体检", () => {

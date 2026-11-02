@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.1-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
@@ -18,14 +18,16 @@
 
 ---
 
-## 本版更新（1.1.0）
+## 本版更新（1.1.1）
 
-**一句话：第三方平台从「能下」变成「下得干净」—— 封面、元数据、合集都按平台真实信息来。**
+**一句话：修掉 1.1.0 上真实踩到的两个坑 —— YouTube 下到一半断线，以及合并阶段直接失败。**
 
-1. **平台官方封面**：不再只有视频截帧。下载完成后取回平台原始封面，按 Emby 规格裁成 `poster.jpg`（1000×1500）/ `landscape.jpg`、`fanart.jpg`（1920×1080）/ `<标题>-thumb.jpg`（1280 宽）；取图失败只记日志，自动回退截帧。
-2. **NFO 补全**：新增 `<genre>`（B站分区 / YouTube 分类）、`<runtime>`（时长），简介尾部追加「播放 12.3 万 · 点赞 4567 · 时长 12:34」；抖音 / 小红书没正文时用「标题，来自 UP主」兜底；原链接标成 `uniqueid type="platform"`。
-3. **合集 / 多P 先问再下**：粘一条合集链接不会再闷头拉几百个视频。手动下载页弹窗、机器人发内联按钮，选「只下第一个」或「全部下载 N 个」，最多展开 200 条（超出会写明只取前 200）。
-4. 承接 1.0.5–1.0.7 的全部平台能力：**分享口令直接粘贴**（`<https://b23.tv/…>`、抖音文案、`xhslink.cn`）、**默认原画质**、**Cookie 加密保存 + 状态提示 + 悬停取法说明**、**yt-dlp 版本显示与定时自动更新**、**平台独立代理**（YouTube 必须）。
+1. **合并容器不再写死 mp4**：YouTube 常见的「VP9 / AV1 视频 + Opus 音频」塞不进 mp4，ffmpeg 报 `Could not find tag for codec opus`，任务在最后一步（Postprocessing）失败。现在允许 `mp4/mkv`：能 mp4 就 mp4，编码不兼容自动落 mkv，Emby 照常识别。
+2. **断线重试 3 次 → 10 次**：代理掐长连接时的典型报错是 `[SSL: UNEXPECTED_EOF_WHILE_READING] ... Giving up after 3 retries`。现在 10 次重试、间隔 3 秒、socket 超时 20s → 30s，配合断点续传基本能下完。
+3. **报错说人话**：新增 TLS 中断、ffmpeg 合并失败（指出具体编码）、磁盘满、目录无写权限四类翻译；合并失败不再把 `Postprocessing: Stream #1:0 -> #0:1 (copy)` 这种 ffmpeg 中间输出丢给你。
+4. **顺手修了 lockfile**：前两次升版本号误改了 `cookie-signature`、`path-parse` 两个依赖的版本字段（实际安装无影响，但 lock 与真实依赖不一致），已改回 `1.0.7`。
+
+> 1.1.0 的官方封面、完整元数据、合集选择下载全部保留，本次只动下载与合并链路。
 
 ---
 
@@ -160,7 +162,7 @@ docker compose up -d && docker compose logs -f --tail=200
 
 ```
 downloads/第三方/B站/UP主名字/视频标题 [BV1xx411c7mD]/
-    视频标题 [BV1xx411c7mD].mp4
+    视频标题 [BV1xx411c7mD].mp4    ← 编码不兼容 mp4 时自动是 .mkv，Emby 一样能读
     视频标题 [BV1xx411c7mD].nfo        ← 标题 / 简介 / UP主 / 分区 / 日期 / 播放点赞
     视频标题 [BV1xx411c7mD]-thumb.jpg
     tvshow.nfo  poster.jpg  landscape.jpg  fanart.jpg
@@ -175,7 +177,7 @@ downloads/第三方/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.1.0` | 固定版本（**生产环境建议锁定**） |
+| `v1.1.1` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push `main` 只跑构建与冒烟测试、不发布镜像。
 
@@ -204,9 +206,11 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 「连接异常，延迟重连」刷屏 | 先看设置页「联网测试」：Telegram API 超时就是代理没生效 |
 | 扫码后立刻掉线 | 代理不稳定或 IP 被风控；换节点，必要时走「彻底重置并重新登录」 |
 | 新集没出现在 Emby | 确认「Emby 入库通知」地址 / API Key / 路径映射三项都对，点「测试连接」 |
-| `yt-dlp 不可用` | 镜像低于 1.1.0 或本地开发没装；升级镜像，或在设置里手填路径 |
+| `yt-dlp 不可用` | 镜像低于 1.1.1 或本地开发没装；升级镜像，或在设置里手填路径 |
 | `要求登录` / `风控拦截（412）` | Cookie 过期，重新复制一次；已下载的文件不受影响 |
 | `连不上 YouTube` | 没配第三方平台代理，或节点不通；YouTube 还需在代理地区可用 |
+| 日志 `SSL: UNEXPECTED_EOF_WHILE_READING` | 代理把长连接掐了（1.1.1 已自动重试 10 次）；仍频繁出现就换节点或避开高峰期 |
+| 日志 `Postprocessing` / `Could not find tag for codec` | 音视频合并失败，1.1.1 已用 `mp4/mkv` 兜底；老任务先删掉该目录里的 `.part` / `.webm` / `.m4a` 再重试 |
 
 更多报错与细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
