@@ -5,6 +5,7 @@ import { disconnectClient } from "../tg/client";
 import { getBotState, restartBot } from "../tg/bot";
 import { getBuiltinApp } from "../tg/credentials";
 import { normalizeEmbyUrl } from "../tg/embyapi";
+import { normalizeProxyUrl } from "../lib/netprobe";
 import { withLiveProgress } from "../tg/downloader";
 import { AppSettings, Download } from "../types";
 import { asyncHandler, clampInt } from "../lib/http";
@@ -55,7 +56,7 @@ settingsRouter.put(
     }
     if (typeof body.api_id === "string") patch.api_id = body.api_id.trim().replace(/\D/g, "");
     if (typeof body.api_hash === "string" && body.api_hash !== MASK) patch.api_hash = body.api_hash.trim();
-    if (typeof body.proxy_url === "string") patch.proxy_url = body.proxy_url.trim();
+    if (typeof body.proxy_url === "string") patch.proxy_url = normalizeProxyUrl(body.proxy_url);
     if (typeof body.file_template === "string" && body.file_template.trim()) {
       patch.file_template = body.file_template.trim();
     }

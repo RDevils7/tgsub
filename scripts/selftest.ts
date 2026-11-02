@@ -33,6 +33,12 @@ import {
   selectEvictions,
   type CacheGroup,
 } from "../server/src/lib/cacheplan";
+import {
+  explainProxyProblem,
+  normalizeProxyUrl,
+  parseProxy,
+  telegramProxyUnsupported,
+} from "../server/src/lib/netprobe";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -1071,6 +1077,88 @@ function cacheChecks(): void {
   });
 }
 
+console.log("\n网络与代理：地址解析");
+
+function proxyChecks(): void {
+  check("带协议的代理地址", () => {
+    const p = parseProxy("socks5://192.168.5.2:7890");
+    assert.equal(p?.scheme, "socks5");
+    assert.equal(p?.host, "192.168.5.2");
+    assert.equal(p?.port, 7890);
+    assert.equal(p?.username, "");
+  });
+
+  check("不带协议时按 SOCKS5", () => {
+    const p = parseProxy("192.168.5.2:7890");
+    assert.equal(p?.scheme, "socks5");
+    assert.equal(p?.port, 7890);
+  });
+
+  check("http / https / socks4 都认", () => {
+    assert.equal(parseProxy("http://proxy.local:8080")?.scheme, "http");
+    assert.equal(parseProxy("https://proxy.local:8443")?.scheme, "https");
+    assert.equal(parseProxy("socks4://proxy.local:1080")?.scheme, "socks4");
+    assert.equal(parseProxy("socks5h://proxy.local:1080")?.scheme, "socks5h");
+  });
+
+  check("省略端口时用协议默认值", () => {
+    assert.equal(parseProxy("socks5://proxy.local")?.port, 1080);
+    assert.equal(parseProxy("socks4://proxy.local")?.port, 1080);
+    assert.equal(parseProxy("http://proxy.local")?.port, 8080);
+    assert.equal(parseProxy("https://proxy.local")?.port, 8443);
+  });
+
+  check("用户名密码会解码", () => {
+    const p = parseProxy("socks5://user%40name:p%3Ass@host:1080");
+    assert.equal(p?.username, "user@name");
+    assert.equal(p?.password, "p:ss");
+  });
+
+  check("空串表示直连", () => {
+    assert.equal(parseProxy(""), null);
+    assert.equal(parseProxy("   "), null);
+  });
+
+  check("非法地址返回 null 并给出提示", () => {
+    assert.equal(parseProxy("ftp://host:21"), null);
+    assert.equal(parseProxy("socks5://"), null);
+    assert.equal(parseProxy("socks5://host:99999"), null);
+    assert.ok(explainProxyProblem("ftp://host:21"));
+    assert.equal(explainProxyProblem(""), null);
+    assert.equal(explainProxyProblem("socks5://host:1080"), null);
+  });
+
+  check("规整地址：补协议、去末尾斜杠", () => {
+    assert.equal(normalizeProxyUrl("192.168.5.2:7890"), "socks5://192.168.5.2:7890");
+    assert.equal(normalizeProxyUrl("  socks5://192.168.5.2:7890/  "), "socks5://192.168.5.2:7890");
+    assert.equal(normalizeProxyUrl("http://proxy.local"), "http://proxy.local:8080");
+  });
+
+  check("规整时保留认证信息", () => {
+    assert.equal(
+      normalizeProxyUrl("socks5://user:pass@host:1080"),
+      "socks5://user:pass@host:1080",
+    );
+    // 密码里有 @ 时先编码再拼回去，避免下次解析错位
+    assert.equal(
+      normalizeProxyUrl("socks5://user:p%40ss@host:1080"),
+      "socks5://user:p%40ss@host:1080",
+    );
+  });
+
+  check("IPv6 地址加回方括号", () => {
+    const normalized = normalizeProxyUrl("socks5://[::1]:1080");
+    assert.equal(normalized, "socks5://[::1]:1080");
+  });
+
+  check("HTTP(S) 代理不能用于 Telegram", () => {
+    assert.equal(telegramProxyUnsupported("http://127.0.0.1:8080"), true);
+    assert.equal(telegramProxyUnsupported("https://127.0.0.1:8443"), true);
+    assert.equal(telegramProxyUnsupported("socks5://127.0.0.1:7890"), false);
+    assert.equal(telegramProxyUnsupported(""), false);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -1079,6 +1167,7 @@ async function main(): Promise<void> {
     ["Emby 用例", () => embyChecks()],
     ["Emby 入库用例", () => embyNotifyChecks()],
     ["缓存清理用例", () => cacheChecks()],
+    ["网络代理用例", () => proxyChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
   ];
   for (const [name, run] of suites) {

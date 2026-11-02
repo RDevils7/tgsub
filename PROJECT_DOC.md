@@ -154,7 +154,7 @@
 下载完成的最后一件事是通知 Emby：把文件路径 POST 给 `/Library/Media/Updated`，Emby 只对这条路径做增量扫描，
 新集几十秒内出现在媒体库里 —— 不必等它的定时任务，也不用去后台手点「扫描媒体库」。
 
-- **独立配置**：地址 / API Key / 路径映射都在「Emby 入库」页，不复用 Emby 自身的看板配置，关掉开关即完全停止。
+- **配置位置**：「设置 → Emby 入库通知」（1.0.4 起并入设置页，不再单独占导航）。地址 / API Key / 路径映射与 Emby 自身的看板配置互不影响，关掉开关即完全停止。
 - **路径映射必须有**：容器里是 `/downloads`，Emby 看到的是宿主目录（群晖 `/volume1/...`）。
   不映射时 Emby 照样返回 204，只是静默忽略 —— 媒体库里始终不出新集，这是最容易误判成「通知没生效」的情况。
 - **合批**：相邻几集通常连着下完，攒 2.5 秒合并成一次请求（单次最多 50 条路径），只触发一次增量扫描。
@@ -181,7 +181,7 @@
   检测到嵌套标签（如 `<actor>`）时会禁用表单，只能用原文编辑，避免误伤。
 - **ffmpeg 截帧当封面**：播放器拖到任意时间点截图，或一键抽 8 张候选帧挑选；目标尺寸按图片类型自动缩放，
   缩放方式可选「留黑边（默认）/ 裁剪铺满 / 拉伸」——比例不对时默认补黑边保住整张图，不裁掉画面。
-  ffmpeg 来自内置的静态二进制，也可在设置里指定自己的路径。
+  ffmpeg 来自内置的静态二进制，也可在设置里指定自己的路径；设置页会显示实际生效的路径、来源与版本号。
 - **手动框选画面**：换封面时（上传图片 / 视频截帧 / 消息原图）都能在画面上拖框，选框比例锁定该图片类型的比例，
   框外用半透明遮罩标出「会被裁掉的部分」，支持拖角缩放与整体移动；也可以一键「用整张图」。
   服务端按原图尺寸换算成像素再裁剪，不经过浏览器压缩。
@@ -248,7 +248,7 @@ flowchart TB
   UI[React SPA] -->|/api| API[Express]
   BOT[Telegram Bot] --> SVC
   API --> SVC[扫描 · 下载 · 命名 · Emby]
-  SVC --> TG[gramjs MTProto<br/>可选 SOCKS5]
+  SVC --> TG[gramjs MTProto<br/>可选 SOCKS4/5]
   SVC --> DB[(SQLite WAL<br/>DATA_DIR)]
   SVC --> FS[(DOWNLOAD_DIR<br/>下载目录)]
   SVC --> CV[(DATA_DIR/covers<br/>封面缓存)]
@@ -269,7 +269,7 @@ flowchart TB
 | 层 | 选型 |
 | --- | --- |
 | 后端 | Node.js 22 + TypeScript + Express 4 |
-| Telegram | [gramjs](https://github.com/gram-js/gramjs)（MTProto，支持 SOCKS5 代理、扫码登录、bot 双模式） |
+| Telegram | [gramjs](https://github.com/gram-js/gramjs)（MTProto，支持 SOCKS4/5 代理、扫码登录、bot 双模式） |
 | 存储 | SQLite（better-sqlite3，WAL 模式） |
 | 前端 | React 18 + Vite 6 + TailwindCSS 3（无 UI 框架） |
 | 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg 静态二进制（截帧；媒体探测用 `ffmpeg -i` 解析，不带 ffprobe） |
@@ -457,7 +457,7 @@ npm run dev
 
 #### 1. 配置代理
 
-国内网络直连不上 Telegram，先在「设置 → API 凭证与网络」填写 SOCKS5 / HTTP 代理：
+国内网络直连不上 Telegram，先在「设置 → 网络与代理」填代理（支持 SOCKS4 / SOCKS5 / SOCKS5H / HTTP / HTTPS），点「联网测试」确认 Telegram API 那一行是通的：
 
 | 部署形态 | 代理地址写法 | 说明 |
 | --- | --- | --- |
@@ -551,7 +551,8 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | Emby API Key | 空 | 管理员密钥，AES 加密落盘，接口只回末四位掩码 |
 | Emby 路径映射 | 空 | 每行「本机路径=Emby 路径」，如 `/downloads=/volume1/media/tgsub` |
 | 缓存上限 | 512 MB | `data/covers` + `data/frames` 超过它就自动清理最旧的；0 = 不清理 |
-| ffmpeg 路径 | 空 | 「元数据」页截帧用；留空自动查找内置二进制或系统 PATH |
+| 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
+| ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
 
 路径模板变量：`{date}`（按天分目录）、`{channel}`、`{name}`、`{id}`。
@@ -637,6 +638,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
 | POST | `/api/emby/refresh` | 让 Emby 立刻全库扫描（兜底用） |
 | POST | `/api/emby/notify` | 手动补推一个路径（相对路径按下载目录解析） |
+| GET | `/api/network` | 当前代理解析结果、支持的协议、可供探测的站点 |
+| POST | `/api/network/test` | 联网测试：经当前（或传入的）代理探测 Telegram / Google / GitHub / 百度，返回状态码与耗时 |
+| GET | `/api/ffmpeg` | ffmpeg 实际路径、来源与版本（`?refresh=1` 强制重新检测） |
+| POST | `/api/bot/test` | 用 Bot API 的 `getMe` 校验 token（可传未保存的 `token` 与 `proxyUrl`） |
 | GET | `/api/cache/status` | 缓存占用：covers / frames 各自的字节数与文件数、上限、超限字节、上次清理 |
 | POST | `/api/cache/trim` | 按当前上限立刻清理一次（忽略「最近 10 分钟不动」的保护） |
 | POST | `/api/cache/clear` | 一键清空 covers 与 frames，返回删除数、释放空间与剩余占用 |

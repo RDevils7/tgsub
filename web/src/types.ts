@@ -300,6 +300,66 @@ export interface SettingsResponse {
   emby?: { apiKeySet: boolean; apiKeyHint: string | null };
 }
 
+/* ------------------------------ 网络与代理 ------------------------------ */
+
+export type ProxyScheme = "socks4" | "socks5" | "socks5h" | "http" | "https";
+
+export interface ProxyStatus {
+  /** 设置里保存的原始地址 */
+  proxyUrl: string;
+  proxy: { scheme: ProxyScheme; host: string; port: number; hasAuth: boolean } | null;
+  /** 填了但解析不出来时的说明 */
+  problem: string | null;
+  /** HTTP(S) 代理无法用于 Telegram 的 MTProto 连接 */
+  telegramUnsupported: boolean;
+  schemes: Array<{ value: ProxyScheme; label: string; hint: string }>;
+  sites: Array<{ id: string; label: string; note: string; url: string }>;
+}
+
+export interface NetProbeResult {
+  id: string;
+  label: string;
+  note: string;
+  url: string;
+  ok: boolean;
+  status: number | null;
+  ms: number | null;
+  error: string | null;
+  viaProxy: boolean;
+}
+
+export interface NetProbeReport {
+  at: number;
+  elapsedMs: number;
+  viaProxy: boolean;
+  proxy: { scheme: ProxyScheme; host: string; port: number } | null;
+  results: NetProbeResult[];
+}
+
+export interface BotIdentity {
+  ok: boolean;
+  id: string | null;
+  username: string | null;
+  name: string | null;
+  ms: number | null;
+  error: string | null;
+}
+
+export interface BotTestResult {
+  ok: boolean;
+  identity: BotIdentity | null;
+  viaProxy: boolean;
+  error?: string;
+}
+
+export interface FfmpegStatus {
+  ffmpeg: FfmpegInfo;
+  /** 当前实际生效的来源（设置 / 环境变量 / 内置 / PATH） */
+  sourceLabel: string | null;
+  /** 设置里填写、尚未生效的路径 */
+  configuredPath: string;
+}
+
 /* ------------------------------ Emby 入库 ------------------------------ */
 
 /** 一条入库通知记录（服务端内存里保留最近 30 条） */

@@ -17,6 +17,7 @@ import {
 import { getBuiltinApp, type BuiltinApp } from "./credentials";
 import type { CredentialMode } from "../types";
 import { logger } from "../logger";
+import { explainProxyProblem, parseProxy } from "../lib/netprobe";
 
 export class TgError extends Error {
   code: string;
@@ -217,29 +218,36 @@ function parseIntOrThrow(value: string, label: string): number {
   return n;
 }
 
-/** 解析 socks5://user:pass@host:port 或 host:port */
+/**
+ * 解析代理地址，转成 gramjs 要的形状。
+ *
+ * 注意：MTProto 是裸 TCP，gramjs 只能走 SOCKS4 / SOCKS5。
+ * 设置里允许填 HTTP(S) 代理（联网检测、Bot API 会用到），
+ * 但那类代理在这里必须明确报错，否则用户会看到一堆莫名其妙的握手失败。
+ */
 function buildProxy(raw: string) {
-  const value = raw.trim();
-  if (!value) return undefined;
-  try {
-    const withScheme = value.includes("://") ? value : `socks5://${value}`;
-    const url = new URL(withScheme);
-    if (!url.protocol.startsWith("socks")) {
-      throw new TgError("BAD_PROXY", "仅支持 SOCKS5 代理（例如 socks5://127.0.0.1:7897）");
+  const parsed = parseProxy(raw);
+  if (!parsed) {
+    // 填了但解析不出来：说清楚格式，别静默直连
+    if (String(raw ?? "").trim()) {
+      throw new TgError("BAD_PROXY", explainProxyProblem(raw) || "代理地址格式不正确");
     }
-    const port = Number(url.port || 1080);
-    return {
-      ip: url.hostname,
-      port,
-      socksType: 5 as const,
-      username: decodeURIComponent(url.username) || undefined,
-      password: decodeURIComponent(url.password) || undefined,
-      timeout: 15,
-    };
-  } catch (err) {
-    if (err instanceof TgError) throw err;
-    throw new TgError("BAD_PROXY", "代理地址格式不正确，应为 socks5://host:port");
+    return undefined;
   }
+  if (parsed.scheme === "http" || parsed.scheme === "https") {
+    throw new TgError(
+      "BAD_PROXY",
+      "Telegram 的 MTProto 连接只能走 SOCKS4 / SOCKS5 代理；HTTP(S) 代理请仅用于联网测试与 Bot API 检查",
+    );
+  }
+  return {
+    ip: parsed.host,
+    port: parsed.port,
+    socksType: (parsed.scheme === "socks4" ? 4 : 5) as 4 | 5,
+    username: parsed.username || undefined,
+    password: parsed.password || undefined,
+    timeout: 15,
+  };
 }
 
 interface ResolvedCredentials {

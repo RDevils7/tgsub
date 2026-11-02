@@ -1,14 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { formatBytes, formatDateTime } from "../utils";
-import type { AppSettings, AuthState, BotState, CacheStats, QrState, SettingsResponse } from "../types";
+import type {
+  AppSettings,
+  AuthState,
+  BotIdentity,
+  BotState,
+  CacheStats,
+  NetProbeReport,
+  ProxyStatus,
+  QrState,
+  SettingsResponse,
+} from "../types";
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../components/ui";
+import FfmpegStatusPanel from "../components/FfmpegStatusPanel";
+import EmbyNotifyPanel from "../components/EmbyNotifyPanel";
 import {
+  IconAlert,
   IconBot,
+  IconCheck,
   IconDownload,
   IconKey,
+  IconLink,
   IconLogout,
   IconQr,
+  IconRefresh,
   IconShield,
   IconSpark,
   IconTrash,
@@ -43,6 +59,14 @@ export default function Settings() {
   const [bot, setBot] = useState<BotState | null>(null);
   const [botBusy, setBotBusy] = useState(false);
 
+  const [proxyInfo, setProxyInfo] = useState<ProxyStatus | null>(null);
+  const [proxyBusy, setProxyBusy] = useState<null | "test">(null);
+  const [probe, setProbe] = useState<NetProbeReport | null>(null);
+  const [botTest, setBotTest] = useState<BotIdentity | null>(null);
+  /** 改完 ffmpeg 路径保存后，让状态面板重新检测（用 key 强制重建） */
+  const [ffmpegToken, setFfmpegToken] = useState(0);
+  const [botTesting, setBotTesting] = useState(false);
+
   const [cache, setCache] = useState<CacheStats | null>(null);
   const [cacheBusy, setCacheBusy] = useState<null | "trim" | "clear">(null);
   /** 清空缓存要点两次：第一次只是把按钮变成「确认清空」 */
@@ -53,16 +77,18 @@ export default function Settings() {
 
   const load = useCallback(async () => {
     try {
-      const [settingsRes, authRes, cacheRes] = await Promise.all([
+      const [settingsRes, authRes, cacheRes, proxyRes] = await Promise.all([
         api.settings(),
         api.authState(),
         api.cacheStatus().catch(() => null),
+        api.proxyStatus().catch(() => null),
       ]);
       setData(settingsRes);
       setDraft(settingsRes.settings);
       setAuth(authRes);
       setBot(settingsRes.bot ?? null);
       if (cacheRes) setCache(cacheRes);
+      if (proxyRes) setProxyInfo(proxyRes);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
@@ -121,10 +147,68 @@ export default function Settings() {
       toast.push("设置已保存", "success");
       if (section === "api") setAuth(await api.authState());
       if (section === "cache") await refreshCache();
+      if (section === "proxy") {
+        setProxyInfo(await api.proxyStatus().catch(() => proxyInfo));
+        // 代理变了，Telegram 会重新握手：状态要重新拉，否则界面上还是旧的在离线
+        setAuth(await api.authState().catch(() => auth));
+      }
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
       setSavingSection(null);
+    }
+  };
+
+  /** 代理地址里现在写的协议（用于即时提示，不等保存） */
+  const draftProxyScheme = (/^([a-z0-9]+):\/\//i.exec(draft?.proxy_url ?? "")?.[1] ?? "socks5").toLowerCase();
+  const draftProxyIsHttp = draftProxyScheme === "http" || draftProxyScheme === "https";
+
+  const runProxyTest = async () => {
+    if (!draft) return;
+    setProxyBusy("test");
+    setProbe(null);
+    try {
+      const res = await api.proxyTest(draft.proxy_url);
+      setProbe(res);
+      const ok = res.results.filter((r) => r.ok).length;
+      toast.push(
+        `${ok}/${res.results.length} 个站点连通${res.viaProxy ? "（经代理）" : "（直连）"}`,
+        ok === res.results.length ? "success" : ok > 0 ? "info" : "error",
+      );
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setProxyBusy(null);
+    }
+  };
+
+  /** 切换协议：只替换 scheme，地址与认证信息原地保留 */
+  const switchProxyScheme = (scheme: string) => {
+    const current = (draft?.proxy_url ?? "").trim();
+    const rest = current.replace(/^[a-z0-9]+:\/\//i, "");
+    patch("proxy_url", rest ? `${scheme}://${rest}` : `${scheme}://`);
+  };
+
+  const testBot = async () => {
+    if (!draft) return;
+    setBotTesting(true);
+    setBotTest(null);
+    try {
+      const res = await api.botTest({
+        token: botToken.trim() || undefined,
+        proxyUrl: draft.proxy_url,
+      });
+      setBotTest(res.identity);
+      toast.push(
+        res.ok
+          ? `Token 有效：@${res.identity?.username ?? res.identity?.id}`
+          : res.error || res.identity?.error || "验证失败",
+        res.ok ? "success" : "error",
+      );
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setBotTesting(false);
     }
   };
 
@@ -737,106 +821,55 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* API 凭证 */}
+      {/* 网络与代理：协议可选 socks4/5、http、https，自带连通性测试 */}
       <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
-              <IconKey className="h-4 w-4" />
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-300">
+              <IconLink className="h-4 w-4" />
             </span>
             <div>
-              <h2 className="text-[14px] font-semibold text-white">API 凭证与网络</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">
-                使用内置凭证可跳过 my.telegram.org 申请；也可切换为自建应用
+              <h2 className="text-[14px] font-semibold text-white">网络与代理</h2>
+              <p className="mt-0.5 text-[12px] leading-relaxed text-slate-500">
+                访问 Telegram 需要代理时填在这里；保存后账号与机器人会重新握手，留空表示直连
               </p>
             </div>
           </div>
+          <Badge
+            className={
+              draft.proxy_url.trim()
+                ? "border-cyan-500/25 bg-cyan-500/10 text-cyan-300"
+                : "border-white/10 bg-white/[0.03] text-slate-400"
+            }
+          >
+            {draft.proxy_url.trim() ? `${draftProxyScheme.toUpperCase()} · 已配置` : "直连"}
+          </Badge>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1">
-          <button
-            onClick={() => patch("credential_mode", "builtin")}
-            className={`rounded-lg px-3 py-2 text-[12.5px] transition ${
-              draft.credential_mode === "builtin"
-                ? "bg-brand-500/15 font-medium text-brand-200"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            内置凭证（免申请）
-          </button>
-          <button
-            onClick={() => patch("credential_mode", "custom")}
-            className={`rounded-lg px-3 py-2 text-[12.5px] transition ${
-              draft.credential_mode === "custom"
-                ? "bg-brand-500/15 font-medium text-brand-200"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            自定义 API
-          </button>
-        </div>
-
-        {draft.credential_mode === "builtin" ? (
-          <div className="mt-3 space-y-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] px-3.5 py-3">
-            <p className="text-[12.5px] font-medium text-ok/90">无需申请 api_id / api_hash</p>
-            <p className="text-[11.5px] leading-relaxed text-slate-400">
-              当前默认使用 tdl 内置应用（api_id 15055931），它是 tdl 自行申请的应用，
-              不属于任何官方客户端，登录时手机扫码即可。设备指纹会自动对齐到 Desktop 平台，
-              避免「凭证平台与设备不匹配」带来的额外风控。
-            </p>
-            <div className="rounded-lg border border-rose-500/25 bg-rose-500/[0.07] px-3 py-2">
-              <p className="text-[11.5px] font-medium text-err">仍是公开凭证，长期使用请换自定义 API</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-300">
-                公开凭证被所有使用该工具的人共用。1.0.1 起已不再默认使用 Telegram Desktop
-                官方客户端凭证 —— 拿官方客户端身份从机房/代理 IP 批量下载，会被判定为
-                <span className="text-slate-100">「仿冒官方客户端」</span>，代价是账号的全部会话被重置、
-                相关机器人被冻结。自己的 api_id 在 my.telegram.org 免费申请，两分钟即可。
-              </p>
-            </div>
-            <Field label="内置应用">
-              <select
-                className="field"
-                value={draft.builtin_app}
-                onChange={(e) => patch("builtin_app", e.target.value)}
-              >
-                <option value="builtin">tdl 内置应用（默认，推荐）</option>
-                <option value="desktop">Telegram Desktop（官方客户端，风控最敏感，不推荐）</option>
-              </select>
-            </Field>
-            {data.credential && (
-              <p className="text-[11px] text-slate-500">
-                当前生效：{data.credential.label} · api_id {data.credential.apiId}
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Field label="API ID">
-              <input
-                className="field font-mono"
-                placeholder="12345678"
-                value={draft.api_id}
-                onChange={(e) => patch("api_id", e.target.value)}
-              />
-            </Field>
-            <Field label="API Hash">
-              <input
-                className="field font-mono"
-                placeholder="0123456789abcdef0123456789abcdef"
-                value={draft.api_hash}
-                onChange={(e) => patch("api_hash", e.target.value)}
-              />
-            </Field>
-          </div>
-        )}
-
-        <div className="mt-3">
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[132px_minmax(0,1fr)]">
+          <Field label="协议" hint="Telegram 只能用 SOCKS">
+            <select className="field" value={draftProxyScheme} onChange={(e) => switchProxyScheme(e.target.value)}>
+              {(
+                proxyInfo?.schemes ?? [
+                  { value: "socks5", label: "SOCKS5", hint: "" },
+                  { value: "socks5h", label: "SOCKS5H", hint: "" },
+                  { value: "socks4", label: "SOCKS4", hint: "" },
+                  { value: "http", label: "HTTP", hint: "" },
+                  { value: "https", label: "HTTPS", hint: "" },
+                ]
+              ).map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field
-            label="SOCKS5 代理（可选）"
-            hint="例如 socks5://192.168.5.2:7890，留空表示直连"
+            label="代理地址"
+            hint="主机:端口，也可以带用户名密码：socks5://user:pass@host:port"
           >
             <input
-              className="field font-mono"
+              className="field font-mono text-[12.5px]"
               placeholder="socks5://192.168.5.2:7890"
               value={draft.proxy_url}
               onChange={(e) => patch("proxy_url", e.target.value)}
@@ -844,18 +877,84 @@ export default function Settings() {
           </Field>
         </div>
 
-        <div className="mt-4 flex justify-end">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() =>
-              void saveSection("api", ["credential_mode", "builtin_app", "api_id", "api_hash", "proxy_url"])
-            }
-            loading={savingSection === "api"}
-          >
-            保存凭证
-          </Button>
+        {proxyInfo?.problem && (
+          <p className="mt-2 flex items-start gap-1.5 rounded-xl border border-rose-500/25 bg-rose-500/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-err">
+            <IconAlert className="mt-0.5 h-3 w-3 shrink-0" />
+            {proxyInfo.problem}
+          </p>
+        )}
+
+        {draftProxyIsHttp && (
+          <p className="mt-2 flex items-start gap-1.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2 text-[11.5px] leading-relaxed text-warn">
+            <IconAlert className="mt-0.5 h-3 w-3 shrink-0" />
+            HTTP(S) 代理只能用于联网检测与 Bot API 校验；Telegram 的 MTProto 连接是裸 TCP，
+            只能走 SOCKS4 / SOCKS5。保存当前设置后，账号会连不上。
+          </p>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] text-slate-500">
+            {proxyInfo?.proxy
+              ? `当前生效：${proxyInfo.proxy.scheme}://${proxyInfo.proxy.host}:${proxyInfo.proxy.port}${
+                  proxyInfo.proxy.hasAuth ? "（带认证）" : ""
+                }`
+              : "当前未使用代理，所有请求直连"}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                patch("proxy_url", "");
+                setProbe(null);
+                toast.push("已清空输入，点「保存代理」后生效", "info");
+              }}
+              disabled={!draft.proxy_url}
+            >
+              清空
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void saveSection("proxy", ["proxy_url"])}
+              loading={savingSection === "proxy"}
+            >
+              保存代理
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => void runProxyTest()} loading={proxyBusy === "test"}>
+              <IconRefresh className="h-3 w-3" />
+              Ping 测试
+            </Button>
+          </div>
         </div>
+
+        {probe && (
+          <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[12px] text-slate-300">
+                Ping 测试 · {probe.viaProxy ? "经代理" : "直连"} · 用时 {(probe.elapsedMs / 1000).toFixed(1)}s
+              </p>
+              <p className="text-[11px] text-slate-500">
+                {probe.results.filter((r) => r.ok).length}/{probe.results.length} 连通
+              </p>
+            </div>
+            <ul className="mt-2 space-y-1">
+              {probe.results.map((item) => (
+                <li key={item.id} className="flex flex-wrap items-center gap-2 text-[11.5px]">
+                  <StatusDot className={item.ok ? "bg-emerald-400" : "bg-rose-400"} />
+                  <span className="text-slate-300">{item.label}</span>
+                  <span className="truncate text-[11px] text-slate-600">{item.url}</span>
+                  <span className={`ml-auto font-mono text-[11px] ${item.ok ? "text-ok" : "text-err"}`}>
+                    {item.ok ? `${item.status} · ${item.ms} ms` : item.error}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              拿到 HTTP 状态码就算通（403/404 也是通）。成功但下载异常时，多半是该站点被限速或证书被中间人代理替换。
+            </p>
+          </div>
+        )}
       </section>
 
       {/* 扫描策略 */}
@@ -1032,13 +1131,6 @@ export default function Settings() {
               <p className="mt-0.5 text-[12px] text-slate-500">边下边生成元信息，Emby 扫描即出海报、简介与集数</p>
             </div>
           </div>
-          {/* 通知入库需要地址 / API Key / 路径映射，单独放在「Emby 入库」页 */}
-          <a
-            href="#/emby"
-            className="shrink-0 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11.5px] text-slate-400 transition hover:border-brand-500/30 hover:text-brand-300"
-          >
-            入库通知设置 →
-          </a>
         </div>
 
         <div className="mt-4 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
@@ -1084,6 +1176,7 @@ export default function Settings() {
               onChange={(e) => patch("ffmpeg_path", e.target.value)}
             />
           </Field>
+          <FfmpegStatusPanel key={ffmpegToken} configuredPath={draft.ffmpeg_path} />
           <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
             <p className="text-[11px] uppercase tracking-wider text-slate-500">落盘结构</p>
             <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed text-slate-400">{`美人局/
@@ -1107,7 +1200,7 @@ export default function Settings() {
                 "fallback_folder",
                 "auto_cover_frames",
                 "ffmpeg_path",
-              ])
+              ]).then(() => setFfmpegToken((n) => n + 1))
             }
             loading={savingSection === "emby"}
           >
@@ -1115,6 +1208,9 @@ export default function Settings() {
           </Button>
         </div>
       </section>
+
+      {/* Emby 入库通知：下载完成后自动让 Emby 增量扫描 */}
+      <EmbyNotifyPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
       <section className="card p-5">
@@ -1310,6 +1406,33 @@ export default function Settings() {
           </Field>
         </div>
 
+        {botTest && (
+          <div
+            className={`mt-3 flex items-start gap-2 rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed ${
+              botTest.ok
+                ? "border-emerald-500/25 bg-emerald-500/[0.06] text-ok"
+                : "border-rose-500/25 bg-rose-500/[0.06] text-err"
+            }`}
+          >
+            {botTest.ok ? (
+              <IconCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            )}
+            <div>
+              {botTest.ok
+                ? `Token 有效：@${botTest.username ?? botTest.id}${botTest.name ? `（${botTest.name}）` : ""} · ID ${botTest.id}${
+                    botTest.ms !== null ? ` · ${botTest.ms} ms` : ""
+                  }`
+                : botTest.error}
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                这一步走的是 Bot API（普通 HTTPS，会经过上面的代理）：通了说明 token 与网络都没问题，
+                机器人仍未在线就说明 MTProto 那条连接被挡了。
+              </p>
+            </div>
+          </div>
+        )}
+
         {bot?.error && draft.bot_enabled && (
           <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.07] px-3.5 py-2.5 text-[11.5px] leading-relaxed text-err">
             {bot.error}
@@ -1353,6 +1476,16 @@ export default function Settings() {
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => void testBot()}
+              loading={botTesting}
+              disabled={!botToken.trim() && !bot?.tokenSet}
+            >
+              <IconRefresh className="h-3 w-3" />
+              测试 Token
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => void restartBot()}
               loading={botBusy}
               disabled={!draft.bot_enabled}
@@ -1363,6 +1496,111 @@ export default function Settings() {
               保存并连接
             </Button>
           </div>
+        </div>
+      </section>
+
+      {/* API 凭证 */}
+      <section className="card p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
+              <IconKey className="h-4 w-4" />
+            </span>
+            <div>
+              <h2 className="text-[14px] font-semibold text-white">API 凭证</h2>
+              <p className="mt-0.5 text-[12px] text-slate-500">
+                使用内置凭证可跳过 my.telegram.org 申请；也可切换为自建应用（改完需要重新连接）
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1">
+          <button
+            onClick={() => patch("credential_mode", "builtin")}
+            className={`rounded-lg px-3 py-2 text-[12.5px] transition ${
+              draft.credential_mode === "builtin"
+                ? "bg-brand-500/15 font-medium text-brand-200"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            内置凭证（免申请）
+          </button>
+          <button
+            onClick={() => patch("credential_mode", "custom")}
+            className={`rounded-lg px-3 py-2 text-[12.5px] transition ${
+              draft.credential_mode === "custom"
+                ? "bg-brand-500/15 font-medium text-brand-200"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            自定义 API
+          </button>
+        </div>
+
+        {draft.credential_mode === "builtin" ? (
+          <div className="mt-3 space-y-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] px-3.5 py-3">
+            <p className="text-[12.5px] font-medium text-ok/90">无需申请 api_id / api_hash</p>
+            <p className="text-[11.5px] leading-relaxed text-slate-400">
+              当前默认使用 tdl 内置应用（api_id 15055931），它是 tdl 自行申请的应用，
+              不属于任何官方客户端，登录时手机扫码即可。设备指纹会自动对齐到 Desktop 平台，
+              避免「凭证平台与设备不匹配」带来的额外风控。
+            </p>
+            <div className="rounded-lg border border-rose-500/25 bg-rose-500/[0.07] px-3 py-2">
+              <p className="text-[11.5px] font-medium text-err">仍是公开凭证，长期使用请换自定义 API</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-300">
+                公开凭证被所有使用该工具的人共用。1.0.1 起已不再默认使用 Telegram Desktop
+                官方客户端凭证 —— 拿官方客户端身份从机房/代理 IP 批量下载，会被判定为
+                <span className="text-slate-100">「仿冒官方客户端」</span>，代价是账号的全部会话被重置、
+                相关机器人被冻结。自己的 api_id 在 my.telegram.org 免费申请，两分钟即可。
+              </p>
+            </div>
+            <Field label="内置应用">
+              <select
+                className="field"
+                value={draft.builtin_app}
+                onChange={(e) => patch("builtin_app", e.target.value)}
+              >
+                <option value="builtin">tdl 内置应用（默认，推荐）</option>
+                <option value="desktop">Telegram Desktop（官方客户端，风控最敏感，不推荐）</option>
+              </select>
+            </Field>
+            {data.credential && (
+              <p className="text-[11px] text-slate-500">
+                当前生效：{data.credential.label} · api_id {data.credential.apiId}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="API ID">
+              <input
+                className="field font-mono"
+                placeholder="12345678"
+                value={draft.api_id}
+                onChange={(e) => patch("api_id", e.target.value)}
+              />
+            </Field>
+            <Field label="API Hash">
+              <input
+                className="field font-mono"
+                placeholder="0123456789abcdef0123456789abcdef"
+                value={draft.api_hash}
+                onChange={(e) => patch("api_hash", e.target.value)}
+              />
+            </Field>
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-end">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => void saveSection("api", ["credential_mode", "builtin_app", "api_id", "api_hash"])}
+            loading={savingSection === "api"}
+          >
+            保存凭证
+          </Button>
         </div>
       </section>
 

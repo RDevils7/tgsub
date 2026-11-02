@@ -13,6 +13,10 @@ import type {
   EmbyStatus,
   CacheActionResult,
   CacheStats,
+  BotTestResult,
+  FfmpegStatus,
+  NetProbeReport,
+  ProxyStatus,
   MetadataDetail,
   MetadataFolderItem,
   MetadataSource,
@@ -177,6 +181,19 @@ export const api = {
 
   botState: () => request<{ bot: BotState }>("/bot"),
   botRestart: () => request<{ ok: boolean }>("/bot/restart", { method: "POST" }),
+  /** 用 Bot API 的 getMe 验 token：通不通一次就知道，不必等机器人自己连 */
+  botTest: (input: { token?: string; proxyUrl?: string } = {}) =>
+    request<BotTestResult>("/bot/test", { method: "POST", body: JSON.stringify(input) }),
+
+  /* ------------------------------ 网络与代理 ------------------------------ */
+  proxyStatus: () => request<ProxyStatus>("/network"),
+  /** 测常用站点能否连通；带上界面上尚未保存的地址 */
+  proxyTest: (proxyUrl?: string) =>
+    request<NetProbeReport>("/network/test", { method: "POST", body: JSON.stringify({ proxyUrl }) }),
+
+  /* ------------------------------ 工具链 ------------------------------ */
+  ffmpegStatus: (refresh = false) =>
+    request<FfmpegStatus>(`/ffmpeg${refresh ? "?refresh=1" : ""}`),
 
   authState: () => request<AuthState>("/auth/state"),
   authRetry: () =>
