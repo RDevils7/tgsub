@@ -5,6 +5,7 @@ import path from "node:path";
 import { getSettings } from "../db";
 import { downloadFile, parseProxy } from "../lib/netprobe";
 import { logger } from "../logger";
+import { imageSizeOf, writeBlurFill } from "../tg/coverimage";
 import { loadSharp } from "../tg/sharp";
 import { sanitizeSegment } from "../utils";
 import { PlatformId } from "../types";
@@ -21,6 +22,10 @@ import { PlatformId } from "../types";
  *   fanart.jpg      1920×1080
  *   标题-thumb.jpg  1280 宽，保持原始比例
  *
+ * 比例不符时不裁画面：完整居中 + 边角用同一张图的模糊版填满（1.2.0 起）。
+ * 官方图本身太小（宽 < 640）撑不起海报时直接当作「没有图」返回，让调用方截帧 ——
+ * 拿一张 320px 的缩略图放大成 1000×1500 只会更糊。
+ *
  * 下载或裁剪失败一律只记日志：调用方随后还会用视频截帧兜底，
  * 封面这种附属品不该影响下载本身。
  */
@@ -33,6 +38,12 @@ interface CoverSlot {
 }
 
 const THUMB_WIDTH = 1280;
+
+/**
+ * 官方封面最小可用宽度。B站 / 小红书有些条目只给 320~480 宽的缩略图，
+ * 放大到 1000 宽之后糊得没法看，这种情况宁可用视频截帧。
+ */
+const MIN_COVER_WIDTH = 640;
 
 const SHOW_SLOTS: CoverSlot[] = [
   { file: "poster.jpg", width: 1000, height: 1500, keepRatio: false },
@@ -112,25 +123,39 @@ export async function applyCoversFromImage(
     });
 
     const sharp = await loadSharp();
+    const size = await imageSizeOf(tmpFile);
+    // 尺寸不够就当没有：让调用方去截帧，别把 320px 的图放大成海报
+    if (size && size.width < MIN_COVER_WIDTH) {
+      logger.info(
+        {
+          dir: path.basename(dir),
+          host: safeHost(source),
+          size: `${size.width}x${size.height}`,
+          minWidth: MIN_COVER_WIDTH,
+        },
+        "官方封面分辨率不足，改用视频截帧",
+      );
+      return [];
+    }
+
     const made: string[] = [];
     for (const slot of targets) {
       const dest = path.join(dir, slot.file);
       try {
-        if (!sharp) {
-          // 没有 sharp 就原样落地：Emby 会自己缩放，总比没有封面强
-          await fs.promises.copyFile(tmpFile, dest);
+        if (slot.keepRatio) {
+          if (!sharp) {
+            // 没有 sharp 就原样落地：Emby 会自己缩放，总比没有封面强
+            await fs.promises.copyFile(tmpFile, dest);
+          } else {
+            // 单集缩略图保持原始比例，不裁也不补边
+            await sharp(tmpFile)
+              .resize({ width: slot.width, withoutEnlargement: true })
+              .jpeg({ quality: 90 })
+              .toFile(dest);
+          }
         } else {
-          await sharp(tmpFile)
-            .resize({
-              width: slot.width,
-              ...(slot.keepRatio ? {} : { height: slot.height }),
-              fit: slot.keepRatio ? "inside" : "cover",
-              position: "attention",
-              background: "#000000",
-              withoutEnlargement: slot.keepRatio,
-            })
-            .jpeg({ quality: 90 })
-            .toFile(dest);
+          // 剧集三张图：完整画面 + 模糊填充，不裁掉内容
+          await writeBlurFill(tmpFile, dest, { width: slot.width, height: slot.height, quality: 90 });
         }
         made.push(slot.file);
       } catch (err) {

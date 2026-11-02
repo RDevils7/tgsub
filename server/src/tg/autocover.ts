@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { logger } from "../logger";
 import { sanitizeSegment } from "../utils";
+import { writeBlurFill } from "./coverimage";
 import { captureStill, ffmpegInfo, probeVideo } from "./ffmpeg";
 import { loadSharp } from "./sharp";
 
@@ -21,6 +22,9 @@ import { loadSharp } from "./sharp";
  *
  * 「剧集目录的封面同第一集」靠 isFirst 实现：第一集下载完成时无条件覆盖这三张；
  * 其余集只在封面缺失时补一份（防止第一集还没下、整个剧集在 Emby 里没图）。
+ *
+ * 比例不符时的处理（1.2.0 起）：不再裁剪，也不留黑边 —— 画面完整居中，
+ * 空出来的部分用同一帧的放大模糊版填满（见 `coverimage.writeBlurFill`）。
  */
 
 interface ShowSlot {
@@ -87,8 +91,15 @@ async function ratioOf(file: string, sharp: Awaited<ReturnType<typeof loadSharp>
 export interface EpisodeCoverOptions {
   /** 本集视频基名；给了就顺带生成 `<基名>-thumb.jpg` 作为这一集的缩略图 */
   base?: string;
-  /** true = 第一集，剧集目录的三张封面以它为准（覆盖已有的） */
-  isFirst?: boolean;
+  /**
+   * 剧集目录三张封面（poster / landscape / fanart）的处理方式：
+   *  - force      覆盖重做（第一集用这个）
+   *  - if-missing 缺才补（下载流程默认）
+   *  - skip       完全不动
+   */
+  series?: "force" | "if-missing" | "skip";
+  /** 剧集封面的落盘目录，默认跟视频同目录；季目录结构下要指到剧集根目录 */
+  seriesDir?: string;
 }
 
 /**
@@ -103,16 +114,26 @@ export async function autoCoversFromVideo(
   if (!exists(video)) return [];
   if (running.has(dir)) return [];
 
+  const seriesDir = opts.seriesDir ?? dir;
   const thumbName = opts.base ? `${sanitizeSegment(opts.base, 120)}-thumb.jpg` : null;
-  const targets: Array<{ file: string; width: number; height: number; keepRatio: boolean }> = [];
+  const seriesMode = opts.series ?? "if-missing";
+  const targets: Array<{ file: string; width: number; height: number; keepRatio: boolean; dir: string }> = [];
 
   if (thumbName && !exists(path.join(dir, thumbName))) {
-    targets.push({ file: thumbName, width: THUMB_WIDTH, height: 720, keepRatio: true });
+    targets.push({ file: thumbName, width: THUMB_WIDTH, height: 720, keepRatio: true, dir });
   }
-  for (const slot of SHOW_SLOTS) {
-    // 第一集无条件重做，其余集只补缺的
-    if (opts.isFirst || !exists(path.join(dir, slot.file))) {
-      targets.push({ file: slot.file, width: slot.width, height: slot.height, keepRatio: false });
+  if (seriesMode !== "skip") {
+    for (const slot of SHOW_SLOTS) {
+      // force 无条件重做，if-missing 只补缺的
+      if (seriesMode === "force" || !exists(path.join(seriesDir, slot.file))) {
+        targets.push({
+          file: slot.file,
+          width: slot.width,
+          height: slot.height,
+          keepRatio: false,
+          dir: seriesDir,
+        });
+      }
     }
   }
   if (!targets.length) return [];
@@ -146,7 +167,7 @@ export async function autoCoversFromVideo(
 
     const made: string[] = [];
     for (const slot of targets) {
-      const dest = path.join(dir, slot.file);
+      const dest = path.join(slot.dir, slot.file);
       try {
         if (slot.keepRatio) {
           // 单集缩略图保持画面原始比例：竖版剧集截出来的就是竖版，不硬裁
@@ -162,28 +183,14 @@ export async function autoCoversFromVideo(
         } else {
           const target = slot.width / slot.height;
           const ranked = [...frames].sort((a, b) => score(a.ratio, target) - score(b.ratio, target));
-          // landscape 与 fanart 规格相同，用第二名挑一帧，两张图不至于一模一样
+          // landscape 与 fanart 规格相同，用第二名挑一帧，两张图不至于一模一样。
+          // 朝向一致的帧优先：竖版海报用竖版帧，模糊填充的面积最小、观感最好
           const pick = made.includes("landscape.jpg") ? (ranked[1] ?? ranked[0]) : ranked[0];
-          if (!sharp) {
-            await fs.promises.copyFile(pick.file, dest);
-          } else {
-            const sameOrientation = pick.ratio >= 1 === target >= 1;
-            await sharp(pick.file)
-              .resize({
-                width: slot.width,
-                height: slot.height,
-                // 朝向一致就裁满，朝向不符就留黑边，别把画面裁没了
-                fit: sameOrientation ? "cover" : "contain",
-                position: "attention",
-                background: "#000000",
-              })
-              .jpeg({ quality: 90 })
-              .toFile(dest);
-          }
+          await writeBlurFill(pick.file, dest, { width: slot.width, height: slot.height, quality: 90 });
         }
         made.push(slot.file);
       } catch (err) {
-        logger.warn({ err: (err as Error).message, file: slot.file, dir: path.basename(dir) }, "截帧封面写入失败");
+        logger.warn({ err: (err as Error).message, file: slot.file, dir: path.basename(slot.dir) }, "截帧封面写入失败");
       }
     }
     if (made.length) {
@@ -196,7 +203,7 @@ export async function autoCoversFromVideo(
         {
           dir: path.basename(dir),
           base: opts.base ?? null,
-          isFirst: Boolean(opts.isFirst),
+          series: seriesMode,
           files: made,
           frames: frames.length,
         },

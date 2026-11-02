@@ -394,7 +394,8 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
         // 官方封面已经写好的文件名，截帧不会再覆盖（autoCoversFromVideo 只补缺的）
         await autoCoversFromVideo(filePath, dir, {
           base,
-          isFirst: isFirst && fromImage.length === 0,
+          // 第一集（或无集号的单视频）才动剧集目录的三张封面
+          series: isFirst && fromImage.length === 0 ? "force" : "if-missing",
         });
       }
     }

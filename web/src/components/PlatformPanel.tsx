@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { PlatformId, PlatformInfo, PlatformStatus } from "../types";
 import { Badge, Button, StatusDot, Toggle, useToast } from "../components/ui";
 import { IconAlert, IconCheck, IconHelp, IconLink, IconRefresh } from "../components/icons";
+import CollapsibleCard from "./CollapsibleCard";
 
 /**
  * 设置页的「第三方平台」卡片。
@@ -376,20 +377,14 @@ export default function PlatformPanel() {
     update && update.busy && update.progress >= 0 ? Math.round(update.progress * 100) : null;
 
   return (
-    <section className="card p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 text-fuchsia-300">
-            <IconLink className="h-4 w-4" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-semibold text-white">第三方平台</h2>
-            <p className="mt-0.5 text-[12px] text-slate-500">
-              B站 / 抖音 / 小红书 / YouTube 链接下载，引擎是 yt-dlp；在「手动下载」页粘贴链接即可
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
+    <CollapsibleCard
+      id="platform"
+      tint="fuchsia"
+      icon={<IconLink className="h-4 w-4" />}
+      title="第三方平台"
+      desc="B站 / 抖音 / 小红书 / YouTube 链接下载，引擎是 yt-dlp；在「手动下载」页粘贴链接即可"
+      extra={
+        <>
           <Badge
             className={
               enabled
@@ -400,11 +395,11 @@ export default function PlatformPanel() {
             {enabled ? "已启用" : "未启用"}
           </Badge>
           <Toggle checked={enabled} onChange={setEnabled} label="启用第三方平台下载" />
-        </div>
-      </div>
-
+        </>
+      }
+    >
       {/* 引擎状态 */}
-      <div className="mt-4 rounded-xl border border-white/[0.06] bg-black/20 p-3.5">
+      <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <StatusDot className={engine?.available ? "bg-emerald-400" : "bg-rose-400"} />
@@ -698,6 +693,6 @@ export default function PlatformPanel() {
           重新复制一次即可，已下载的文件不受影响。
         </p>
       </div>
-    </section>
+    </CollapsibleCard>
   );
 }

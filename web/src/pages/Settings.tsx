@@ -13,9 +13,8 @@ import type {
   SettingsResponse,
 } from "../types";
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../components/ui";
-import FfmpegStatusPanel from "../components/FfmpegStatusPanel";
 import PlatformPanel from "../components/PlatformPanel";
-import EmbyNotifyPanel from "../components/EmbyNotifyPanel";
+import CollapsibleCard from "../components/CollapsibleCard";
 import {
   IconAlert,
   IconBot,
@@ -511,29 +510,29 @@ export default function Settings() {
   return (
     <div className="space-y-5">
       {/* Telegram 账号 */}
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-300">
-              <IconShield className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">Telegram 账号</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">登录后可读取频道消息，session 会加密保存在本地数据库</p>
-            </div>
-          </div>
-          {isLoggedIn ? (
-            <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">
-              <StatusDot className="bg-emerald-400" />
-              已登录
-            </Badge>
-          ) : (
-            <Badge className="border-amber-500/20 bg-amber-500/10 text-warn">
-              <StatusDot className="bg-amber-400" />
-              未登录
-            </Badge>
-          )}
-        </div>
+      <CollapsibleCard
+        id="account"
+        tint="brand"
+        icon={<IconShield className="h-4 w-4" />}
+        title="Telegram 账号"
+        desc="登录后可读取频道消息，session 会加密保存在本地数据库"
+        defaultOpen
+        extra={
+          <>
+            {isLoggedIn ? (
+              <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">
+                <StatusDot className="bg-emerald-400" />
+                已登录
+              </Badge>
+            ) : (
+              <Badge className="border-amber-500/20 bg-amber-500/10 text-warn">
+                <StatusDot className="bg-amber-400" />
+                未登录
+              </Badge>
+            )}
+          </>
+        }
+      >
 
         <div className="mt-4">
           {isLoggedIn ? (
@@ -820,22 +819,16 @@ export default function Settings() {
             </div>
           )}
         </div>
-      </section>
+      </CollapsibleCard>
 
       {/* 网络与代理：协议可选 socks4/5、http、https，自带连通性测试 */}
-      <section className="card p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-300">
-              <IconLink className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">网络与代理</h2>
-              <p className="mt-0.5 text-[12px] leading-relaxed text-slate-500">
-                访问 Telegram 需要代理时填在这里；保存后账号与机器人会重新握手，留空表示直连
-              </p>
-            </div>
-          </div>
+      <CollapsibleCard
+        id="proxy"
+        tint="cyan"
+        icon={<IconLink className="h-4 w-4" />}
+        title="网络与代理"
+        desc="访问 Telegram 需要代理时填在这里；保存后账号与机器人会重新握手，留空表示直连"
+        extra={
           <Badge
             className={
               draft.proxy_url.trim()
@@ -845,7 +838,8 @@ export default function Settings() {
           >
             {draft.proxy_url.trim() ? `${draftProxyScheme.toUpperCase()} · 已配置` : "直连"}
           </Badge>
-        </div>
+        }
+      >
 
         <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[132px_minmax(0,1fr)]">
           <Field label="协议" hint="Telegram 只能用 SOCKS">
@@ -956,19 +950,16 @@ export default function Settings() {
             </p>
           </div>
         )}
-      </section>
+      </CollapsibleCard>
 
       {/* 扫描策略 */}
-      <section className="card p-5">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-ok">
-            <IconSpark className="h-4 w-4" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-semibold text-white">扫描策略</h2>
-            <p className="mt-0.5 text-[12px] text-slate-500">控制扫描频率与每次读取的消息数量</p>
-          </div>
-        </div>
+      <CollapsibleCard
+        id="scan"
+        tint="emerald"
+        icon={<IconSpark className="h-4 w-4" />}
+        title="扫描策略"
+        desc="控制扫描频率与每次读取的消息数量"
+      >
 
         <div className="mt-4 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <div>
@@ -1023,19 +1014,16 @@ export default function Settings() {
             保存策略
           </Button>
         </div>
-      </section>
+      </CollapsibleCard>
 
       {/* 下载 */}
-      <section className="card p-5">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-warn">
-            <IconDownload className="h-4 w-4" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-semibold text-white">下载设置</h2>
-            <p className="mt-0.5 text-[12px] text-slate-500">并发数、文件大小过滤与存储路径规则</p>
-          </div>
-        </div>
+      <CollapsibleCard
+        id="download"
+        tint="amber"
+        icon={<IconDownload className="h-4 w-4" />}
+        title="下载设置"
+        desc="并发数、文件大小过滤与存储路径规则"
+      >
 
         <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Field label="并发下载数" hint="当前固定逐条下载：媒体在别的数据中心，并发会互相打断">
@@ -1119,117 +1107,19 @@ export default function Settings() {
             保存设置
           </Button>
         </div>
-      </section>
-
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
-              <IconSpark className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">Emby 媒体库</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">边下边生成元信息，Emby 扫描即出海报、简介与集数</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
-          <div className="pr-4">
-            <p className="text-[13px] text-slate-200">生成 Emby 媒体信息</p>
-            <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-              每集写入「剧名S01E04.nfo」与缩略图，剧集目录写入 tvshow.nfo 与取自第一集的 poster / landscape / fanart；开启后消息里的图片不再下载
-            </p>
-          </div>
-          <Toggle checked={draft.emby_meta} onChange={(next) => patch("emby_meta", next)} />
-        </div>
-
-        <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
-          <div className="pr-4">
-            <p className="text-[13px] text-slate-200">认不出标题时一链接一文件夹</p>
-            <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-              正文里没有《剧名》这类标题的视频，单独建一个文件夹，名字取正文首行；关掉则退回按频道建的模板路径
-            </p>
-          </div>
-          <Toggle checked={draft.fallback_folder} onChange={(next) => patch("fallback_folder", next)} />
-        </div>
-
-        <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
-          <div className="pr-4">
-            <p className="text-[13px] text-slate-200">从视频随机截帧生成封面与缩略图</p>
-            <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-              每集下载完成后用 ffmpeg 随机截几帧，生成这一集的缩略图（<code className="text-slate-400">剧名S01E04-thumb.jpg</code>）；
-              剧集目录的 poster / landscape / fanart 统一取自第一集。消息里的图片不再下载。
-            </p>
-          </div>
-          <Toggle checked={draft.auto_cover_frames} onChange={(next) => patch("auto_cover_frames", next)} />
-        </div>
-
-        <div className="mt-3 grid grid-cols-1 gap-3">
-          <Field
-            label="ffmpeg 路径"
-            hint="用于生成缩略图与封面；留空自动使用内置二进制或系统 PATH 里的 ffmpeg"
-          >
-            <input
-              className="field font-mono text-[12.5px]"
-              placeholder="留空自动查找，例如 C:/ffmpeg/bin/ffmpeg.exe"
-              value={draft.ffmpeg_path}
-              onChange={(e) => patch("ffmpeg_path", e.target.value)}
-            />
-          </Field>
-          <FfmpegStatusPanel key={ffmpegToken} configuredPath={draft.ffmpeg_path} />
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
-            <p className="text-[11px] uppercase tracking-wider text-slate-500">落盘结构</p>
-            <pre className="mt-1.5 overflow-x-auto font-mono text-[11px] leading-relaxed text-slate-400">{`美人局/
-  美人局S01E01.mp4
-  美人局S01E01.nfo
-  美人局S01E01-thumb.jpg    ← 每集各自的随机截图
-  美人局S01E02.mp4
-  美人局S01E02-thumb.jpg
-  tvshow.nfo
-  poster.jpg  landscape.jpg  fanart.jpg   ← 取自第一集`}</pre>
-          </div>
-        </div>
-
-        <div className="mt-4 flex justify-end">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() =>
-              void saveSection("emby", [
-                "emby_meta",
-                "fallback_folder",
-                "auto_cover_frames",
-                "ffmpeg_path",
-              ]).then(() => setFfmpegToken((n) => n + 1))
-            }
-            loading={savingSection === "emby"}
-          >
-            保存设置
-          </Button>
-        </div>
-      </section>
-
-      {/* Emby 入库通知：下载完成后自动让 Emby 增量扫描 */}
-      <EmbyNotifyPanel />
+      </CollapsibleCard>
 
       {/* 第三方平台：B站 / 抖音 / 小红书 / YouTube，引擎 yt-dlp */}
       <PlatformPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-sky-500/20 bg-sky-500/10 text-sky-300">
-              <IconTrash className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">缓存清理</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">
-                封面预览与截帧候选图存在 data 目录下，删掉会自动重建；数据库、下载文件与日志不受影响
-              </p>
-            </div>
-          </div>
+      <CollapsibleCard
+        id="cache"
+        tint="sky"
+        icon={<IconTrash className="h-4 w-4" />}
+        title="缓存清理"
+        desc="封面预览与截帧候选图存在 data 目录下，删掉会自动重建；数据库、下载文件与日志不受影响"
+        extra={
           <Badge
             className={
               (cache?.overBytes ?? 0) > 0
@@ -1239,7 +1129,8 @@ export default function Settings() {
           >
             {cache ? formatBytes(cache.total.bytes) : "—"}
           </Badge>
-        </div>
+        }
+      >
 
         <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
           {[
@@ -1340,27 +1231,22 @@ export default function Settings() {
               }：${formatDateTime(cache.lastTrimAt)}，释放 ${formatBytes(cache.lastTrimFreed)}`
             : "还没有清理过。下载完成与截帧之后会各检查一次，超过上限自动清理。"}
         </p>
-      </section>
+      </CollapsibleCard>
 
       {/* Telegram 机器人 */}
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-ok">
-              <IconBot className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">Telegram 机器人</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">
-                给机器人发一条消息就能扫描频道、增删订阅、看下载进度，不用打开网页
-              </p>
-            </div>
-          </div>
+      <CollapsibleCard
+        id="bot"
+        tint="emerald"
+        icon={<IconBot className="h-4 w-4" />}
+        title="Telegram 机器人"
+        desc="给机器人发一条消息就能扫描频道、增删订阅、看下载进度，不用打开网页"
+        extra={
           <Badge className={botStatus.tone}>
             <span className={`h-1.5 w-1.5 rounded-full ${botStatus.dot}`} />
             {botStatus.label}
           </Badge>
-        </div>
+        }
+      >
 
         <div className="mt-4 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <div className="pr-4">
@@ -1501,23 +1387,16 @@ export default function Settings() {
             </Button>
           </div>
         </div>
-      </section>
+      </CollapsibleCard>
 
       {/* API 凭证 */}
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-violet-500/20 bg-violet-500/10 text-violet-300">
-              <IconKey className="h-4 w-4" />
-            </span>
-            <div>
-              <h2 className="text-[14px] font-semibold text-white">API 凭证</h2>
-              <p className="mt-0.5 text-[12px] text-slate-500">
-                使用内置凭证可跳过 my.telegram.org 申请；也可切换为自建应用（改完需要重新连接）
-              </p>
-            </div>
-          </div>
-        </div>
+      <CollapsibleCard
+        id="credentials"
+        tint="violet"
+        icon={<IconKey className="h-4 w-4" />}
+        title="API 凭证"
+        desc="使用内置凭证可跳过 my.telegram.org 申请；也可切换为自建应用（改完需要重新连接）"
+      >
 
         <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1">
           <button
@@ -1606,7 +1485,7 @@ export default function Settings() {
             保存凭证
           </Button>
         </div>
-      </section>
+      </CollapsibleCard>
 
       {/* 版本信息：与镜像标签、/api/health 的 version 保持一致 */}
       <p className="pb-2 text-center text-[11px] text-slate-600">

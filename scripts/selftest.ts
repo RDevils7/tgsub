@@ -965,7 +965,7 @@ async function embyChecks(): Promise<void> {
     return crypto.createHash("sha1").update(buf).digest("hex");
   };
 
-  const madeFirst = await autoCoversFromVideo(clipA, dir, { base: "美人局S01E01", isFirst: true });
+  const madeFirst = await autoCoversFromVideo(clipA, dir, { base: "美人局S01E01", series: "force" });
   await acheck("第一集生成单集缩略图与三张剧集封面", async () => {
     assert.ok(madeFirst.includes("美人局S01E01-thumb.jpg"), "缺单集缩略图");
     assert.ok(madeFirst.includes("poster.jpg"), "缺 poster");
@@ -987,18 +987,53 @@ async function embyChecks(): Promise<void> {
   });
 
   const posterBefore = await sha1(path.join(dir, "poster.jpg"));
-  const madeSecond = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E02", isFirst: false });
+  const madeSecond = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E02", series: "skip" });
   await acheck("第二集只生成自己的缩略图，不动剧集封面", async () => {
     assert.ok(madeSecond.includes("美人局S01E02-thumb.jpg"), "第二集缺缩略图");
     assert.ok(!madeSecond.includes("poster.jpg"), "非第一集不该重做剧集封面");
     assert.equal(await sha1(path.join(dir, "poster.jpg")), posterBefore);
   });
 
-  const madeAgain = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E01", isFirst: true });
+  const madeAgain = await autoCoversFromVideo(clipB, dir, { base: "美人局S01E01", series: "force" });
   await acheck("第一集重跑时覆盖剧集封面（目录图始终同第一集）", async () => {
     assert.ok(madeAgain.includes("poster.jpg"));
     assert.ok(!madeAgain.includes("美人局S01E01-thumb.jpg"), "缩略图已存在不该重做");
     assert.notEqual(await sha1(path.join(dir, "poster.jpg")), posterBefore);
+  });
+
+  await acheck("if-missing 模式只补缺的剧集封面", async () => {
+    const gapDir = path.join(dir, "gap-case");
+    await fs.mkdir(gapDir, { recursive: true });
+    const made = await autoCoversFromVideo(clipA, gapDir, { base: "缺图S01E01", series: "if-missing" });
+    assert.ok(made.includes("poster.jpg"), "缺 poster 时应该补上");
+    assert.ok(made.includes("缺图S01E01-thumb.jpg"), "缺缩略图时应该补上");
+    const before = await sha1(path.join(gapDir, "poster.jpg"));
+    const again = await autoCoversFromVideo(clipB, gapDir, { base: "缺图S01E02", series: "if-missing" });
+    assert.ok(!again.includes("poster.jpg"), "已有 poster 不该重做");
+    assert.equal(await sha1(path.join(gapDir, "poster.jpg")), before);
+  });
+
+  await acheck("季目录结构下剧集封面落在剧集根目录", async () => {
+    const root = path.join(dir, "season-case");
+    const season = path.join(root, "Season 01");
+    await fs.mkdir(season, { recursive: true });
+    const made = await autoCoversFromVideo(clipA, season, {
+      base: "季目录S01E01",
+      series: "force",
+      seriesDir: root,
+    });
+    assert.ok(made.includes("poster.jpg"), "缺 poster");
+    const exists = async (p: string) => {
+      try {
+        await fs.access(p);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    assert.ok(await exists(path.join(root, "poster.jpg")), "poster 应在剧集根目录");
+    assert.ok(!(await exists(path.join(season, "poster.jpg"))), "poster 不应落在季目录");
+    assert.ok(await exists(path.join(season, "季目录S01E01-thumb.jpg")), "缩略图应跟视频同目录");
   });
 
   await acheck("权限不足的诊断先说清视频已落盘，再给改属主办法", async () => {

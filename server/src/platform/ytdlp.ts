@@ -470,7 +470,7 @@ export async function probePlatform(
 
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.2 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.2.0 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const first = await dumpJson(info, platform, cookie, ["--flat-playlist", "--playlist-end", String(PLAYLIST_LIMIT)], url);
@@ -542,7 +542,7 @@ export async function downloadPlatform(
 ): Promise<PlatformDownloadResult> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.2 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.2.0 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const ffmpeg = await ffmpegInfo().catch(() => null);

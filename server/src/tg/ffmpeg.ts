@@ -318,10 +318,13 @@ export async function probeVideo(file: string): Promise<VideoProbe | null> {
   }
 }
 
-export type FitMode = "cover" | "contain" | "stretch";
+export type FitMode = "cover" | "contain" | "stretch" | "blur";
 
-/** 默认留黑边：视频比例和封面规格不一致时保住完整画面，不裁掉内容 */
-export const DEFAULT_FIT: FitMode = "contain";
+/**
+ * 默认模糊填充：画面完整显示，空出来的边用同一帧的放大模糊版填满。
+ * 以前默认 contain（留黑边），黑边在 Emby 里很扎眼；cover 又会把画面裁掉一截。
+ */
+export const DEFAULT_FIT: FitMode = "blur";
 
 /** 归一化裁剪框（0~1，相对整帧左上角），来自界面上的手动框选 */
 export interface CropRect {
@@ -363,6 +366,17 @@ function scaleFilter(width: number, height: number, fit: FitMode, crop?: CropRec
   if (fit === "contain") {
     return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`;
   }
+  if (fit === "blur") {
+    // 底：放大铺满 + 模糊 + 压暗；面：完整画面；叠在一起就是「模糊边的完整画面」
+    const radius = Math.min(40, Math.max(6, Math.round(Math.min(width, height) / 28)));
+    return [
+      "split=2[bg][fg]",
+      `[bg]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}` +
+        `,boxblur=luma_radius=${radius}:luma_power=2,eq=brightness=-0.12:saturation=0.9[bgb]`,
+      `[fg]scale=${width}:${height}:force_original_aspect_ratio=decrease[fgs]`,
+      "[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1",
+    ].join(";");
+  }
   return `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
 }
 
@@ -380,28 +394,42 @@ export async function captureFrame(
 ): Promise<void> {
   const info = await requireFfmpeg();
   const at = Math.max(0, Number(opts.at) || 0);
+  const fit = opts.fit ?? DEFAULT_FIT;
   await fs.promises.mkdir(path.dirname(opts.out), { recursive: true });
-  await run(
-    info.ffmpeg as string,
-    [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-y",
-      "-ss",
-      at.toFixed(3),
-      "-i",
-      file,
-      "-frames:v",
-      "1",
-      "-vf",
-      scaleFilter(opts.width, opts.height, opts.fit ?? DEFAULT_FIT, opts.crop),
-      "-q:v",
-      "2",
-      opts.out,
-    ],
-    60_000,
-  );
+
+  const attempt = async (mode: FitMode) =>
+    run(
+      info.ffmpeg as string,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        at.toFixed(3),
+        "-i",
+        file,
+        "-frames:v",
+        "1",
+        "-vf",
+        scaleFilter(opts.width, opts.height, mode, opts.crop),
+        "-q:v",
+        "2",
+        opts.out,
+      ],
+      60_000,
+    );
+
+  try {
+    await attempt(fit);
+  } catch (err) {
+    // 模糊填充依赖 boxblur / eq / overlay 这套滤镜链，老一点的 ffmpeg 精简版可能没编进去。
+    // 这种情况退成留黑边（至少图能出来），不要因为封面好看与否让截图整件事失败。
+    if (fit !== "blur") throw err;
+    logger.warn({ err: (err as Error).message }, "模糊填充截图失败，退回留黑边");
+    await attempt("contain");
+  }
+
   const st = await fs.promises.stat(opts.out).catch(() => null);
   if (!st || st.size === 0) throw new Error("截图失败：输出文件为空（该时间点可能没有画面）");
 }

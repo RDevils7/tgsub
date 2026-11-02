@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import express, { Router } from "express";
 import { db, getSettings } from "../db";
@@ -21,6 +23,7 @@ import {
   type CropRect,
   type FitMode,
 } from "../tg/ffmpeg";
+import { writeBlurFill } from "../tg/coverimage";
 import { loadSharp } from "../tg/sharp";
 import {
   addSource,
@@ -31,6 +34,7 @@ import {
   isVideoFile,
   listSources,
   removeSource,
+  scanVideoFiles,
   type MediaFileEntry,
 } from "../tg/mediatree";
 import {
@@ -93,10 +97,50 @@ interface Target {
   dir: string;
   /** 文件名（不含扩展名），仅 file 目标有 */
   base: string | null;
-  /** 视频绝对路径，仅 file 目标有 */
+  /**
+   * 用于截帧 / 预览的视频绝对路径。
+   *
+   * 文件目标就是它自己；目录目标取目录里的第一集 ——
+   * 剧集封面（poster/landscape/fanart）本来就该取自第一集，
+   * 在剧集层级截图时直接用第一集的视频即可。
+   */
   video: string | null;
   /** 关联的下载记录（手动选择的文件没有） */
   download: Download | null;
+}
+
+/**
+ * 目录里的第一个视频文件（剧集截图用）。
+ *
+ * 优先用媒体树里已登记的文件：带集号，排序稳定；
+ * 找不到再退回磁盘扫描（递归，含 Season 01 这类季目录）。
+ */
+function firstVideoInDir(dir: string): string | null {
+  const folder = collectFolders().find((f) => f.dir === dir);
+  const registered = folder?.files ?? [];
+  if (registered.length) {
+    const sorted = [...registered].sort((a, b) => {
+      const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
+      const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
+      if (ea !== eb) return ea - eb;
+      return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
+    });
+    return sorted[0].path;
+  }
+  try {
+    const dirName = path.basename(dir);
+    const found = scanVideoFiles(dir)
+      .map((p) => ({ p, info: deriveEpisodeInfo(path.basename(p), dirName) }))
+      .sort((a, b) => {
+        const ea = a.info.episode ?? Number.MAX_SAFE_INTEGER;
+        const eb = b.info.episode ?? Number.MAX_SAFE_INTEGER;
+        if (ea !== eb) return ea - eb;
+        return a.p.localeCompare(b.p, "zh-CN", { numeric: true });
+      });
+    return found.length ? found[0].p : null;
+  } catch {
+    return null;
+  }
 }
 
 function resolveTarget(key: string): Target {
@@ -117,7 +161,8 @@ function resolveTarget(key: string): Target {
       path: resolved,
       dir: resolved,
       base: null,
-      video: null,
+      // 剧集层级截图用第一集
+      video: firstVideoInDir(resolved),
       download: null,
     };
   }
@@ -148,12 +193,26 @@ const IMAGE_SPECS: Record<ImageName, { width: number; height: number; label: str
 
 const IMAGE_NAMES = Object.keys(IMAGE_SPECS) as ImageName[];
 
-/** 缩放方式：默认留黑边（比例不对时保住整张图），其次裁剪铺满 / 拉伸变形 */
-const DEFAULT_FIT: FitMode = "contain";
+/**
+ * 单集专属的图片只有缩略图。
+ *
+ * poster / landscape / fanart / banner 描述的是整部剧，
+ * Emby 从剧集目录读它们；单集文件旁边的同类文件名不会被识别，
+ * 所以单集视图只列 thumb。
+ */
+const EPISODE_IMAGE_NAMES: ImageName[] = ["thumb"];
+
+/**
+ * 缩放方式：默认「模糊填充」—— 画面完整显示，空出来的边用同一张图的放大模糊版填满；
+ * 另可手动选留黑边 / 裁剪铺满 / 拉伸变形。
+ */
+const DEFAULT_FIT: FitMode = "blur";
 
 function normalizeFit(value: unknown, fallback: FitMode = DEFAULT_FIT): FitMode {
   const text = String(value ?? "").trim().toLowerCase();
-  return text === "cover" || text === "contain" || text === "stretch" ? (text as FitMode) : fallback;
+  return text === "cover" || text === "contain" || text === "stretch" || text === "blur"
+    ? (text as FitMode)
+    : fallback;
 }
 
 /** 裁剪框：上传接口用 query 传 "x,y,w,h"，其它接口用 JSON 对象 */
@@ -172,6 +231,20 @@ function isImageName(value: unknown): value is ImageName {
 
 function normalizeScope(value: unknown): ImageScope {
   return value === "episode" ? "episode" : "series";
+}
+
+/**
+ * 校验图片作用域与目标类型是否匹配。
+ *
+ * 剧集目录只能改剧集图片，具体视频只能改单集图片 —— 两者一一对应，
+ * 避免出现「给单集写 poster.jpg」这种 Emby 读不到的无用文件。
+ */
+function assertScopeMatches(target: Target, scope: ImageScope): void {
+  if (target.kind === "folder") {
+    assert(scope === "series", 400, "剧集目录只能设置剧集图片");
+    return;
+  }
+  assert(scope === "episode", 400, "单集视频只能设置单集图片");
 }
 
 /** 封面落盘路径：剧集封面放目录里，单集封面带文件名前缀 */
@@ -211,7 +284,7 @@ async function statFile(file: string) {
 
 /**
  * 写一张封面图：先按框选范围裁（如果框了），再缩放到规格尺寸。
- * 没框选时按 fit 处理（默认留黑边），保证比例不符也不丢画面。
+ * 没框选时按 fit 处理：默认 blur（完整画面 + 模糊边），也可 contain / cover / stretch。
  */
 async function renderImage(
   input: string | Buffer,
@@ -225,6 +298,23 @@ async function renderImage(
   if (!sharp) {
     if (Buffer.isBuffer(input)) await fs.promises.writeFile(dest, input);
     else await fs.promises.copyFile(input, dest);
+    return;
+  }
+
+  // 模糊填充走 sharp 之外的助手，需要真实文件路径：Buffer 先落临时文件
+  if (!crop && fit === "blur") {
+    if (typeof input === "string") {
+      await writeBlurFill(input, dest, { width: spec.width, height: spec.height, quality: 92 });
+    } else {
+      const tmp = path.join(os.tmpdir(), "tgsub-render", `${crypto.randomUUID()}.img`);
+      await fs.promises.mkdir(path.dirname(tmp), { recursive: true });
+      await fs.promises.writeFile(tmp, input);
+      try {
+        await writeBlurFill(tmp, dest, { width: spec.width, height: spec.height, quality: 92 });
+      } finally {
+        await fs.promises.unlink(tmp).catch(() => undefined);
+      }
+    }
     return;
   }
 
@@ -609,10 +699,19 @@ metadataRouter.get(
       }
     }
 
+    /**
+     * 图片列表跟着目标走：
+     *  - 剧集目录 → 只有剧集图片（poster / landscape / fanart / thumb / banner）
+     *  - 具体视频 → 只有这一集自己的缩略图
+     *
+     * poster / landscape / fanart / banner 都是整部剧共用的概念，
+     * 放在单集文件旁边没有意义，所以单集只认 thumb。
+     */
     const images: Array<Record<string, unknown>> = [];
-    const scopes: ImageScope[] = target.kind === "folder" ? ["series"] : ["series", "episode"];
+    const scopes: ImageScope[] = target.kind === "folder" ? ["series"] : ["episode"];
+    const names: ImageName[] = target.kind === "folder" ? IMAGE_NAMES : EPISODE_IMAGE_NAMES;
     for (const scope of scopes) {
-      for (const name of IMAGE_NAMES) {
+      for (const name of names) {
         const file = imagePath(target, scope, name);
         const st = await statFile(file);
         if (!st) continue;
@@ -635,6 +734,8 @@ metadataRouter.get(
     const allFiles = await listImageFiles(target.dir);
     const extras = allFiles
       .filter((n) => !known.has(n))
+      // 单集视图只列这一集自己的其它图，别把整个剧集目录的图片都倒出来
+      .filter((n) => target.kind !== "file" || n.startsWith(`${sanitizeSegment(target.base ?? "", 120)}-`))
       .map((n) => ({
         file: n,
         url: `/api/metadata/extras?key=${encodePath(target.path)}&file=${encodeURIComponent(n)}`,
@@ -642,6 +743,8 @@ metadataRouter.get(
 
     const videoStat = target.video ? await statFile(target.video) : null;
     const probe = videoStat ? await probeVideo(target.video as string) : null;
+    // 剧集目录的视频是第一集的 —— 剧集封面本来就取自第一集
+    const videoSource: "self" | "first" = target.kind === "folder" ? "first" : "self";
 
     const covers =
       target.download ? await listCovers(target.download.channel_id, target.download.message_id).catch(() => []) : [];
@@ -662,7 +765,9 @@ metadataRouter.get(
         base: target.base,
         dirName: path.basename(target.dir),
       },
-      video: videoStat ? { exists: true, size: videoStat.size, probe } : { exists: false, size: 0, probe: null },
+      video: videoStat
+        ? { exists: true, size: videoStat.size, probe, source: videoSource }
+        : { exists: false, size: 0, probe: null, source: videoSource },
       nfo: {
         episode: paths.episode
           ? {
@@ -791,6 +896,9 @@ metadataRouter.put(
  *  - 每个视频写一份单集 NFO（剧名、季、集从文件名解析）
  *  - 目录里补一份 tvshow.nfo
  *  - 没有封面时用 ffmpeg 随机截帧生成横版/竖版封面
+ *
+ * 选中单个视频时同样覆盖它所在的整个剧集 —— 一键生成是「整部剧」级别的操作，
+ * 不该只处理当前这一集，否则剧集封面永远只有一集有。
  */
 metadataRouter.post(
   "/generate",
@@ -799,9 +907,11 @@ metadataRouter.post(
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
 
+    // 目标所在剧集目录下的全部视频
+    const folder = collectFolders().find((f) => f.dir === target.dir);
     const files: MediaFileEntry[] =
       target.kind === "file"
-        ? [
+        ? folder?.files ?? [
             {
               path: target.path,
               name: path.basename(target.path),
@@ -817,17 +927,24 @@ metadataRouter.post(
               source: target.download ? "download" : "manual",
             },
           ]
-        : collectFolders()
-            .find((f) => f.dir === target.dir)
-            ?.files ?? [];
+        : folder?.files ?? [];
 
     assert(files.length > 0, 404, "这个目录里没有找到视频文件");
+
+    // 按集号排序，第一集 = 剧集封面的来源
+    const ordered = [...files].sort((a, b) => {
+      const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
+      const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
+      if (ea !== eb) return ea - eb;
+      return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
+    });
+    const firstPath = ordered[0].path;
 
     const dirName = path.basename(target.dir);
     let nfoCount = 0;
     let coverCount = 0;
 
-    for (const file of files) {
+    for (const file of ordered) {
       // 项目下载的文件才有下载记录，手动添加的文件没有
       const row = file.downloadId ? stmtGet.get(file.downloadId) : undefined;
       const info = deriveEpisodeInfo(file.name, dirName);
@@ -861,12 +978,13 @@ metadataRouter.post(
 
       if (row) syncEmbyJson(row, fields);
 
-      // 每集都要有缩略图；剧集目录的三张封面以第一集为准，
-      // 第一集还没下（或封面缺失）时先用当前集顶上，之后第一集下载完成会覆盖
-      const poster = path.join(file.dir, "poster.jpg");
+      // 每集都要有自己的缩略图；剧集目录的三张封面只由第一集生成，
+      // 其余集跳过，避免多集互相覆盖导致 poster 一直在变
       const made = await autoCoversFromVideo(file.path, file.dir, {
         base: file.base,
-        isFirst: info.episode === 1 || !fs.existsSync(poster),
+        series: file.path === firstPath ? "force" : "skip",
+        // 季目录结构下视频在 Season 01 里，剧集封面要放在剧集根目录
+        seriesDir: folder?.dir ?? target.dir,
       });
       coverCount += made.length;
     }
@@ -905,7 +1023,7 @@ metadataRouter.get(
     assert(isImageName(req.query.name), 400, "未知图片类型");
     const target = resolveTarget(key);
     const scope = normalizeScope(req.query.scope);
-    if (scope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    assertScopeMatches(target, scope);
     const file = imagePath(target, scope, req.query.name as ImageName);
     assert(fs.existsSync(file), 404, "图片不存在");
     res.setHeader("Cache-Control", "no-cache");
@@ -922,7 +1040,7 @@ metadataRouter.delete(
     assert(isImageName(req.query.name), 400, "未知图片类型");
     const target = resolveTarget(key);
     const scope = normalizeScope(req.query.scope);
-    if (scope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    assertScopeMatches(target, scope);
     const file = imagePath(target, scope, req.query.name as ImageName);
     const existed = fs.existsSync(file);
     await fs.promises.unlink(file).catch(() => undefined);
@@ -943,7 +1061,7 @@ metadataRouter.post(
 
     const target = resolveTarget(key);
     const scope = normalizeScope(req.query.scope);
-    if (scope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    assertScopeMatches(target, scope);
     const fit = normalizeFit(req.query.fit);
     const crop = parseCropParam(req.query.crop);
     const file = imagePath(target, scope, req.query.name as ImageName);
@@ -966,7 +1084,9 @@ metadataRouter.post(
     const fromName = req.body?.fromName;
     const toName = req.body?.toName;
     assert(isImageName(fromName) && isImageName(toName), 400, "未知图片类型");
-    if (toScope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    // 复制只能在同一个层级内进行：剧集目录复制剧集图片，单集复制单集图片
+    assertScopeMatches(target, toScope);
+    assertScopeMatches(target, fromScope);
     const src = imagePath(target, fromScope, fromName);
     assert(fs.existsSync(src), 404, "源图片不存在");
     const dest = imagePath(target, toScope, toName);
@@ -989,7 +1109,7 @@ metadataRouter.post(
     const name = req.body?.name;
     assert(isImageName(name), 400, "未知图片类型");
     const scope = normalizeScope(req.body?.scope);
-    if (scope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    assertScopeMatches(target, scope);
     const dest = imagePath(target, scope, name);
     await renderImage(src, dest, IMAGE_SPECS[name], normalizeFit(req.body?.fit), parseCropParam(req.body?.crop));
     res.json({ ok: true, url: `/api/metadata/image?key=${encodePath(target.path)}&scope=${scope}&name=${name}&v=${Date.now()}` });
@@ -1011,7 +1131,8 @@ metadataRouter.post(
     const key = String(req.body?.key ?? "");
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
-    assert(target.kind === "file" && target.video, 400, "请选择一个视频文件");
+    // 剧集目录用第一集的视频来抽帧
+    assert(target.video, 400, "这个目录里没有找到视频文件");
     assert(fs.existsSync(target.video), 410, "视频文件不在了");
 
     const probe = await probeVideo(target.video);
@@ -1054,13 +1175,14 @@ metadataRouter.post(
     const key = String(req.body?.key ?? "");
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
-    assert(target.kind === "file" && target.video, 400, "请选择一个视频文件");
+    // 剧集目录用第一集的视频来截帧
+    assert(target.video, 400, "这个目录里没有找到视频文件");
     assert(fs.existsSync(target.video), 410, "视频文件不在了");
 
     const name = req.body?.name;
     assert(isImageName(name), 400, "未知图片类型");
     const scope = normalizeScope(req.body?.scope);
-    if (scope === "episode") assert(target.kind === "file", 400, "单集图片需要选择具体的视频文件");
+    assertScopeMatches(target, scope);
     const probe = await probeVideo(target.video);
     const duration = probe?.duration ?? null;
     let at = Number(req.body?.at);
@@ -1093,7 +1215,8 @@ metadataRouter.post(
     const key = String(req.body?.key ?? "");
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
-    assert(target.kind === "file" && target.video, 400, "请选择一个视频文件");
+    // 剧集目录用第一集的视频来预览
+    assert(target.video, 400, "这个目录里没有找到视频文件");
     assert(fs.existsSync(target.video), 410, "视频文件不在了");
 
     const probe = await probeVideo(target.video);
@@ -1154,7 +1277,8 @@ metadataRouter.get(
     const key = String(req.query.key ?? "");
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
-    assert(target.kind === "file" && target.video, 400, "请选择一个视频文件");
+    // 剧集目录播放第一集，供截帧时定位画面
+    assert(target.video, 400, "这个目录里没有找到视频文件");
     const st = await fs.promises.stat(target.video);
     const range = req.headers.range;
     const total = st.size;

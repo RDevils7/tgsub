@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.2-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.0-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
@@ -18,18 +18,17 @@
 
 ---
 
-## 本版更新（1.1.2）
+## 本版更新（1.2.0）
 
-**一句话：B站 下不动、抖音 Cookie 填不对，两个平台问题一起修掉 —— 代理不再拖累国内平台，Cookie 怎么粘都能认。**
+**一句话：Emby 入库拆成独立页面、设置页全部可折叠，封面改成「模糊填充」—— 比例不符时画面完整保留、边角用同一张图虚化，不再黑边也不裁切。**
 
-1. **代理默认只管 YouTube**。B站 的 upos CDN 会把海外代理 IP 判成 `HTTP Error 567`（解析正常，只有下分片被拒）。现在 B站 / 抖音 / 小红书 默认**直连**，只有 YouTube 与「检查更新」走「第三方平台代理」；服务器在海外要下国内平台，再打开新加的「国内平台也走代理」开关。
-2. **567 的报错按真实情况给建议**：开了代理就提示去关，没开就提示换 Cookie / 升级 yt-dlp，不再让你去关一个本来就没开的开关。
-3. **Cookie 三种粘法都能认**：普通 `k=v; k2=v2`、`Cookie:` 前缀、Cookie-Editor 导出的 **JSON**、Get cookies.txt 导出的 **Netscape 文件**，以及换行分隔的多行粘贴。以前粘 JSON 进去会显示「未识别到任何键值对」。
-4. **抖音 Cookie 判定不再误报**：`msToken` 是网页脚本现算的，根本不在 Cookie 里，原来拿它当必要项会一直显示「缺关键项」；现在 `ttwid` / `sessionid` / `odin_tt` 任一即可。悬停说明也补了「Console 里 `document.cookie` 拿不到 HttpOnly 的 ttwid，必须从 Request Headers 复制」。
-5. **Cookie 文件写全域名**：抖音同时写 `.douyin.com` 与 `.iesdouyin.com`（分享短链要跳一次），YouTube 同时写 `.youtube.com` 与 `.google.com`（`SID` / `SAPISID` 实际种在 google.com 上），漏域名的表现就是「Cookie 明明填了却仍要求登录」。
-6. **粘贴识别**：粘进来只剩值、或只剩字段名时，界面直接说「没认出任何键值对」，而不是留下一句含糊的「0 项」。
+1. **Emby 入库独立成页**：侧边栏新增「Emby 入库」，原设置页里的「Emby 媒体库」与「入库通知」两块整体搬过去；设置页只留账号 / 代理 / 扫描 / 下载 / 缓存 / 机器人 / API 凭证。
+2. **设置页每个大项都能折叠**：新增 `CollapsibleCard` 外壳，点标题栏展开 / 收起，右侧徽章与开关照旧可点不触发折叠；展开状态存在浏览器 localStorage，下次进来还是上次的样子。
+3. **封面模糊填充**：poster / landscape / fanart 与每集缩略图，比例和目标规格不一致时不再黑边、也不裁剪画面，而是把画面完整居中、空出来的边角用同一张图的放大虚化版 + 压暗填满（看起像原图延续）。元数据编辑页对应的「模糊填充」选项也成了默认。
+4. **官方封面不够就截帧**：平台视频的官方封面若分辨率过低（宽 < 640px）撑不起海报，直接判为「没有图」回退视频截帧，避免把小图放大成糊海报；截帧本身也用同一套模糊填充观感。
+5. **ffmpeg 滤镜兜底**：模糊填充依赖 boxblur/eq/overlay 滤镜链，精简版 ffmpeg 没有时自动退回留黑边，不会因封面好看与否让截图整件失败。
 
-> 1.1.0 的官方封面 / 完整元数据 / 合集选择、1.1.1 的合并兜底与重试全部保留。
+> 1.1.0 的官方封面 / 完整元数据 / 合集选择、1.1.1 的合并兜底与重试、1.1.2 的代理与 Cookie 修复全部保留。
 
 ---
 
@@ -181,7 +180,7 @@ downloads/第三方/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.1.2` | 固定版本（**生产环境建议锁定**） |
+| `v1.2.0` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push `main` 只跑构建与冒烟测试、不发布镜像。
 
@@ -210,7 +209,7 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 「连接异常，延迟重连」刷屏 | 先看设置页「联网测试」：Telegram API 超时就是代理没生效 |
 | 扫码后立刻掉线 | 代理不稳定或 IP 被风控；换节点，必要时走「彻底重置并重新登录」 |
 | 新集没出现在 Emby | 确认「Emby 入库通知」地址 / API Key / 路径映射三项都对，点「测试连接」 |
-| `yt-dlp 不可用` | 镜像低于 1.1.2 或本地开发没装；升级镜像，或在设置里手填路径 |
+| `yt-dlp 不可用` | 镜像低于 1.2.0 或本地开发没装；升级镜像，或在设置里手填路径 |
 | `要求登录` / `风控拦截（412）` | Cookie 过期，重新复制一次；已下载的文件不受影响 |
 | `连不上 YouTube` | 没配第三方平台代理，或节点不通；YouTube 还需在代理地区可用 |
 | 日志 `SSL: UNEXPECTED_EOF_WHILE_READING` | 代理把长连接掐了（1.1.1 起自动重试 10 次）；仍频繁出现就换节点或避开高峰期 |

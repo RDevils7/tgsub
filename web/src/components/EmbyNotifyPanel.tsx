@@ -4,6 +4,7 @@ import { formatDateTime } from "../utils";
 import type { AppSettings, EmbyProbeResult, EmbyStatus, SettingsResponse } from "../types";
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "./ui";
 import { IconCheck, IconEye, IconEyeOff, IconRefresh, IconSpark, IconTv } from "./icons";
+import CollapsibleCard from "./CollapsibleCard";
 
 /**
  * Emby 入库通知（嵌在设置页里）。
@@ -162,28 +163,21 @@ export default function EmbyNotifyPanel() {
   const successCount = status?.history.filter((h) => h.ok).length ?? 0;
 
   return (
-    <section className="card p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-300">
-            <IconTv className="h-4 w-4" />
-          </span>
-          <div>
-            <h2 className="text-[14px] font-semibold text-white">Emby 入库通知</h2>
-            <p className="mt-0.5 text-[12px] leading-relaxed text-slate-500">
-              每集下载完成后把路径提交给 Emby 的
-              <code className="mx-1 text-slate-400">/Library/Media/Updated</code>
-              接口，Emby 立刻增量扫描，不用等定时任务也不用手动点扫描
-            </p>
-          </div>
-        </div>
+    <CollapsibleCard
+      id="emby-notify"
+      tint="emerald"
+      icon={<IconTv className="h-4 w-4" />}
+      title="入库通知"
+      desc="每集下载完成后把路径提交给 Emby 的 /Library/Media/Updated 接口，Emby 立刻增量扫描，不用等定时任务也不用手动点扫描"
+      defaultOpen
+      extra={
         <Badge className={badge.tone}>
           <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
           {badge.label}
         </Badge>
-      </div>
-
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      }
+    >
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <p className="text-[11px] uppercase tracking-wider text-slate-500">服务地址</p>
           <p className="mt-1 break-all font-mono text-[12px] text-slate-300">{status?.url || "未填写"}</p>
@@ -377,6 +371,6 @@ export default function EmbyNotifyPanel() {
           </div>
         </div>
       </details>
-    </section>
+    </CollapsibleCard>
   );
 }

@@ -726,7 +726,11 @@ export interface MetadataDetail {
     dirName: string;
   };
   paths: { dir: string; video: string | null; base: string | null; dirName: string };
-  video: { exists: boolean; size: number; probe: VideoProbe | null };
+  /**
+   * 视频信息。
+   * source = "first" 表示这是剧集目录下的第一集（剧集封面取自它）。
+   */
+  video: { exists: boolean; size: number; probe: VideoProbe | null; source: "self" | "first" };
   nfo: { episode: NfoSlotInfo | null; show: NfoSlotInfo };
   images: MetadataImage[];
   extras: Array<{ file: string; url: string }>;

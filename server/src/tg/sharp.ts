@@ -12,7 +12,8 @@ export interface ResizeOptions {
   height?: number;
   fit?: string;
   position?: string;
-  background?: string;
+  /** 纯色用 "#000000"；要透明留白（模糊填充用）就用 {r,g,b,alpha} */
+  background?: string | { r: number; g: number; b: number; alpha?: number };
   /** 目标尺寸大于原图时不放大（单集缩略图保持画面原始比例时用） */
   withoutEnlargement?: boolean;
 }
@@ -24,11 +25,21 @@ export interface ExtractOptions {
   height: number;
 }
 
+export interface CompositeLayer {
+  input: string | Buffer;
+  top?: number;
+  left?: number;
+}
+
 export interface SharpImage {
   metadata(): Promise<{ width?: number; height?: number }>;
   resize(opts: ResizeOptions): SharpImage;
   extract(opts: ExtractOptions): SharpImage;
+  blur(sigma: number): SharpImage;
+  modulate(opts: { brightness?: number; saturation?: number }): SharpImage;
+  composite(layers: CompositeLayer[]): SharpImage;
   jpeg(opts: { quality: number }): { toFile(target: string): Promise<unknown> };
+  png(): { toFile(target: string): Promise<unknown> };
 }
 
 export type SharpFactory = (input: string | Buffer) => SharpImage;

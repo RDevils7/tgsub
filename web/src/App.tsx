@@ -16,6 +16,7 @@ import {
   IconSettings,
   IconSun,
   IconTag,
+  IconTv,
   IconX,
 } from "./components/icons";
 import Dashboard from "./pages/Dashboard";
@@ -25,6 +26,7 @@ import Downloads from "./pages/Downloads";
 import Manual from "./pages/Manual";
 import Monitor from "./pages/Monitor";
 import Metadata from "./pages/Metadata";
+import Emby from "./pages/Emby";
 import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import { formatCountdown } from "./utils";
@@ -38,6 +40,7 @@ type PageKey =
   | "manual"
   | "downloads"
   | "metadata"
+  | "emby"
   | "logs"
   | "settings";
 
@@ -49,6 +52,7 @@ const NAV: Array<{ key: PageKey; label: string; icon: React.ReactNode }> = [
   { key: "manual", label: "手动下载", icon: <IconLink className="h-[17px] w-[17px]" /> },
   { key: "downloads", label: "下载记录", icon: <IconDownload className="h-[17px] w-[17px]" /> },
   { key: "metadata", label: "元数据", icon: <IconImage className="h-[17px] w-[17px]" /> },
+  { key: "emby", label: "Emby 入库", icon: <IconTv className="h-[17px] w-[17px]" /> },
   { key: "logs", label: "日志", icon: <IconLogs className="h-[17px] w-[17px]" /> },
   { key: "settings", label: "设置", icon: <IconSettings className="h-[17px] w-[17px]" /> },
 ];
@@ -61,8 +65,9 @@ const TITLES: Record<PageKey, { title: string; desc: string }> = {
   manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接或 B站 / 抖音 / 小红书 / YouTube 链接，直接下载" },
   downloads: { title: "下载记录", desc: "查看、重试与导出已抓取的文件" },
   metadata: { title: "元数据", desc: "编辑已下载视频的 NFO 与封面，可从视频截图" },
+  emby: { title: "Emby 入库", desc: "媒体信息生成、封面规格与入库通知" },
   logs: { title: "日志", desc: "服务运行日志，排障时最先该看的地方" },
-  settings: { title: "设置", desc: "账号登录、网络代理、扫描与下载参数、Emby 入库" },
+  settings: { title: "设置", desc: "账号登录、网络代理、扫描与下载参数" },
 };
 
 function readHash(): PageKey {
@@ -273,6 +278,7 @@ function Shell() {
           {page === "manual" && <Manual />}
           {page === "downloads" && <Downloads />}
           {page === "metadata" && <Metadata />}
+          {page === "emby" && <Emby />}
           {page === "logs" && <Logs />}
           {page === "settings" && <SettingsPage />}
         </div>

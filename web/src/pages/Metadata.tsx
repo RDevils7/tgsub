@@ -49,6 +49,21 @@ const IMAGE_SLOTS: Array<{ name: ImageName; label: string; ratio: string; aspect
   { name: "banner", label: "横幅 banner", ratio: "aspect-[1000/185]", aspect: 1000 / 185, hint: "1000×185" },
 ];
 
+/**
+ * 单集只有缩略图这一种专属图片。
+ *
+ * poster / landscape / fanart / banner 都是「整部剧共用」的概念 ——
+ * Emby 里它们放在剧集目录，单集文件旁边放这些名字没有意义，
+ * 所以选中具体某一集时只显示 thumb。
+ */
+const EPISODE_IMAGE_NAMES: ImageName[] = ["thumb"];
+
+/** 按作用域取该显示哪些图片槽位 */
+function slotsOf(scope: ImageScope): typeof IMAGE_SLOTS {
+  if (scope === "episode") return IMAGE_SLOTS.filter((s) => EPISODE_IMAGE_NAMES.includes(s.name));
+  return IMAGE_SLOTS;
+}
+
 const EMPTY_FIELDS: NfoFields = {
   title: "",
   originaltitle: "",
@@ -189,7 +204,8 @@ export default function Metadata() {
   useEffect(() => {
     if (!detail) return;
     setKind(detail.target.kind === "folder" ? "show" : "episode");
-    setImageScope("series");
+    // 图片作用域跟着目标走：剧集目录看剧集图片，单集看单集图片
+    setImageScope(detail.target.kind === "folder" ? "series" : "episode");
   }, [detail]);
 
   // 切换「单集 / 剧集」时换一套字段
@@ -224,7 +240,12 @@ export default function Metadata() {
     }
   };
 
-  /** 一键生成：单集 NFO + tvshow.nfo，缺封面时随机截帧 */
+  /**
+   * 一键生成：整部剧的单集 NFO + tvshow.nfo，缺封面时随机截帧。
+   *
+   * 无论选中的是剧集目录还是某一集，后端都会覆盖整个剧集 ——
+   * 剧集封面只能有一份，单集缩略图则每集都要有。
+   */
   const generate = async () => {
     if (!selected) return;
     setGenerating(true);
@@ -291,7 +312,13 @@ export default function Metadata() {
   };
 
   const isFolderTarget = detail?.target.kind === "folder";
-  const scopes: ImageScope[] = isFolderTarget ? ["series"] : ["series", "episode"];
+  /**
+   * 图片作用域跟着选中目标走：
+   *  - 选中剧集目录 → 只有剧集图片（整部剧共用）
+   *  - 选中具体视频 → 只有单集图片（这一集自己的缩略图）
+   * 剧集图片要到左边点剧集那一行去改，这里不重复展示。
+   */
+  const scopes: ImageScope[] = isFolderTarget ? ["series"] : ["episode"];
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
@@ -575,7 +602,7 @@ export default function Metadata() {
                   size="sm"
                   onClick={() => void generate()}
                   loading={generating}
-                  title="按当前目标批量生成 NFO 与封面"
+                  title="为整个剧集批量生成 NFO 与封面"
                 >
                   <IconSpark className="h-3.5 w-3.5" />
                   一键生成
@@ -768,6 +795,8 @@ function BasicTab({
   const probe = detail.video?.probe ?? null;
   const slot = detail.nfo[kind];
   const locked = Boolean(slot && !slot.editable);
+  /** 剧集目录下的视频信息来自第一集，标注一下免得误解 */
+  const fromFirst = detail.video?.source === "first";
 
   return (
     <div className="space-y-4">
@@ -783,6 +812,10 @@ function BasicTab({
           value={probe ? `${probe.bitrate ? `${Math.round(probe.bitrate / 1000)} kbps` : "—"} · ${probe.fps ?? "?"}fps` : "—"}
         />
       </div>
+
+      {fromFirst && (
+        <p className="text-[11.5px] text-slate-500">以上视频信息取自第一集，剧集封面同样以第一集为准。</p>
+      )}
 
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2 text-[11.5px] text-slate-400">
         <span className="text-slate-500">文件：</span>
@@ -1004,26 +1037,34 @@ function ImagesTab({
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1 rounded-xl border border-white/[0.07] bg-white/[0.02] p-1">
-          {scopes.map((scope) => (
-            <button
-              key={scope}
-              onClick={() => setImageScope(scope)}
-              className={`rounded-lg px-2.5 py-1 text-[12px] transition ${
-                imageScope === scope ? "bg-brand-500/20 text-brand-100" : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {scopeLabel(scope)}
-            </button>
-          ))}
-        </div>
+        {scopes.length > 1 ? (
+          <div className="flex items-center gap-1 rounded-xl border border-white/[0.07] bg-white/[0.02] p-1">
+            {scopes.map((scope) => (
+              <button
+                key={scope}
+                onClick={() => setImageScope(scope)}
+                className={`rounded-lg px-2.5 py-1 text-[12px] transition ${
+                  imageScope === scope ? "bg-brand-500/20 text-brand-100" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {scopeLabel(scope)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-2.5 py-1 text-[12px] text-brand-100">
+            {scopeLabel(imageScope)}
+          </span>
+        )}
         <p className="text-[11.5px] text-slate-500">
-          {imageScope === "episode" ? "文件名带集数前缀，Emby 会优先用它" : "放在剧集目录，整剧共用"}
+          {imageScope === "episode"
+            ? "文件名带集数前缀，Emby 会优先用它"
+            : "放在剧集目录，整剧共用；截图取自第一集"}
         </p>
       </div>
 
       <div className="grid items-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {IMAGE_SLOTS.map((slot) => {
+        {slotsOf(imageScope).map((slot) => {
           const img = imageOf(imageScope, slot.name);
           return (
             <div key={slot.name} className="overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]">
@@ -1361,6 +1402,8 @@ function ImagePicker({
   const toast = useToast();
   const slot = IMAGE_SLOTS.find((s) => s.name === name) ?? IMAGE_SLOTS[0];
   const key = detail.target.key;
+  /** 剧集目录：截图取自第一集；单集：就是它自己 */
+  const isSeriesTarget = detail.target.kind === "folder";
   const [tab, setTab] = useState<"frame" | "upload" | "existing">(
     detail.ffmpeg.available && detail.video?.exists ? "frame" : "upload",
   );
@@ -1369,7 +1412,7 @@ function ImagePicker({
   // 截图
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [at, setAt] = useState(0);
-  const [fit, setFit] = useState<"cover" | "contain" | "stretch">("contain");
+  const [fit, setFit] = useState<"cover" | "contain" | "stretch" | "blur">("blur");
   const [candidates, setCandidates] = useState<FrameCandidate[]>([]);
   const [grabbing, setGrabbing] = useState(false);
   const [selectedFrame, setSelectedFrame] = useState<number | null>(null);
@@ -1460,9 +1503,10 @@ function ImagePicker({
       open
       onClose={onClose}
       title={`更换 ${scopeLabel(scope)} · ${slot.label}`}
-      description={`目标尺寸 ${slot.hint.replace(/^[^·]*·\s*/, "")}，非该比例会按「${fit === "cover" ? "裁剪铺满" : fit === "contain" ? "留黑边完整显示" : "拉伸" }」处理`}
-      width="max-w-3xl"
-      footer={
+      description={`目标尺寸 ${slot.hint.replace(/^[^·]*·\s*/, "")}，非该比例会按「${
+        fit === "cover" ? "裁剪铺满" : fit === "contain" ? "留黑边完整显示" : fit === "blur" ? "模糊填充" : "拉伸"
+      }」处理`}
+      width="max-w-3xl"      footer={
         <>
           <Button size="sm" onClick={onClose}>
             取消
@@ -1512,25 +1556,28 @@ function ImagePicker({
           ))}
         </div>
 
-        {/* 缩放方式对所有来源（截图 / 上传 / 复用）生效，比例不符时默认留黑边 */}
+        {/* 缩放方式对所有来源（截图 / 上传 / 复用）生效，比例不符时默认模糊填充 */}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11.5px] text-slate-500">缩放方式</span>
           <select
             value={fit}
-            onChange={(e) => setFit(e.target.value as "cover" | "contain" | "stretch")}
+            onChange={(e) => setFit(e.target.value as "cover" | "contain" | "stretch" | "blur")}
             className="field !w-auto !py-1 !text-[11.5px]"
             title="比例与目标尺寸不一致时怎么处理"
           >
+            <option value="blur">模糊填充（推荐）</option>
             <option value="contain">留黑边（完整显示）</option>
             <option value="cover">裁剪铺满</option>
             <option value="stretch">拉伸变形</option>
           </select>
           <span className="text-[11px] text-slate-600">
-            {fit === "contain"
-              ? "比例不一致时补黑边，不裁掉画面"
-              : fit === "cover"
-                ? "比例不一致时裁掉超出部分"
-                : "比例不一致时强行拉伸"}
+            {fit === "blur"
+              ? "完整画面居中，空出来的边用同一张图的模糊版填满"
+              : fit === "contain"
+                ? "比例不一致时补黑边，不裁掉画面"
+                : fit === "cover"
+                  ? "比例不一致时裁掉超出部分"
+                  : "比例不一致时强行拉伸"}
           </span>
         </div>
 
@@ -1542,6 +1589,11 @@ function ImagePicker({
               </div>
             ) : (
               <>
+                {isSeriesTarget && (
+                  <p className="rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5 text-[11.5px] text-slate-400">
+                    剧集封面取自第一集，下面播放与截取的都是第一集的画面。
+                  </p>
+                )}
                 <div className="overflow-hidden rounded-xl border border-white/10 bg-black">
                   <video
                     ref={videoRef}
@@ -1637,7 +1689,7 @@ function ImagePicker({
               <span className="text-[12.5px]">点击选择本地图片（jpg / png / webp，≤ 30MB）</span>
               <span className="text-[11px] text-slate-600">
                 选完可以框选画面，比例锁定 {slot.hint.replace(/^([^·]*)·.*$/, "$1").trim()}；不框则按
-                {fit === "contain" ? "留黑边（默认）" : fit === "cover" ? "裁剪" : "拉伸"}
+                {fit === "blur" ? "模糊填充（默认）" : fit === "contain" ? "留黑边" : fit === "cover" ? "裁剪" : "拉伸"}
               </span>
             </button>
           </div>
