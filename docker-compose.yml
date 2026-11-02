@@ -3,7 +3,7 @@
 #   docker compose up -d
 #
 # 镜像地址：rdevils7/tgsub:latest
-# 需要固定版本时，把下面 image 改成 rdevils7/tgsub:v1.0.6
+# 需要固定版本时，把下面 image 改成 rdevils7/tgsub:v1.0.7
 #
 # 备用仓库（GHCR，国内拉取可能较慢，拉不动时再换）：
 #   image: ghcr.io/rdevils7/tgsub:latest

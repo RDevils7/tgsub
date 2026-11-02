@@ -323,6 +323,22 @@ export interface EngineUpdateResult {
   update: EngineUpdateState;
 }
 
+export interface PlatformPlaylistEntry {
+  id: string;
+  title: string;
+  url: string;
+  uploader: string;
+  duration: number | null;
+  thumbnail: string | null;
+}
+
+export interface PlatformPlaylist {
+  count: number;
+  /** 超过 200 条只读了前 200 条 */
+  capped: boolean;
+  entries: PlatformPlaylistEntry[];
+}
+
 export interface PlatformProbe {
   platform: PlatformId;
   id: string;
@@ -334,6 +350,12 @@ export interface PlatformProbe {
   uploadedAt: number | null;
   webpageUrl: string;
   filesize: number | null;
+  viewCount: number | null;
+  likeCount: number | null;
+  /** 分区 / 分类，会写成 Emby 的 genre */
+  categories: string[];
+  /** 合集 / 多P 才有 */
+  playlist: PlatformPlaylist | null;
 }
 
 export interface PlatformTask {
@@ -348,6 +370,38 @@ export interface PlatformTask {
   saveDir: string;
   filesize: number | null;
 }
+
+/** 合集 / 多P 的二次选择项 */
+export interface PlatformChoiceInfo {
+  token: string;
+  platform: PlatformId;
+  url: string;
+  title: string;
+  count: number;
+  capped: boolean;
+  firstTitle: string;
+  firstUploader: string;
+  firstDuration: number | null;
+  firstFilesize: number | null;
+}
+
+export interface PlatformChoiceResponse {
+  needsChoice: true;
+  choice: PlatformChoiceInfo;
+}
+
+export interface PlatformTaskResponse {
+  needsChoice: false;
+  platform: PlatformId;
+  label: string;
+  url: string;
+  playlist: { count: number; mode: "one" | "all"; capped: boolean } | null;
+  queued: number;
+  existing: number;
+  tasks: PlatformTask[];
+}
+
+export type PlatformEnqueueResponse = PlatformChoiceResponse | PlatformTaskResponse;
 
 /* ------------------------------ 缓存 ------------------------------ */
 

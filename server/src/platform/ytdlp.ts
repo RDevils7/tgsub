@@ -235,6 +235,24 @@ export function formatSelector(quality: string): string {
 /* 解析                                                                */
 /* ------------------------------------------------------------------ */
 
+/** 合集里的一条（flat 模式只有这些字段，够入队和命名用了） */
+export interface PlaylistEntry {
+  id: string;
+  title: string;
+  url: string;
+  uploader: string;
+  duration: number | null;
+  thumbnail: string | null;
+}
+
+export interface PlatformPlaylist {
+  /** 探测到的条目数（可能被 PLAYLIST_LIMIT 截断，见 capped） */
+  count: number;
+  /** 超过上限、只拿到了前 N 条 */
+  capped: boolean;
+  entries: PlaylistEntry[];
+}
+
 export interface PlatformProbe {
   platform: PlatformId;
   id: string;
@@ -248,6 +266,13 @@ export interface PlatformProbe {
   webpageUrl: string;
   /** 预估大小，界面显示用 */
   filesize: number | null;
+  /** 播放量 / 点赞；Emby 没有对应字段，写进简介尾部 */
+  viewCount: number | null;
+  likeCount: number | null;
+  /** 分区 / 分类，写进 Emby 的 genre */
+  categories: string[];
+  /** 合集 / 多P 才有；单条视频为 null */
+  playlist: PlatformPlaylist | null;
 }
 
 interface YtdlpJson {
@@ -257,11 +282,16 @@ interface YtdlpJson {
   channel?: string;
   duration?: number;
   thumbnail?: string;
+  thumbnails?: Array<{ url?: string; preference?: number }>;
   description?: string;
   upload_date?: string;
   webpage_url?: string;
+  url?: string;
   filesize?: number;
   filesize_approx?: number;
+  view_count?: number;
+  like_count?: number;
+  categories?: string[];
   _type?: string;
   entries?: YtdlpJson[];
 }
@@ -275,6 +305,18 @@ function uploadDateToTs(raw: string | undefined): number | null {
   return Number.isFinite(ts) ? ts : null;
 }
 
+/** 有的站点只给 thumbnails 数组，取最后一张（yt-dlp 按从大到小排） */
+function pickThumbnail(json: YtdlpJson): string | null {
+  if (json.thumbnail) return json.thumbnail;
+  const list = (json.thumbnails ?? []).filter((item) => typeof item?.url === "string");
+  const last = list[list.length - 1]?.url;
+  return last ?? null;
+}
+
+function num(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function toProbe(platform: PlatformId, json: YtdlpJson, fallbackUrl: string): PlatformProbe {
   return {
     platform,
@@ -282,56 +324,150 @@ function toProbe(platform: PlatformId, json: YtdlpJson, fallbackUrl: string): Pl
     title: (json.title ?? "").trim() || "未命名视频",
     uploader: (json.uploader ?? json.channel ?? "").trim(),
     duration: typeof json.duration === "number" && json.duration > 0 ? Math.round(json.duration) : null,
-    thumbnail: json.thumbnail ?? null,
+    thumbnail: pickThumbnail(json),
     description: (json.description ?? "").trim(),
     uploadedAt: uploadDateToTs(json.upload_date),
     webpageUrl: json.webpage_url ?? fallbackUrl,
     filesize: json.filesize ?? json.filesize_approx ?? null,
+    viewCount: num(json.view_count),
+    likeCount: num(json.like_count),
+    categories: Array.isArray(json.categories) ? json.categories.filter((c): c is string => Boolean(c)) : [],
+    playlist: null,
   };
 }
 
-/** 解析一条链接，只取信息不下载 */
-export async function probePlatform(
-  url: string,
+/** flat 条目 → 入队用的最小信息；拿不到可下载链接就丢掉（宁可少下也别下错） */
+function toEntry(json: YtdlpJson): PlaylistEntry | null {
+  const url = [json.webpage_url, json.url].find(
+    (value): value is string => typeof value === "string" && /^https?:\/\//i.test(value),
+  );
+  if (!url) return null;
+  return {
+    id: String(json.id ?? ""),
+    title: (json.title ?? "").trim() || "未命名视频",
+    url,
+    uploader: (json.uploader ?? json.channel ?? "").trim(),
+    duration: typeof json.duration === "number" && json.duration > 0 ? Math.round(json.duration) : null,
+    thumbnail: pickThumbnail(json),
+  };
+}
+
+/** 合集条目列表（导出是为了自检能覆盖，不依赖 yt-dlp 二进制） */
+export function playlistEntries(raw: unknown[]): PlaylistEntry[] {
+  const out: PlaylistEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const entry = toEntry(item as YtdlpJson);
+    if (entry) out.push(entry);
+  }
+  return out;
+}
+
+/** 一次最多展开多少条：既防止 5000 个视频的播放列表把队列撑爆，也不至于卡住解析 */
+const PLAYLIST_LIMIT = 200;
+
+/**
+ * 从 `--flat-playlist` 的 JSON 判断这是不是合集。
+ *
+ * yt-dlp 对多P / 播放列表有时报 `playlist`，有时报 `multi_video`，两种都算；
+ * 单条视频即使带了 `entries` 也不该被当成合集，所以必须先看 `_type`。
+ */
+export function readPlaylist(json: { _type?: string; entries?: unknown[] }): PlatformPlaylist | null {
+  if (json._type !== "playlist" && json._type !== "multi_video") return null;
+  if (!Array.isArray(json.entries)) return null;
+  const entries = playlistEntries(json.entries);
+  if (!entries.length) return null;
+  return { count: entries.length, capped: entries.length >= PLAYLIST_LIMIT, entries };
+}
+
+const PROBE_CACHE_MS = 60_000;
+const probeCache = new Map<string, { at: number; probe: PlatformProbe }>();
+
+export function clearProbeCache(): void {
+  probeCache.clear();
+}
+
+/** 跑一次 --dump-single-json；extra 决定是「整条视频」还是「合集目录」 */
+async function dumpJson(
+  binary: { path: string | null; version: string | null },
   platform: PlatformId,
   cookie: string,
-): Promise<PlatformProbe> {
-  const info = await ytdlpInfo();
-  if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.6 以上，或在设置里填写 yt-dlp 路径");
-  }
-
+  extra: string[],
+  url: string,
+): Promise<YtdlpJson> {
   const args = [
     "--dump-single-json",
-    "--no-playlist",
     "--no-warnings",
-    ...platformArgs(platform, info.version),
+    ...platformArgs(platform, binary.version),
     "--socket-timeout",
     "20",
+    ...extra,
     url,
   ];
 
   const exec = async (cookieFile?: string): Promise<{ code: number; out: string; err: string }> => {
     const full = cookieFile ? [...args.slice(0, -1), "--cookies", cookieFile, url] : args;
-    return runOnce(info.path as string, full, 90_000);
+    // 合集链接要展开条目，比单条慢，超时给宽一点
+    return runOnce(binary.path as string, full, 120_000);
   };
 
   const res = cookie.trim() ? await withCookieFile(cookie, platform, (file) => exec(file)) : await exec();
-  if (res.code !== 0) {
-    throw new Error(explainYtdlpError(res.err || res.out, platform));
-  }
-
-  let json: YtdlpJson;
+  if (res.code !== 0) throw new Error(explainYtdlpError(res.err || res.out, platform));
   try {
-    json = JSON.parse(res.out) as YtdlpJson;
+    return JSON.parse(res.out) as YtdlpJson;
   } catch {
     throw new Error("yt-dlp 返回的内容不是有效 JSON，链接可能已失效");
   }
-  // 万一是合集，取第一条，避免把整个播放列表拉下来
-  if (json._type === "playlist" && Array.isArray(json.entries) && json.entries.length > 0) {
-    json = json.entries[0];
+}
+
+/**
+ * 解析一条链接，只取信息不下载。
+ *
+ * 先按「合集」问一次（`--flat-playlist`）：单条视频时它不影响结果，
+ * 只有多P / 播放列表才会返回 `_type: playlist`。这样一次请求就能判断
+ * 「要不要让用户选只下第一个还是全下」，不必先下再发现。
+ */
+export async function probePlatform(
+  url: string,
+  platform: PlatformId,
+  cookie: string,
+  opts: { fresh?: boolean } = {},
+): Promise<PlatformProbe> {
+  const key = `${platform}|${url}`;
+  if (!opts.fresh) {
+    const hit = probeCache.get(key);
+    // 界面点「开始下载」时通常会先 probe 一次再 task 一次，缓存省掉一次解析
+    if (hit && Date.now() - hit.at < PROBE_CACHE_MS) return hit.probe;
   }
-  return toProbe(platform, json, url);
+
+  const info = await ytdlpInfo();
+  if (!info.available || !info.path) {
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.7 以上，或在设置里填写 yt-dlp 路径");
+  }
+
+  const first = await dumpJson(info, platform, cookie, ["--flat-playlist", "--playlist-end", String(PLAYLIST_LIMIT)], url);
+
+  let json = first;
+  let target = url;
+
+  const playlist = readPlaylist(first);
+  if (playlist) {
+    // flat 条目没有简介和精确封面，第一条再单独问一次完整信息
+    target = playlist.entries[0].url;
+    json = await dumpJson(info, platform, cookie, ["--no-playlist"], target);
+    // 有的站点即使带了 --no-playlist 还是回整个播放列表，这里再兜一次
+    if (Array.isArray(json.entries) && json.entries.length > 0) {
+      if (json._type === "playlist" || json._type === "multi_video") json = json.entries[0];
+    }
+  }
+
+  const probe: PlatformProbe = { ...toProbe(platform, json, target), playlist };
+  probeCache.set(key, { at: Date.now(), probe });
+  if (probeCache.size > 100) {
+    const oldest = probeCache.keys().next().value;
+    if (oldest) probeCache.delete(oldest);
+  }
+  return probe;
 }
 
 /* ------------------------------------------------------------------ */
@@ -368,7 +504,7 @@ export async function downloadPlatform(
 ): Promise<PlatformDownloadResult> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.6 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.0.7 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const ffmpeg = await ffmpegInfo().catch(() => null);

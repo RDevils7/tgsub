@@ -558,6 +558,8 @@ export interface FileDownloadOptions {
   maxBytes?: number;
   verifyTls?: boolean;
   onProgress?: (got: number, total: number) => void;
+  /** 额外请求头：平台的图床大多要 Referer，否则返回 403 */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -596,6 +598,7 @@ export async function downloadFile(
         "Accept: */*",
         "Accept-Encoding: identity",
         "Connection: close",
+        ...Object.entries(options.headers ?? {}).map(([key, value]) => `${key}: ${value}`),
       ].join("\r\n") + "\r\n\r\n",
     );
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
-import type { DirectResult, PlatformTask } from "../types";
-import { Badge, Button, StatusDot, useToast } from "../components/ui";
+import type { DirectResult, PlatformChoiceInfo, PlatformTaskResponse } from "../types";
+import { Badge, Button, Modal, StatusDot, useToast } from "../components/ui";
 import { IconDownload, IconLink, IconSend, IconSpark, IconVideo } from "../components/icons";
 import { formatBytes, formatDuration } from "../utils";
 
@@ -11,9 +11,9 @@ interface Entry {
   key: string;
   link: string;
   kind: LinkKind;
-  status: "pending" | "running" | "ok" | "error";
+  status: "pending" | "running" | "choosing" | "ok" | "error" | "cancel";
   result?: DirectResult;
-  task?: PlatformTask;
+  platform?: PlatformTaskResponse;
   error?: string;
 }
 
@@ -84,10 +84,25 @@ export default function Manual() {
   const [input, setInput] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
+  /** 合集 / 多P 的二选一：弹窗时挂起 await，用户点按钮后 resolve */
+  const [ask, setAsk] = useState<{
+    link: string;
+    choice: PlatformChoiceInfo;
+    resolve: (mode: "one" | "all" | "cancel") => void;
+  } | null>(null);
   const toast = useToast();
 
   const links = splitLinks(input);
   const platformLinks = links.filter((l) => l.kind === "platform");
+
+  const askPlaylist = (link: string, choice: PlatformChoiceInfo): Promise<"one" | "all" | "cancel"> =>
+    new Promise((resolve) => setAsk({ link, choice, resolve }));
+
+  const decide = (mode: "one" | "all" | "cancel") => {
+    const current = ask;
+    setAsk(null);
+    current?.resolve(mode);
+  };
 
   const start = async () => {
     if (!links.length) {
@@ -106,12 +121,23 @@ export default function Manual() {
       setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "running" } : e)));
       try {
         if (entry.kind === "platform") {
-          const task = await api.platformTask(entry.link);
-          if (task.existing) platformExisting += 1;
-          else platformQueued += 1;
-          setEntries((prev) =>
-            prev.map((e) => (e.key === entry.key ? { ...e, status: "ok", task } : e)),
-          );
+          let res = await api.platformTask(entry.link);
+          if (res.needsChoice) {
+            // 合集 / 多P：先问再下，避免一条链接悄悄拉 200 个视频
+            setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "choosing" } : e)));
+            const mode = await askPlaylist(entry.link, res.choice);
+            if (mode === "cancel") {
+              setEntries((prev) =>
+                prev.map((e) => (e.key === entry.key ? { ...e, status: "cancel", error: "已取消：合集没有下载" } : e)),
+              );
+              continue;
+            }
+            res = await api.platformTask(entry.link, mode);
+          }
+          if (res.needsChoice) continue;
+          platformQueued += res.queued;
+          platformExisting += res.existing;
+          setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "ok", platform: res } : e)));
         } else {
           const { item } = await api.downloadLink({ link: entry.link });
           queued += item.queued;
@@ -216,6 +242,7 @@ export default function Manual() {
               <li>· 私有频道用 https://t.me/c/频道ID/消息ID（手机端「复制链接」就是这个格式）</li>
               <li>· B站 / 抖音 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、v.douyin.com、xhslink.cn、youtu.be）</li>
               <li>· 也可以把 App 里「复制链接」的整段分享口令原样粘进来，说明文字会自动忽略</li>
+              <li>· 合集 / 多P 链接会先弹窗问「只下第一个」还是「全部下载」，最多展开 200 个</li>
               <li>· 各平台的 Cookie 在设置 → 第三方平台里填，缺了会影响清晰度和成功率</li>
             </ul>
           </div>
@@ -249,30 +276,39 @@ export default function Manual() {
                       <StatusDot className="bg-brand-400" /> 解析中
                     </Badge>
                   )}
-                  {entry.kind === "platform" && (
-                    <Badge className="border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-200">
-                      {PLATFORM_LABEL[entry.task?.platform ?? ""] ?? "第三方"}
+                  {entry.status === "choosing" && (
+                    <Badge className="border-amber-500/25 bg-amber-500/10 text-warn">
+                      <StatusDot className="bg-amber-400" /> 待选择
                     </Badge>
                   )}
-                  {entry.status === "ok" && (entry.result || entry.task) && (
+                  {entry.kind === "platform" && (
+                    <Badge className="border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-200">
+                      {PLATFORM_LABEL[entry.platform?.platform ?? ""] ?? "第三方"}
+                    </Badge>
+                  )}
+                  {entry.status === "ok" && (entry.result || entry.platform) && (
                     <Badge
                       className={
-                        (entry.task ? !entry.task.existing : (entry.result?.queued ?? 0) > 0)
+                        (entry.platform ? entry.platform.queued > 0 : (entry.result?.queued ?? 0) > 0)
                           ? "border-emerald-500/20 bg-emerald-500/10 text-ok"
                           : "border-white/10 bg-white/5 text-slate-400"
                       }
                     >
                       <StatusDot
                         className={
-                          (entry.task ? !entry.task.existing : (entry.result?.queued ?? 0) > 0)
+                          (entry.platform ? entry.platform.queued > 0 : (entry.result?.queued ?? 0) > 0)
                             ? "bg-emerald-400"
                             : "bg-slate-500"
                         }
                       />
-                      {entry.task
-                        ? entry.task.existing
-                          ? "已在队列"
-                          : "已入队"
+                      {entry.platform
+                        ? entry.platform.queued > 0
+                          ? entry.platform.playlist
+                            ? `已入队 ${entry.platform.queued} 个`
+                            : "已入队"
+                          : entry.platform.existing > 0
+                            ? "已在队列"
+                            : "已跳过"
                         : entry.result!.queued > 0
                           ? "已入队"
                           : entry.result!.existing > 0
@@ -283,6 +319,11 @@ export default function Manual() {
                   {entry.status === "error" && (
                     <Badge className="border-rose-500/20 bg-rose-500/10 text-err">
                       <StatusDot className="bg-rose-400" /> 失败
+                    </Badge>
+                  )}
+                  {entry.status === "cancel" && (
+                    <Badge className="border-white/10 bg-white/5 text-slate-400">
+                      <StatusDot className="bg-slate-500" /> 已取消
                     </Badge>
                   )}
                 </div>
@@ -333,33 +374,54 @@ export default function Manual() {
                     ℹ️ 该频道已加入频道列表并保持停用，需要定时扫描可在「频道」页面启用
                   </p>
                 )}
-                {entry.task && (
+                {entry.platform && entry.platform.tasks[0] && (
                   <>
-                    <p className="mt-1 truncate text-[11.5px] text-slate-300" title={entry.task.title}>
-                      {entry.task.title}
+                    <p className="mt-1 truncate text-[11.5px] text-slate-300" title={entry.platform.tasks[0].title}>
+                      {entry.platform.tasks[0].title}
+                      {entry.platform.tasks.length > 1 ? ` 等 ${entry.platform.tasks.length} 个` : ""}
                     </p>
                     <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                      {entry.task.uploader && <span>{entry.task.uploader}</span>}
-                      {entry.task.duration ? (
+                      {entry.platform.tasks[0].uploader && <span>{entry.platform.tasks[0].uploader}</span>}
+                      {entry.platform.tasks[0].duration ? (
                         <>
                           <span className="text-slate-700">·</span>
-                          <span>{formatDuration(entry.task.duration)}</span>
+                          <span>{formatDuration(entry.platform.tasks[0].duration)}</span>
                         </>
                       ) : null}
-                      {entry.task.filesize ? (
+                      {entry.platform.tasks[0].filesize ? (
                         <>
                           <span className="text-slate-700">·</span>
-                          <span>{formatBytes(entry.task.filesize)}</span>
+                          <span>{formatBytes(entry.platform.tasks[0].filesize)}</span>
                         </>
                       ) : null}
                       <span className="text-slate-700">·</span>
-                      <span className="truncate font-mono text-[10.5px] text-slate-400" title={entry.task.saveDir}>
-                        {entry.task.saveDir}/
+                      <span
+                        className="truncate font-mono text-[10.5px] text-slate-400"
+                        title={entry.platform.tasks[0].saveDir}
+                      >
+                        {entry.platform.tasks[0].saveDir}/
                       </span>
                     </div>
+                    {entry.platform.playlist && (
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        📚 这是个合集，共 {entry.platform.playlist.count} 个视频 ·{" "}
+                        {entry.platform.playlist.mode === "all"
+                          ? `已整份入队 ${entry.platform.tasks.length} 个`
+                          : "只下了第一个"}
+                        {entry.platform.playlist.capped ? "（超过 200 个，只取前 200）" : ""}
+                      </p>
+                    )}
                   </>
                 )}
-                {entry.error && <p className="mt-1.5 text-[11px] leading-relaxed text-err/80">{entry.error}</p>}
+                {entry.error && (
+                  <p
+                    className={`mt-1.5 text-[11px] leading-relaxed ${
+                      entry.status === "cancel" ? "text-slate-500" : "text-err/80"
+                    }`}
+                  >
+                    {entry.error}
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -378,6 +440,50 @@ export default function Manual() {
           </p>
         </div>
       )}
+
+      <Modal
+        open={Boolean(ask)}
+        onClose={() => decide("cancel")}
+        title="这条链接是个合集"
+        description="要只下这一个，还是整份都下载？选错可以在下载记录里随时停掉。"
+        footer={
+          <>
+            <Button size="sm" variant="ghost" onClick={() => decide("cancel")}>
+              取消
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => decide("one")}>
+              只下第一个
+            </Button>
+            <Button size="sm" onClick={() => decide("all")}>
+              全部下载 {ask?.choice.count ?? 0} 个
+            </Button>
+          </>
+        }
+      >
+        {ask && (
+          <div className="space-y-3">
+            <p className="break-words text-[12px] text-slate-500">{ask.link}</p>
+            <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
+              <p className="text-[12.5px] font-medium text-slate-200">📚 {ask.choice.title}</p>
+              <p className="mt-1 text-[11.5px] text-slate-400">
+                共 {ask.choice.count} 个视频
+                {ask.choice.capped ? "（超过 200 个，只读前 200 个）" : ""}
+                {PLATFORM_LABEL[ask.choice.platform] ? ` · ${PLATFORM_LABEL[ask.choice.platform]}` : ""}
+              </p>
+              {ask.choice.firstTitle && (
+                <p className="mt-2 truncate text-[11px] text-slate-500" title={ask.choice.firstTitle}>
+                  第一个：{ask.choice.firstTitle}
+                  {ask.choice.firstDuration ? ` · ${formatDuration(ask.choice.firstDuration)}` : ""}
+                  {ask.choice.firstFilesize ? ` · ${formatBytes(ask.choice.firstFilesize)}` : ""}
+                </p>
+              )}
+            </div>
+            <p className="text-[11px] leading-relaxed text-slate-500">
+              每个视频会单独建一个目录、单独写一份 Emby 信息；整份下载时如果中途不想继续，可以在「下载记录」里逐条停止。
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

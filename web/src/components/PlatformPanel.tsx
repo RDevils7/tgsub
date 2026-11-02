@@ -484,13 +484,16 @@ export default function PlatformPanel() {
               checked={meta}
               onChange={(e) => setMeta(e.target.checked)}
             />
-            <span className="text-[11.5px] text-slate-300">写 nfo 与截帧封面</span>
+            <span className="text-[11.5px] text-slate-300">写 nfo 与封面</span>
           </label>
         </div>
       </div>
       <p className="mt-1.5 text-[10.5px] leading-relaxed text-slate-500">
         清晰度默认「最高（原画）」：按平台实际能给的码率取最好的一档，B站大会员 / 小红书登录态才会出现 1080P 以上；
         想省空间再挑固定档位。
+      </p>
+      <p className="mt-1 text-[10.5px] leading-relaxed text-slate-500">
+        封面优先用平台官方封面（清晰、构图也对），下载不到才回退视频截帧；简介、UP主、发布日期、分区、播放量会一起写进 nfo。
       </p>
 
       {/* yt-dlp 专用代理 */}

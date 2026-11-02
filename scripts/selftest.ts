@@ -1132,8 +1132,9 @@ async function platformChecks(): Promise<void> {
   const { parsePlatformLink, detectPlatform, splitPlatformLinks, hasPlatformLink } = await import(
     "../server/src/platform/detect"
   );
-  const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank } =
+  const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank, playlistEntries, readPlaylist } =
     await import("../server/src/platform/ytdlp");
+  const { buildEpisodeNfo, decodeMeta } = await import("../server/src/tg/emby");
   const { parseCookiePairs, summarizeCookie, describeCookie, humanAge } = await import(
     "../server/src/platform/cookie"
   );
@@ -1343,6 +1344,101 @@ async function platformChecks(): Promise<void> {
     assert.equal(assetName("darwin", "arm64"), "yt-dlp_macos");
     assert.equal(normalizeTag("v2025.11.12"), "2025.11.12");
     assert.equal(normalizeTag(" 2025.11.12 "), "2025.11.12");
+  });
+
+  check("合集条目：只留下带可下载链接的", () => {
+    const entries = playlistEntries([
+      { id: "BV1xx", title: "第1话", url: "https://www.bilibili.com/video/BV1xx?p=1", uploader: "某UP", duration: 61.5 },
+      { id: "BV1xx", title: "第2话", webpage_url: "https://www.bilibili.com/video/BV1xx?p=2" },
+      { id: "no-url", title: "坏条目" },
+      null,
+      "字符串也不是条目",
+    ]);
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].url, "https://www.bilibili.com/video/BV1xx?p=1");
+    assert.equal(entries[0].duration, 62, "时长要四舍五入成整数");
+    assert.equal(entries[1].url, "https://www.bilibili.com/video/BV1xx?p=2", "webpage_url 优先");
+    assert.equal(entries[1].uploader, "", "缺作者时给空串，别写 undefined");
+  });
+
+  check("平台视频的 nfo：分区、时长、播放量与简介兜底", () => {
+    const nfo = buildEpisodeNfo({
+      series: "某个视频",
+      season: 1,
+      episode: null,
+      firstLine: "某个视频",
+      plot: "",
+      tags: ["哔哩哔哩", "某UP"],
+      studio: "某UP",
+      link: "https://www.bilibili.com/video/BV1xx",
+      airedAt: Date.parse("2026-10-31T12:00:00Z"),
+      messageId: 0,
+      kind: "video",
+      platform: "bilibili",
+      cover: "https://i0.hdslb.com/bfs/archive/x.jpg",
+      views: 123456,
+      likes: 4567,
+      duration: 754,
+      categories: ["影视", "解说"],
+    });
+    assert.ok(nfo.includes("<genre>影视</genre>"), nfo);
+    assert.ok(nfo.includes("<runtime>13</runtime>"), "754 秒要写成 13 分钟");
+    assert.ok(nfo.includes("播放 12.3 万"), nfo);
+    assert.ok(nfo.includes("点赞 4567"), nfo);
+    assert.ok(nfo.includes("时长 12:34"), nfo);
+    // 抖音/小红书常常没有正文：用标题 + 作者兜底，别留空白简介
+    assert.ok(nfo.includes("某个视频，来自 某UP"), nfo);
+    assert.ok(!nfo.includes("<episode>"), "平台单条视频不写集号");
+  });
+
+  check("老 emby_json 没有新字段也能读，脏值不能带进 nfo", () => {
+    const base = {
+      series: "x",
+      season: 1,
+      episode: null,
+      firstLine: "x",
+      plot: "",
+      tags: [],
+      studio: null,
+      link: null,
+      airedAt: 0,
+      messageId: 0,
+      kind: "video",
+    };
+    const old = decodeMeta(JSON.stringify(base));
+    assert.equal(old?.cover, null);
+    assert.deepEqual(old?.categories, []);
+    assert.equal(old?.views, null);
+
+    const messy = decodeMeta(
+      JSON.stringify({ ...base, categories: ["a", 3, ""], views: "12", likes: -1, cover: "" }),
+    );
+    assert.deepEqual(messy?.categories, ["a"]);
+    assert.equal(messy?.views, 12);
+    assert.equal(messy?.likes, null, "负数当没有");
+    assert.equal(messy?.cover, null, "空字符串当没有");
+  });
+
+  check("合集判定：单条视频不当合集，多P / 播放列表才问", () => {
+    // 单条视频即使带 entries 也不该问用户
+    assert.equal(readPlaylist({ _type: "video" }), null);
+    assert.equal(readPlaylist({ _type: "playlist", entries: [] }), null, "空合集不算");
+    assert.equal(readPlaylist({ _type: "playlist", entries: [{ title: "没有链接" }] }), null);
+
+    const list = readPlaylist({
+      _type: "playlist",
+      entries: [
+        { id: "1", title: "a", url: "https://x/1" },
+        { id: "2", title: "b", webpage_url: "https://x/2" },
+      ],
+    });
+    assert.equal(list?.count, 2);
+    assert.equal(list?.capped, false);
+    // yt-dlp 对多P 有时报 multi_video
+    assert.equal(readPlaylist({ _type: "multi_video", entries: [{ id: "1", title: "a", url: "https://x/1" }] })?.count, 1);
+
+    const many = Array.from({ length: 200 }, (_, i) => ({ id: String(i), title: `t${i}`, url: `https://x/${i}` }));
+    assert.equal(readPlaylist({ _type: "playlist", entries: many })?.capped, true, "到上限要标记 capped");
   });
 
   check("第三方代理只影响 yt-dlp，坏地址不传下去", () => {

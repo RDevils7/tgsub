@@ -3,8 +3,8 @@ import { getPlatformCookieHint, getPlatformCookie, getSettings } from "../db";
 import { asyncHandler } from "../lib/http";
 import { logger } from "../logger";
 import { PLATFORM_IDS, PLATFORM_LABEL } from "../types";
-import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
-import { enqueuePlatformLink, platformRootDir } from "../platform/jobs";
+import { parsePlatformLink, splitPlatformLinks, PlatformLink } from "../platform/detect";
+import { enqueuePlatformLink, platformRootDir, resolveChoice } from "../platform/jobs";
 import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
 import { engineState, updateYtdlp } from "../platform/updater";
 
@@ -69,14 +69,42 @@ platformRouter.post(
 platformRouter.post(
   "/task",
   asyncHandler(async (req, res) => {
-    const url = String((req.body ?? {}).url ?? "").trim();
-    const link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
+    const body = (req.body ?? {}) as { url?: string; token?: string; mode?: string };
+    const mode = body.mode === "all" ? "all" : body.mode === "one" ? "one" : undefined;
+
+    // 二次提交有两条路：界面带原链接 + mode；机器人按钮带 token + mode
+    let link: PlatformLink | null = null;
+    if (body.token) {
+      const saved = resolveChoice(String(body.token));
+      if (!saved) {
+        res.status(410).json({ error: "这次选择已过期，请重新粘贴链接" });
+        return;
+      }
+      link = { platform: saved.platform, url: saved.url, id: null, key: saved.url };
+    } else {
+      const url = String(body.url ?? "").trim();
+      link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
+    }
     if (!link) {
       res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
       return;
     }
-    const task = await enqueuePlatformLink(link);
-    res.json(task);
+
+    const outcome = await enqueuePlatformLink(link, mode);
+    if (outcome.type === "playlist") {
+      res.json({ needsChoice: true, choice: outcome.choice });
+      return;
+    }
+    res.json({
+      needsChoice: false,
+      platform: link.platform,
+      label: PLATFORM_LABEL[link.platform],
+      url: link.url,
+      playlist: outcome.playlist,
+      queued: outcome.tasks.filter((task) => !task.existing).length,
+      existing: outcome.tasks.filter((task) => task.existing).length,
+      tasks: outcome.tasks,
+    });
   }),
 );
 

@@ -384,13 +384,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.0.6` | 打 `v1.0.6` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.7` | 打 `v1.0.7` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.6
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.7
 docker compose up -d
 ```
 
@@ -565,7 +565,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 ---
 
-## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.6）
+## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.6 / 1.0.7）
 
 **为什么用 yt-dlp 而不是自己写接口**：这几个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
 小红书 `x-s`、YouTube `nsig`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，
@@ -579,7 +579,8 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | `server/src/platform/ytdlp.ts` | 定位二进制（手填 → `data/bin` → 镜像内置 → PATH）、`--version` 探测、Cookie → Netscape、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、代理参数、YouTube JS runtime 判断、错误中文化 |
 | `server/src/platform/cookie.ts` | 纯函数：`parseCookiePairs` / `summarizeCookie` / `describeCookie` / `humanAge`，给「状态可见」用 |
 | `server/src/platform/updater.ts` | GitHub Release 查询、按平台选资产、流式下载、`--version` 校验后原子替换、`data/bin` 优先、定时检查 |
-| `server/src/platform/jobs.ts` | 解析后写 `downloads`（`source='platform'`）、目录规划、去重与失败复用 |
+| `server/src/platform/jobs.ts` | 解析后写 `downloads`（`source='platform'`）、目录规划、去重与失败复用、合集展开与「只下第一个 / 全部下载」的令牌 |
+| `server/src/platform/cover.ts` | 下载平台官方封面 → 按 Emby 规格裁成 `poster.jpg` / `landscape.jpg` / `fanart.jpg` / `<标题>-thumb.jpg` |
 | `server/src/lib/netprobe.ts` | `downloadFile()`：走同一套代理握手，跟随 3xx，body 流式落盘（更新二进制用） |
 | `server/src/routes/platform.ts` | `GET /api/platform/status`、`POST /probe`、`POST /task`、`POST /refresh`、`POST /update` |
 | `server/src/tg/downloader.ts` | `run()` 开头按 `row.source` 分流到 `runPlatform()`，其余（暂停/停止/重试/收尾）完全复用 |
@@ -604,6 +605,20 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   老库里若存过旧默认值 `1080`，启动时由 `migration_platform_quality_v106` 迁成 `best`，用户自选的 720/480 不动。
 - **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`。
   国内平台直连最快，YouTube 与「检查更新」必须走它；`parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
+- **元数据（1.0.7）**：`--dump-single-json` 里的字段直接映射到 nfo —— 标题、简介（`plot`）、UP主（`studio` + `tag`）、
+  发布日期（`aired` / `premiered` / `year`）、原链接（`uniqueid type="platform"`）、分区（`categories` → `genre`）、
+  时长（`duration` → `runtime`）、播放量与点赞（Emby 没有对应字段，追加在简介尾部的「播放 12.3 万 · 点赞 4567 · 时长 12:34」一行）。
+  抖音/小红书常常没有正文，此时用「标题，来自 UP主」兜底，避免 Emby 详情页一片空白。
+  `uniqueid type="tgsub"` 保证 Emby 不会拿「UP主+标题」去联网乱刮。
+- **官方封面（1.0.7）**：`probePlatform` 拿到的 `thumbnail` 存进 `emby_json.cover`，下载完成后由 `cover.ts` 取回并按 Emby 规格重裁；
+  图床要 Referer（按平台给主页地址），走 `platform_proxy` 同一个代理，失败只记日志并回退 `autoCoversFromVideo` 截帧。
+  裁剪用 sharp（镜像里没有就原图落地），尺寸与截帧版一致：1000×1500 / 1920×1080 / 1280 宽。
+- **合集 / 多P（1.0.7）**：探测用 `--flat-playlist --playlist-end 200`，单条视频时它不改变结果，
+  只有多P / 播放列表才返回 `_type: playlist`，因此**一次解析就能判断要不要问用户**。
+  未指定 `mode` 时 `POST /api/platform/task` 不下任务，返回 `{ needsChoice: true, choice: { token, count, firstTitle … } }`；
+  前端弹窗、机器人发两个内联按钮（`cmd:pg <token> one|all`），二次提交带 `mode` 或 `token`。
+  展开时第一条复用已解析的完整信息，其余用 flat 条目（标题/作者/封面）直接入队，不再逐条解析 —— 200 条也不会卡住。
+  超过 200 条只取前 200，界面上会写明。
 - **YouTube 的 JS 运行时**：`--js-runtimes node` 是 yt-dlp 2025.10.22 才有的参数，老版本传了会直接报未知参数，
   所以先用 `versionRank()` 比较版本，够了才加；镜像自带 Node，不需要额外装 deno。
 

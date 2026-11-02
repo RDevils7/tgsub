@@ -16,9 +16,9 @@ import type {
   BotTestResult,
   FfmpegStatus,
   PlatformId,
+  PlatformEnqueueResponse,
   PlatformProbe,
   PlatformStatus,
-  PlatformTask,
   YtdlpInfo,
   EngineUpdateResult,
   EngineUpdateState,
@@ -181,9 +181,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
-  /** 解析并入队 */
-  platformTask: (url: string) =>
-    request<PlatformTask>("/platform/task", { method: "POST", body: JSON.stringify({ url }) }),
+  /**
+   * 解析并入队。
+   * 合集 / 多P 且没给 mode 时不会下载，先回 needsChoice，由界面弹窗让用户选。
+   */
+  platformTask: (url: string, mode?: "one" | "all") =>
+    request<PlatformEnqueueResponse>("/platform/task", {
+      method: "POST",
+      body: JSON.stringify({ url, mode }),
+    }),
+  /** 用选择令牌入队（机器人按钮走这条；界面有原链接时直接用 url） */
+  platformTaskByToken: (token: string, mode: "one" | "all") =>
+    request<PlatformEnqueueResponse>("/platform/task", {
+      method: "POST",
+      body: JSON.stringify({ token, mode }),
+    }),
   platformRefresh: () => request<{ ytdlp: YtdlpInfo; update: EngineUpdateState }>("/platform/refresh", {
     method: "POST",
   }),

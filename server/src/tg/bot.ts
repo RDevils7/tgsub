@@ -17,7 +17,7 @@ import { downloader } from "./downloader";
 import { setNotifySender } from "./notify";
 import { invalidateMatcherCache } from "../match";
 import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
-import { enqueuePlatformLinks, type PlatformQueued } from "../platform/jobs";
+import { enqueueFromChoice, enqueuePlatformLinks, type PlatformChoiceInfo, type PlatformQueued } from "../platform/jobs";
 
 /* ------------------------------------------------------------------ */
 /* 生命周期                                                            */
@@ -632,10 +632,38 @@ function platformQueuedText(r: PlatformQueued): string {
   if (!r.ok) return `❌ <b>${esc(label)}</b>\n${esc(r.error ?? "解析失败")}`;
   const lines = [`🎬 <b>${esc(label)}</b>${r.title ? ` · ${esc(r.title)}` : ""}`];
   if (r.uploader) lines.push(`👤 ${esc(r.uploader)}`);
-  lines.push(
-    r.existing ? "⏭ 之前已在队列或已下载过，这次跳过" : "⬇️ 已加入下载队列，稍后用 /tasks 看进度",
-  );
+  if (r.existing) {
+    lines.push(r.count > 1 ? `⏭ 这 ${r.count} 个之前都下过，这次跳过` : "⏭ 之前已在队列或已下载过，这次跳过");
+  } else {
+    lines.push(
+      r.count > 1
+        ? `⬇️ 已加入下载队列：${r.count} 个视频，用 /tasks 看进度`
+        : "⬇️ 已加入下载队列，稍后用 /tasks 看进度",
+    );
+  }
   return lines.join("\n");
+}
+
+/** 合集 / 多P：让用户选「只下第一个」还是「全部下载」 */
+function platformChoiceText(choice: PlatformChoiceInfo): string {
+  const label = PLATFORM_LABEL[choice.platform] ?? choice.platform;
+  const lines = [
+    `🎬 <b>${esc(label)}</b> · 这条链接是个合集`,
+    `📚 ${esc(choice.title)}`,
+    `共 <b>${choice.count}</b> 个视频${choice.capped ? "（只读了前 200 个）" : ""}`,
+  ];
+  if (choice.firstTitle) lines.push(`① ${esc(choice.firstTitle)}`);
+  lines.push("", "只下这一个，还是整份都下载？");
+  return lines.join("\n");
+}
+
+function platformChoiceButtons(choice: PlatformChoiceInfo): Api.TypeKeyboardButton[][] {
+  return [
+    [
+      btn("只下第一个", `cmd:pg ${choice.token} one`),
+      btn(`全部下载 ${choice.count} 个`, `cmd:pg ${choice.token} all`),
+    ],
+  ];
 }
 
 /** 一批链接全失败且原因是同一个（比如平台没启用）时，只回一条，别刷屏 */
@@ -645,7 +673,7 @@ function platformBatchReplies(results: PlatformQueued[]): string[] {
   if (failures.length === results.length && reasons.size === 1) {
     return [`❌ ${esc(failures[0].error ?? "解析失败")}`];
   }
-  return results.map(platformQueuedText);
+  return results.filter((r) => !r.choice).map(platformQueuedText);
 }
 
 async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotReply> {
@@ -840,13 +868,45 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       const platformLinks = splitPlatformLinks(link);
       if (platformLinks.length && !extractTelegramLinks(link).length) {
         const results = await enqueuePlatformLinks(platformLinks.slice(0, 5));
-        return { text: platformBatchReplies(results).join("\n\n") };
+        const lines = platformBatchReplies(results);
+        const choices = results.filter((r) => r.choice);
+        // 一条命令只能带一组按钮：多个合集时第一个给按钮，其余提示单独发
+        if (choices.length > 1) {
+          lines.push(`还有 ${choices.length - 1} 个合集需要单独发链接后再选`);
+        }
+        return {
+          text: [...lines, ...(choices.length ? [platformChoiceText(choices[0].choice!)] : [])]
+            .filter(Boolean)
+            .join("\n\n"),
+          ...(choices.length ? { buttons: platformChoiceButtons(choices[0].choice!) } : {}),
+        };
       }
       try {
         return { text: directText(await downloadFromLink(link)), buttons: mainButtons() };
       } catch (err) {
         return { text: `❌ ${esc(errorText(err))}` };
       }
+    }
+
+    // 合集按钮回调：/pg 不会出现在命令列表里，只有按钮会发
+    case "pg": {
+      const [token, modeRaw] = args;
+      if (!token) return { text: "这个按钮已经失效了，请重新发一次链接" };
+      const mode = modeRaw === "all" ? "all" : "one";
+      const outcome = await enqueueFromChoice(token, mode);
+      if (outcome.type === "playlist") return { text: "这个选择已经处理过了，请重新发一次链接" };
+      const queued = outcome.tasks.filter((task) => !task.existing).length;
+      const existing = outcome.tasks.length - queued;
+      const lines = [
+        mode === "all"
+          ? `✅ 合集已展开：共 ${outcome.tasks.length} 个视频`
+          : `✅ 已加入下载队列：${esc(outcome.tasks[0]?.title ?? "")}`,
+        `⬇️ 新入队 ${queued} 个${existing ? ` · 之前下过 ${existing} 个` : ""}`,
+      ];
+      if (outcome.playlist?.capped) lines.push("ℹ️ 合集超过 200 个，只取了前 200 个");
+      const dir = outcome.tasks[0]?.saveDir;
+      if (dir) lines.push(`📁 <code>${esc(dir)}/</code>`);
+      return { text: lines.join("\n") };
     }
 
     case "retry": {
@@ -964,8 +1024,18 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       if (platformLinks.length) {
         await sendText(currentBot, peer, `🔗 识别到 ${platformLinks.length} 个平台链接，正在解析…`);
         const results = await enqueuePlatformLinks(platformLinks.slice(0, 5));
-        for (const line of platformBatchReplies(results)) {
-          await sendText(currentBot, peer, line);
+        const failures = results.filter((r) => !r.ok);
+        // 整批同一个原因（比如平台没开、yt-dlp 不可用）只回一条
+        if (failures.length === results.length && new Set(failures.map((f) => f.error ?? "")).size === 1) {
+          await sendText(currentBot, peer, `❌ ${esc(failures[0].error ?? "解析失败")}`);
+          return;
+        }
+        for (const result of results) {
+          if (result.choice) {
+            await sendText(currentBot, peer, platformChoiceText(result.choice), platformChoiceButtons(result.choice));
+          } else {
+            await sendText(currentBot, peer, platformQueuedText(result));
+          }
         }
         return;
       }

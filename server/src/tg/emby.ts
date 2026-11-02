@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { getSettings } from "../db";
 import { logger } from "../logger";
+import { PlatformId } from "../types";
 import { sanitizeSegment } from "../utils";
 import { autoCoversFromVideo } from "./autocover";
 import { fixTelegramLink } from "./entity";
+import { applyCoversFromImage } from "../platform/cover";
 
 /**
  * 生成 Emby 可直接识别的本地媒体信息。
@@ -40,10 +42,25 @@ export interface EmbyMeta {
   airedAt: number;
   messageId: number;
   kind: "video" | "art";
+  /** 平台（第三方下载）：决定封面 Referer，也用于日志 */
+  platform?: PlatformId | null;
+  /** 平台官方封面地址；有就用它做封面，没有再回退视频截帧 */
+  cover?: string | null;
+  /** 播放量 / 点赞 / 时长：Emby 没有对应字段，写进简介尾部 */
+  views?: number | null;
+  likes?: number | null;
+  duration?: number | null;
+  /** 分区 / 分类，写进 Emby 的 genre */
+  categories?: string[];
 }
 
 export function encodeMeta(meta: EmbyMeta): string {
   return JSON.stringify(meta);
+}
+
+function toNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 export function decodeMeta(raw: string | null | undefined): EmbyMeta | null {
@@ -57,6 +74,13 @@ export function decodeMeta(raw: string | null | undefined): EmbyMeta | null {
       episode: parsed.episode === null || parsed.episode === undefined ? null : Number(parsed.episode),
       tags: Array.isArray(parsed.tags) ? parsed.tags.filter(Boolean) : [],
       plot: typeof parsed.plot === "string" ? parsed.plot : "",
+      cover: typeof parsed.cover === "string" && parsed.cover ? parsed.cover : null,
+      views: toNumber(parsed.views),
+      likes: toNumber(parsed.likes),
+      duration: toNumber(parsed.duration),
+      categories: Array.isArray(parsed.categories)
+        ? parsed.categories.filter((item): item is string => typeof item === "string" && Boolean(item))
+        : [],
     };
   } catch {
     return null;
@@ -79,6 +103,44 @@ function isoDate(ts: number): string {
   const d = new Date(ts || Date.now());
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 播放量这种大数按中文习惯折成「1.2 万」 */
+function humanCount(value: number): string {
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1).replace(/\.0$/, "")} 亿`;
+  if (value >= 10_000) return `${(value / 10_000).toFixed(1).replace(/\.0$/, "")} 万`;
+  return String(value);
+}
+
+function clock(seconds: number): string {
+  const total = Math.max(1, Math.round(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/**
+ * 简介。
+ *
+ * 抖音 / 小红书 的分享页很多时候没有正文，这时至少把标题和作者填进去，
+ * 免得 Emby 详情页是一片空白。
+ */
+function plotOf(meta: EmbyMeta): string {
+  const body = (meta.plot || "").trim();
+  if (body) return body;
+  const who = meta.studio ? `，来自 ${meta.studio}` : "";
+  return `${meta.series}${who}`;
+}
+
+/** 播放量 / 点赞 / 时长：Emby 的 NFO 没有这几个标准字段，追加在简介尾部 */
+function statsOf(meta: EmbyMeta): string {
+  const parts: string[] = [];
+  if (meta.views) parts.push(`播放 ${humanCount(meta.views)}`);
+  if (meta.likes) parts.push(`点赞 ${humanCount(meta.likes)}`);
+  if (meta.duration) parts.push(`时长 ${clock(meta.duration)}`);
+  return parts.join(" · ");
 }
 
 /** `S01E04` 形式的集号；没有集数时返回空串。日志里也用它拼可读标识 */
@@ -108,20 +170,25 @@ export function buildEpisodeNfo(meta: EmbyMeta): string {
     lines.push(`  <season>${meta.season || 1}</season>`);
     lines.push(`  <episode>${meta.episode}</episode>`);
   }
-  if (meta.plot) {
-    lines.push(`  <plot>${esc(meta.plot)}</plot>`);
-    const outline = meta.plot.replace(/\s+/g, " ").slice(0, 200);
+  const plot = plotOf(meta);
+  if (plot) {
+    const stats = statsOf(meta);
+    lines.push(`  <plot>${esc(stats ? `${plot}\n\n${stats}` : plot)}</plot>`);
+    const outline = plot.replace(/\s+/g, " ").slice(0, 200);
     lines.push(`  <outline>${esc(outline)}</outline>`);
   }
+  for (const genre of meta.categories ?? []) lines.push(`  <genre>${esc(genre)}</genre>`);
   for (const tagName of meta.tags) lines.push(`  <tag>${esc(tagName)}</tag>`);
   if (meta.studio) lines.push(`  <studio>${esc(meta.studio)}</studio>`);
+  if (meta.duration) lines.push(`  <runtime>${Math.max(1, Math.round(meta.duration / 60))}</runtime>`);
   const date = isoDate(meta.airedAt);
   lines.push(`  <aired>${date}</aired>`);
   lines.push(`  <premiered>${date}</premiered>`);
   lines.push(`  <year>${new Date(meta.airedAt || Date.now()).getFullYear()}</year>`);
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:${meta.series}:${tag || "movie"}`)}</uniqueid>`);
   const link = fixTelegramLink(meta.link);
-  if (link) lines.push(`  <uniqueid type="telegram">${esc(link)}</uniqueid>`);
+  // 平台视频的「原链接」不是 Telegram 消息，标成 platform，Emby 详情页不会显示成 Telegram
+  if (link) lines.push(`  <uniqueid type="${meta.platform ? "platform" : "telegram"}">${esc(link)}</uniqueid>`);
   lines.push("</episodedetails>", "");
   return lines.join("\n");
 }
@@ -133,7 +200,12 @@ export function buildShowNfo(meta: EmbyMeta): string {
     `  <title>${esc(meta.series)}</title>`,
     `  <originaltitle>${esc(meta.series)}</originaltitle>`,
   ];
-  if (meta.plot) lines.push(`  <plot>${esc(meta.plot)}</plot>`);
+  const plot = plotOf(meta);
+  if (plot) {
+    const stats = statsOf(meta);
+    lines.push(`  <plot>${esc(stats ? `${plot}\n\n${stats}` : plot)}</plot>`);
+  }
+  for (const genre of meta.categories ?? []) lines.push(`  <genre>${esc(genre)}</genre>`);
   for (const tagName of meta.tags) lines.push(`  <tag>${esc(tagName)}</tag>`);
   if (meta.studio) lines.push(`  <studio>${esc(meta.studio)}</studio>`);
   const date = isoDate(meta.airedAt);
@@ -142,7 +214,8 @@ export function buildShowNfo(meta: EmbyMeta): string {
   lines.push("  <status>Continuing</status>");
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:series:${meta.series}`)}</uniqueid>`);
   const link = fixTelegramLink(meta.link);
-  if (link) lines.push(`  <uniqueid type="telegram">${esc(link)}</uniqueid>`);
+  // 平台视频的「原链接」不是 Telegram 消息，标成 platform，Emby 详情页不会显示成 Telegram
+  if (link) lines.push(`  <uniqueid type="${meta.platform ? "platform" : "telegram"}">${esc(link)}</uniqueid>`);
   lines.push("</tvshow>", "");
   return lines.join("\n");
 }
@@ -303,8 +376,8 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
 
       await cleanupLegacyArt(dir);
 
-      // 封面一律来自视频截帧：本集生成 <剧集集名>-thumb.jpg，
-      // 第一集顺便定下剧集目录的 poster / landscape / fanart
+      // 封面优先用平台的官方封面（构图和画质都比截帧好），没有再回退视频截帧。
+      // 第三方平台的每条视频是独立目录、没有集号，所以 isFirst 用「目录里还没有图」来判断
       let enabled = true;
       try {
         enabled = getSettings().emby_meta && getSettings().auto_cover_frames;
@@ -312,9 +385,16 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
         enabled = false;
       }
       if (enabled) {
+        const isFirst = meta.episode === 1 || meta.episode === null;
+        const fromImage = await applyCoversFromImage(meta.cover ?? null, dir, {
+          base,
+          isFirst,
+          platform: meta.platform ?? null,
+        });
+        // 官方封面已经写好的文件名，截帧不会再覆盖（autoCoversFromVideo 只补缺的）
         await autoCoversFromVideo(filePath, dir, {
           base,
-          isFirst: meta.episode === 1,
+          isFirst: isFirst && fromImage.length === 0,
         });
       }
     }
