@@ -7,9 +7,10 @@ import { Download } from "../types";
 import { formatDateFolder, sanitizeSegment, toNumber } from "../utils";
 import { getClient } from "./client";
 import { extractMedia, targetRelativePath } from "./media";
-import { channelEntityKey } from "./entity";
+import { channelEntityKey, channelMessageLink } from "./entity";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 import { queueEmbyUpdate } from "./embyapi";
+import { canNotifyCard, notifyCard } from "./notify";
 import { requestCacheTrim } from "../cache";
 import { parsePlatformLink } from "../platform/detect";
 import { downloadPlatform, platformName } from "../platform/ytdlp";
@@ -28,6 +29,13 @@ function humanSize(bytes: number): string {
 function relPathOf(file: string): string {
   return path.relative(env.downloadDir, file).split(path.sep).join("/");
 }
+
+/** HTML 转义：卡片文本里带 < > & 的文件名不能破坏 Telegram 的 HTML 解析 */
+const esc = (input: string): string =>
+  String(input ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 
 /** 一条任务在日志里的可读标识：优先「剧名 S01E04」，否则退回到文件名 */
 function describeRow(row: Download): string {
@@ -261,6 +269,56 @@ class DownloadQueue {
     });
   }
 
+  /**
+   * 一条消息（含相册多集）全部下载完成时，给机器人推送一张完成卡片。
+   *
+   * 按 (channel_id, COALESCE(grouped_id, message_id)) 把同一条消息 / 同一相册聚成一组：
+   * 组内还有「排队 / 下载中」的文件就先不发，等最后一个落盘再发，
+   * 这样「消息里有多个视频」时也只在全部下完才通知一次。
+   * 封面临时图（.art-）与重复文件名不进预览列表。
+   */
+  private notifyMessageDone(channelId: number, messageId: number, groupKey: string | null): void {
+    if (!canNotifyCard()) return;
+    void (async () => {
+      const key = groupKey ?? String(messageId);
+      // 只通知「显式发起」的下载（机器人链接 / 转发、网页手动下载）：
+      // 这类任务的 matched_keyword 为 NULL；定时扫描命中订阅时该字段非空，
+      // 若不区分会一次扫描几十条消息、卡片刷屏。
+      const rows = db
+        .prepare(
+          "SELECT save_name, file_name, status FROM downloads WHERE channel_id = ? AND COALESCE(grouped_id, message_id) = ? AND matched_keyword IS NULL",
+        )
+        .all(channelId, key) as Array<{ save_name: string | null; file_name: string; status: string }>;
+      const pending = rows.filter((r) => r.status === "queued" || r.status === "downloading").length;
+      if (pending > 0) return;
+      const done = rows.filter((r) => r.status === "done");
+      const failed = rows.filter((r) => r.status === "failed");
+      if (!done.length) return;
+
+      const channel = stmtChannel.get(channelId);
+      const link = channel ? channelMessageLink(channel, messageId) : "";
+      const seen = new Set<string>();
+      const preview: string[] = [];
+      for (const r of done) {
+        if ((r.save_name ?? "").startsWith(".art-")) continue;
+        const name = r.save_name ?? r.file_name;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        preview.push(name);
+      }
+
+      const lines = ["✅ <b>下载完成</b>"];
+      lines.push(`📡 ${esc(channel?.title ?? "频道")}`);
+      lines.push(`📦 共 ${done.length} 个文件${failed.length ? ` · ⚠️ ${failed.length} 个失败` : ""}`);
+      if (link) lines.push(`🔗 ${esc(link)}`);
+      if (preview.length) {
+        lines.push("📄 文件预览：");
+        for (const name of preview.slice(0, 20)) lines.push(`· ${esc(name)}`);
+      }
+      await notifyCard({ text: lines.join("\n"), link });
+    })();
+  }
+
   stats(): { active: number; waiting: number } {
     this.prune();
     return { active: this.active.size, waiting: this.queue.length };
@@ -445,6 +503,7 @@ class DownloadQueue {
         const existing = await fs.promises.stat(candidate).catch(() => null);
         if (existing && existing.size === row.file_size) {
           stmtDone.run(existing.size, candidate, existing.size, Date.now(), id);
+          this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id);
           logger.info(
             { ...logContext, file: relPathOf(candidate), size: existing.size },
             `跳过重复下载：${label} → ${relPathOf(candidate)}（本地已有 ${humanSize(existing.size)}）`,
@@ -523,6 +582,7 @@ class DownloadQueue {
       // 校验落地文件：0 字节说明写入被中断，不能标记成功，否则会静默留下坏文件
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
       stmtDone.run(stat.size, targetPath, stat.size, Date.now(), id);
+      this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id);
       this.attempts.delete(id);
       logger.info(
         { ...logContext, file: relPathOf(targetPath), size: stat.size },

@@ -12,9 +12,9 @@ import { Channel, PLATFORM_LABEL, Subscription } from "../types";
 import { deriveName } from "../utils";
 import { currentProxy, getAppCredentials, getAuthState, resolveChannel } from "./client";
 import { getSchedulerState, isScanning, scanAll, scanChannel, type ScanResult } from "./scanner";
-import { downloadFromLink, extractTelegramLinks, type DirectResult } from "./direct";
+import { downloadFromLink, downloadFromForward, extractTelegramLinks, type DirectResult } from "./direct";
 import { downloader } from "./downloader";
-import { setNotifySender } from "./notify";
+import { setNotifyCard, setNotifySender } from "./notify";
 import { invalidateMatcherCache } from "../match";
 import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
 import { enqueueFromChoice, enqueuePlatformLinks, type PlatformChoiceInfo, type PlatformQueued } from "../platform/jobs";
@@ -274,6 +274,18 @@ export async function startBot(): Promise<void> {
         await sendText(sender, peer, text);
       });
 
+      // 下载完成卡片通道：发一张「文字块 + t.me 链接预览」的卡片（仿截图那种频道帖子预览）
+      setNotifyCard(async (card) => {
+        const sender = bot;
+        const peer = peerOf();
+        if (!sender || !peer) throw new Error("还没有可推送的会话（先给机器人发一条消息）");
+        await sender.sendMessage(peer, {
+          message: card.text,
+          parseMode: "html",
+          linkPreview: true,
+        });
+      });
+
       // 命令菜单注册失败不影响收发消息，只记日志
       await withTimeout(registerCommands(client), 20000, "注册命令菜单").catch((err: unknown) => {
         logger.warn({ err: errorText(err) }, "机器人命令菜单注册失败（不影响使用）");
@@ -288,6 +300,7 @@ export async function startBot(): Promise<void> {
       identity = { username: null, userId: null };
       startedAt = null;
       setNotifySender(null);
+      setNotifyCard(null);
       // 限流不是配置问题：等一会儿自己再来，失败次数翻倍退避
       if (isFlood(err) && getSettings().bot_enabled) scheduleFloodRetry();
     }
@@ -305,6 +318,7 @@ export async function stopBot(): Promise<void> {
   const current = bot;
   bot = null;
   setNotifySender(null);
+  setNotifyCard(null);
   identity = { username: null, userId: null };
   startedAt = null;
   if (current) {
@@ -350,6 +364,20 @@ function allowList(): string[] {
 function isAllowed(userId: string): boolean {
   const list = allowList();
   return list.length > 0 && list.includes(userId);
+}
+
+/* ------------------------------------------------------------------ */
+/* 图片下载开关：按用户持久化到 settings（bot_image_<userId> = true/false） */
+/* 默认关：机器人收到纯图片消息时不下载；用户在菜单点「图片下载」开启后， */
+/* 再发链接或转发消息，图片也会一起下（视频 / 文件始终照常）。            */
+/* ------------------------------------------------------------------ */
+
+function imageModeOn(userId: string): boolean {
+  return getSetting(`bot_image_${userId}`) === "true";
+}
+
+function setImageMode(userId: string, on: boolean): void {
+  setSetting(`bot_image_${userId}`, on ? "true" : "false");
 }
 
 /* ------------------------------------------------------------------ */
@@ -469,6 +497,7 @@ const COMMANDS: Array<{ command: string; description: string }> = [
   { command: "tasks", description: "最近下载任务" },
   { command: "queue", description: "下载队列" },
   { command: "dl", description: "按链接下载：/dl t.me/频道/123" },
+  { command: "imagedl", description: "切换：是否下载纯图片消息" },
   { command: "retry", description: "重试失败下载：/retry 或 /retry all" },
   { command: "pause", description: "暂停自动扫描" },
   { command: "resume", description: "恢复自动扫描" },
@@ -507,17 +536,22 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 /retry 重试全部失败 · /retry 123 重试单条
 /pause · /resume 暂停或恢复自动扫描
 
-<b>直接发链接就能下载</b>
+<b>直接发链接 / 转发就能下载</b>
 · Telegram 消息链接：https://t.me/频道名/123
+· 把频道消息<b>转发</b>给机器人：自动识别并下载原消息（视频 / 文件照常）
 · B站 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
-  原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条。
+  原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条
+· <b>图片下载</b>：默认只下视频 / 文件；纯图片消息需先在菜单点
+  「🖼 图片下载」开启，再发链接或转发
 点消息下方的按钮也能直接操作。`;
 
-function mainButtons(): Api.TypeKeyboardButton[][] {
+function mainButtons(userId?: string): Api.TypeKeyboardButton[][] {
   const auto = getSettings().auto_scan;
+  const imageOn = userId ? imageModeOn(userId) : false;
   return [
     [btn("🔄 立即扫描", "cmd:scan"), btn("📊 刷新状态", "cmd:status")],
-    [btn("📡 频道", "cmd:channels"), btn("🎯 订阅", "cmd:subs"), btn("🗂 最近任务", "cmd:tasks")],
+    [btn("📡 频道", "cmd:channels"), btn("🎯 订阅", "cmd:subs"), btn("📥 下载列表", "cmd:tasks")],
+    [btn(imageOn ? "🖼 图片下载：开" : "🖼 图片下载：关", "cmd:imagedl")],
     [btn(auto ? "⏸ 暂停自动扫描" : "▶️ 恢复自动扫描", auto ? "cmd:pause" : "cmd:resume")],
   ];
 }
@@ -680,7 +714,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
   switch (cmd) {
     case "start":
     case "help":
-      return { text: HELP_TEXT, buttons: mainButtons() };
+      return { text: HELP_TEXT, buttons: mainButtons(ctx.userId) };
 
     case "id":
       return { text: `🆔 你的 Telegram ID：<code>${esc(ctx.userId)}</code>` };
@@ -690,7 +724,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       const account = authState.authorized
         ? `@${authState.me?.username ?? authState.me?.firstName ?? "已登录"}`
         : `未登录${authState.error ? `（${esc(authState.error)}）` : ""}`;
-      return { text: buildStatus(account), buttons: mainButtons() };
+      return { text: buildStatus(account), buttons: mainButtons(ctx.userId) };
     }
 
     case "scan": {
@@ -882,10 +916,24 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         };
       }
       try {
-        return { text: directText(await downloadFromLink(link)), buttons: mainButtons() };
+        return {
+          text: directText(await downloadFromLink(link, { includeImages: imageModeOn(ctx.userId) })),
+          buttons: mainButtons(ctx.userId),
+        };
       } catch (err) {
         return { text: `❌ ${esc(errorText(err))}` };
       }
+    }
+
+    case "imagedl": {
+      const next = !imageModeOn(ctx.userId);
+      setImageMode(ctx.userId, next);
+      return {
+        text: next
+          ? "🖼 已开启「图片下载」：接下来发链接或转发消息时，纯图片也会一起下载（视频 / 文件照常）。"
+          : "🖼 已关闭「图片下载」：纯图片消息默认不再下载（视频 / 文件照常）。",
+        buttons: mainButtons(ctx.userId),
+      };
     }
 
     // 合集按钮回调：/pg 不会出现在命令列表里，只有按钮会发
@@ -928,7 +976,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       updateSettings({ auto_scan: on });
       return {
         text: on ? "▶️ 已恢复自动扫描" : "⏸ 已暂停自动扫描（手动 /scan 仍可用）",
-        buttons: mainButtons(),
+        buttons: mainButtons(ctx.userId),
       };
     }
 
@@ -972,26 +1020,20 @@ function denyText(userId: string): string {
 async function handleMessage(event: NewMessageEvent): Promise<void> {
   const msg = event.message;
   try {
-    const text = (msg.message ?? "").trim();
-    if (!text) return;
-    if (msg.isPrivate === false) return; // 只接受私聊指令，避免被拉群乱操作
-
+    if (msg.isPrivate === false) return; // 只接受私聊，避免被拉群乱操作
     const peer = msg.inputChat ?? msg.chatId;
     if (!peer) return;
     const userId = String(msg.senderId ?? "");
 
-    const matched = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?\s*([\s\S]*)$/.exec(text);
-    const cmd = (matched?.[1] ?? "").toLowerCase();
-    const rest = (matched?.[2] ?? "").trim();
-    const args = rest ? rest.split(/\s+/) : [];
-
-    await rememberPeer(msg);
-
     const currentBot = bot;
     if (!currentBot) return;
+    await rememberPeer(msg);
 
+    // 权限：未授权用户只允许 /id、/start（拿 ID），其余一律拒绝
     if (!isAllowed(userId)) {
-      if (cmd === "id" || cmd === "start") {
+      const probe = /^\/([A-Za-z0-9_]+)/.exec((msg.message ?? "").trim());
+      const c = (probe?.[1] ?? "").toLowerCase();
+      if (c === "id" || c === "start") {
         await sendText(
           currentBot,
           peer,
@@ -1003,14 +1045,50 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       return;
     }
 
+    // 转发到机器人的频道消息：从 fwd_from 取出原始频道 + 消息 ID 直接下载
+    const fwd = (msg as unknown as {
+      fwdFrom?: { fromId?: { className?: string; channelId?: number }; channelPost?: number; fromName?: string };
+    }).fwdFrom;
+    const fwdChannelId =
+      fwd?.fromId && (fwd.fromId.className === "PeerChannel" || (fwd.fromId as { channelId?: number }).channelId != null)
+        ? String((fwd.fromId as { channelId?: number }).channelId)
+        : null;
+    const fwdMessageId = fwd?.channelPost ?? null;
+    if (fwdChannelId && fwdMessageId) {
+      const includeImages = imageModeOn(userId);
+      await sendText(currentBot, peer, "📨 收到转发的频道消息，正在解析…");
+      try {
+        await sendText(
+          currentBot,
+          peer,
+          directText(
+            await downloadFromForward(fwdChannelId, fwdMessageId, { includeImages, title: fwd?.fromName ?? null }),
+          ),
+          mainButtons(userId),
+        );
+      } catch (err) {
+        await sendText(currentBot, peer, `❌ ${esc(errorText(err))}`);
+      }
+      return;
+    }
+
+    const text = (msg.message ?? "").trim();
+    if (!text) return;
+
+    const matched = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?\s*([\s\S]*)$/.exec(text);
+    const cmd = (matched?.[1] ?? "").toLowerCase();
+    const rest = (matched?.[2] ?? "").trim();
+    const args = rest ? rest.split(/\s+/) : [];
+
     if (!cmd) {
       // 直接发链接就下载：不用记命令，把 t.me 消息链接丢过来即可
       const links = extractTelegramLinks(text);
       if (links.length) {
+        const includeImages = imageModeOn(userId);
         await sendText(currentBot, peer, `🔗 收到 ${links.length} 个链接，正在解析…`);
         for (const link of links.slice(0, 5)) {
           try {
-            await sendText(currentBot, peer, directText(await downloadFromLink(link)));
+            await sendText(currentBot, peer, directText(await downloadFromLink(link, { includeImages })));
           } catch (err) {
             await sendText(currentBot, peer, `❌ ${esc(link)}\n${esc(errorText(err))}`);
           }
@@ -1046,7 +1124,7 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
         "发 /help 查看可用命令，或直接发链接给我：\n" +
           "· Telegram 消息链接（https://t.me/频道/123）\n" +
           "· B站 / 小红书 / YouTube 分享口令（原样粘贴即可）",
-        mainButtons(),
+        mainButtons(userId),
       );
       return;
     }

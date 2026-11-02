@@ -24,6 +24,12 @@ export interface GroupEnqueueOptions {
   runId?: number | null;
   /** 是否写监控记录（默认 true） */
   writeLog?: boolean;
+  /**
+   * 是否把图片也算作可下载文件。
+   * - undefined / true：图片照常下载（网页手动下载、定时扫描保持原行为，避免回归）
+   * - false：纯图片不下载，只下视频 / 文件（机器人默认，需用户在菜单开启「图片下载」）
+   */
+  includeImages?: boolean;
 }
 
 export interface GroupEnqueueResult {
@@ -35,6 +41,8 @@ export interface GroupEnqueueResult {
   skipped: number;
   /** 之前已经下过、这次没有重复入队的文件数 */
   existing: number;
+  /** 这条消息里是否包含视频（动图也算）；用来区分「纯图片消息」与「被大小限制挡掉」 */
+  hasVideo: boolean;
   saveDir: string | null;
   saveName: string | null;
   pendingIds: number[];
@@ -127,8 +135,10 @@ export function excerptOf(text: string): string {
 
 const runGroup = db.transaction(
   (channel: Channel, messages: Array<Record<string, unknown>>, opts: GroupEnqueueOptions): GroupEnqueueResult => {
-    const settings = getSettings();
-    const text = messages.map((m) => messageText(m)).join("\n");
+  const settings = getSettings();
+  // 图片默认计入可下载文件（网页手动下载 / 定时扫描保持原行为）；机器人显式传 false 时跳过
+  const includeImages = opts.includeImages ?? true;
+  const text = messages.map((m) => messageText(m)).join("\n");
     // 正文（caption）单独取一份：messageText 会拼上原始文件名，
     // 拿它当剧情简介会写出一堆 photo-10501.jpg
     const captionText = messages
@@ -170,6 +180,7 @@ const runGroup = db.transaction(
     }
 
     const totalSize = media.reduce((sum, entry) => sum + (entry.info.size || 0), 0);
+    let hasVideo = false;
     // 以正文说明为准命名：剧名文件夹 + 剧名S01E04.mp4（解析不到剧名则回退原名）
     // 开启 Emby 元信息后，剧集类的图片一律不下载 —— 封面由下载完成后从视频随机截帧生成，
     // 消息里的图片往往带集数水印或台词，做封面反而难看，还白占带宽
@@ -202,6 +213,7 @@ const runGroup = db.transaction(
       queued: 0,
       skipped: 0,
       existing: 0,
+      hasVideo: hasVideo,
       saveDir: naming.find((n) => !n.skip)?.dir ?? null,
       saveName: naming.find((n) => !n.skip)?.name ?? null,
       pendingIds: [],
@@ -257,7 +269,15 @@ const runGroup = db.transaction(
       // 图片只留 N 张当封面，其余整条跳过（不建下载记录）
       if (named?.skip) continue;
 
+      // 纯图片：机器人「图片下载」未开启时整条跳过（视频 / 文件照常下）
+      const isPhoto = info.kind === "photo";
+      if (isPhoto && !includeImages) {
+        skippedFiles += 1;
+        continue;
+      }
+
       const isVideo = info.kind === "video" || info.kind === "gif";
+      if (isVideo) hasVideo = true;
 
       // 视频是正文的主体内容，必须下载：不受文件大小过滤影响，
       // 否则用户为了挡掉杂图设了 30MB 上限，整集正片会被一起跳过

@@ -31,3 +31,44 @@ export async function notify(text: string): Promise<void> {
     logger.warn({ err: (err as Error).message }, "机器人推送失败");
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* 卡片推送（下载完成通知用）                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 富卡片：发给机器人的「下载完成」通知用。
+ *
+ * - `text` 是上方文字块（标题 / 频道 / 文件预览等，支持 HTML）
+ * - `link` 是 t.me 消息链接：开启 linkPreview 后 Telegram 会渲染出
+ *   频道帖子的预览卡片（仿截图那种「频道名 + 缩略图 + 摘要」卡片）
+ * - `photoPath` 暂未使用：带了链接预览就不会再显示附图，二者互斥，
+ *   优先用链接预览还原截图里的卡片样式
+ */
+export interface NotifyCard {
+  text: string;
+  link?: string;
+}
+
+type CardSender = (card: NotifyCard) => Promise<void>;
+
+let cardSender: CardSender | null = null;
+
+export function setNotifyCard(fn: CardSender | null): void {
+  cardSender = fn;
+}
+
+/** 卡片推送是否可用（机器人已连接 且 用户没关掉推送） */
+export function canNotifyCard(): boolean {
+  return Boolean(cardSender) && getSetting("bot_notify") !== "false";
+}
+
+export async function notifyCard(card: NotifyCard): Promise<void> {
+  if (!cardSender) return;
+  if (getSetting("bot_notify") === "false") return;
+  try {
+    await cardSender(card);
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "机器人卡片推送失败");
+  }
+}

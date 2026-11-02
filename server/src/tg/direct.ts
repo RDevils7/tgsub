@@ -133,7 +133,12 @@ function insertChannel(
   return { channel, entityKey: channelEntityKey(channel) || fallbackKey, autoAdded: true };
 }
 
-async function enqueueFromTarget(target: Target, messageId: number, link: string): Promise<DirectResult> {
+async function enqueueFromTarget(
+  target: Target,
+  messageId: number,
+  link: string,
+  includeImages?: boolean,
+): Promise<DirectResult> {
   const messages = await fetchMessageGroup(target.entityKey, messageId);
   const result = enqueueGroup(target.channel, messages, {
     fresh: true,
@@ -141,10 +146,17 @@ async function enqueueFromTarget(target: Target, messageId: number, link: string
     keyword: null,
     // 手动下载也留一条监控记录，方便回看「这个文件从哪来的」
     writeLog: true,
+    includeImages,
   });
 
   if (result.files === 0) {
     throw new Error("这条消息没有可下载的媒体文件（纯文本）");
+  }
+  if (result.queued === 0 && result.existing === 0) {
+    if (!result.hasVideo) {
+      throw new Error("这条消息只有图片，默认不下载图片。请在机器人菜单里开启「图片下载」后再发一次。");
+    }
+    throw new Error("文件都被大小限制过滤了，可在设置里调整最小 / 最大文件大小");
   }
   if (result.pendingIds.length) downloader.enqueue(result.pendingIds);
 
@@ -166,13 +178,42 @@ async function enqueueFromTarget(target: Target, messageId: number, link: string
 }
 
 /** 按链接下载单条消息（含相册整组） */
-export async function downloadFromLink(link: string): Promise<DirectResult> {
+export async function downloadFromLink(link: string, opts?: { includeImages?: boolean }): Promise<DirectResult> {
   const parsed = parseTelegramLink(link);
   if (!parsed) {
     throw new Error("链接格式不对，示例：https://t.me/频道名/123 或 https://t.me/c/1234567890/123");
   }
   const target = await resolveTarget(parsed);
-  return enqueueFromTarget(target, parsed.messageId, parsed.raw);
+  return enqueueFromTarget(target, parsed.messageId, parsed.raw, opts?.includeImages);
+}
+
+/**
+ * 转发到机器人的频道消息：从 `fwd_from` 取出原始频道与消息 ID 直接下载。
+ * 视频 / 文件照常下载；纯图片是否下载由 `includeImages` 决定（机器人默认不下载）。
+ */
+export async function downloadFromForward(
+  rawChannelId: string,
+  messageId: number,
+  opts?: { includeImages?: boolean; title?: string | null },
+): Promise<DirectResult> {
+  const client = await getClient();
+  const bare = String(rawChannelId).replace(/^-100/, "").replace(/^-/, "");
+  const marked = `-100${bare}`;
+  let target: Target;
+  const existing = stmtByTgId.get(bare);
+  if (existing) {
+    target = { channel: existing, entityKey: channelEntityKey(existing), autoAdded: false };
+  } else {
+    // 转发来源可能不在频道列表里：按 tg_id 解析并自动加入（默认停用，不参与定时扫描）
+    const entity = (await client.getEntity(marked)) as unknown as {
+      id: unknown;
+      title?: string;
+      username?: string;
+    };
+    target = insertChannel(entity, marked);
+  }
+  const link = channelMessageLink(target.channel, messageId);
+  return enqueueFromTarget(target, messageId, link, opts?.includeImages);
 }
 
 /** 监控历史里点「下载」用：直接给库里的频道 ID + 消息 ID */
