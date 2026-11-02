@@ -878,7 +878,9 @@ async function embyChecks(): Promise<void> {
   const { promisify } = await import("node:util");
   const runFfmpeg = promisify(execFile);
   const { default: sharp } = await import("sharp");
-  const { encodeMeta, finalizeMedia } = await import("../server/src/tg/emby");
+  const { encodeMeta, finalizeMedia, buildWritePermissionHint, isPermissionError } = await import(
+    "../server/src/tg/emby"
+  );
   const { autoCoversFromVideo } = await import("../server/src/tg/autocover");
   const { ffmpegInfo } = await import("../server/src/tg/ffmpeg");
 
@@ -997,6 +999,47 @@ async function embyChecks(): Promise<void> {
     assert.ok(madeAgain.includes("poster.jpg"));
     assert.ok(!madeAgain.includes("美人局S01E01-thumb.jpg"), "缩略图已存在不该重做");
     assert.notEqual(await sha1(path.join(dir, "poster.jpg")), posterBefore);
+  });
+
+  await acheck("权限不足的诊断先说清视频已落盘，再给改属主办法", async () => {
+    const err = Object.assign(new Error("EACCES: permission denied, open '/downloads/x/x.nfo'"), { code: "EACCES" });
+    assert.equal(isPermissionError(err), true);
+    const text = buildWritePermissionHint(dir, "美人局S01E04.nfo", err);
+    assert.ok(text.includes("视频已落盘"), "要先说明视频没丢，只是元数据没写进去");
+    assert.ok(text.includes(dir), "要指出具体目录");
+    assert.ok(text.includes("uid="), "要说明运行身份与目录属主");
+    assert.ok(text.includes("chown"), "要给出 chown 解决办法");
+    assert.ok(text.includes("CHOWN_RECURSE"), "要提示 CHOWN_RECURSE 一次性修历史文件");
+  });
+
+  await acheck("只读挂载点单独提示去掉 :ro", async () => {
+    const err = Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+    const text = buildWritePermissionHint(dir, "a.nfo", err);
+    assert.ok(text.includes(":ro"));
+    assert.ok(!text.includes("CHOWN_RECURSE"), "只读挂载不是属主问题，别给错方向");
+  });
+
+  await acheck("非权限错误不归到权限问题", async () => {
+    // 磁盘满 / 路径过长这些不该建议改属主
+    assert.equal(isPermissionError(Object.assign(new Error("x"), { code: "ENOSPC" })), false);
+    assert.equal(isPermissionError(new Error("no code")), false);
+  });
+
+  await acheck("目录被改成只读时自动补权限并补写 nfo", async () => {
+    if (process.platform === "win32") return; // Windows 没有 POSIX 权限位，无法复现
+    const roDir = path.join(dir, "ro-case");
+    await fs.mkdir(roDir);
+    // 老版本以 root 跑过 / 同步工具改权限的典型现场：属主是自己，但少了写位
+    const roVideo = path.join(roDir, "只读测试S01E01.mp4");
+    await fs.writeFile(roVideo, "fake");
+    await fs.chmod(roDir, 0o500);
+    try {
+      await finalizeMedia(roVideo, encodeMeta({ ...meta, series: "只读测试", episode: 1 }));
+    } finally {
+      await fs.chmod(roDir, 0o700);
+    }
+    const files = await fs.readdir(roDir);
+    assert.ok(files.includes("只读测试S01E01.nfo"), "应自动补上写权限并写入 nfo");
   });
 
   await fs.rm(dir, { recursive: true, force: true });

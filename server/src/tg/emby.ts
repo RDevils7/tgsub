@@ -164,6 +164,114 @@ async function cleanupLegacyArt(dir: string): Promise<void> {
   }
 }
 
+/** errno 是否属于「没有写权限」这一类 */
+export function isPermissionError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EPERM" || code === "EROFS";
+}
+
+function modeText(mode: number): string {
+  return (mode & 0o777).toString(8).padStart(4, "0");
+}
+
+function hasUserWrite(mode: number): boolean {
+  return (mode & 0o200) !== 0;
+}
+
+function currentUid(): number {
+  return typeof process.getuid === "function" ? process.getuid() : -1;
+}
+
+/**
+ * 权限类错误的可读诊断：哪个目录、当前身份、目录属主、怎么修。
+ *
+ * 写 .nfo 失败不等于下载失败——视频已经在盘上了，不说清这点用户会以为整条废了。
+ */
+export function buildWritePermissionHint(dir: string, file: string, err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code ?? "EACCES";
+  const uid = currentUid();
+  const gid = typeof process.getgid === "function" ? process.getgid() : -1;
+  let owner = "未知（目录 stat 失败）";
+  try {
+    const st = fs.statSync(dir);
+    owner =
+      process.platform === "win32"
+        ? `权限 ${modeText(st.mode)}`
+        : `uid=${st.uid} gid=${st.gid} 权限 ${modeText(st.mode)}`;
+  } catch {
+    // 目录都读不到时保持未知，下面的通用建议仍然成立
+  }
+
+  const lines = [
+    `视频已落盘，只是媒体信息写不进去：${file}`,
+    `目录：${dir}`,
+    `运行身份：uid=${uid} gid=${gid}；目录属主：${owner}`,
+  ];
+
+  if (code === "EROFS") {
+    lines.push(
+      "原因：这个挂载点是只读的，容器没有写权限。",
+      "处理：docker-compose.yml 里对应卷去掉 `:ro`，再 docker compose up -d。",
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    "原因：目录或同名 .nfo 属于别的账号（老版本以 root 跑过、或文件是从别处拷进来的），当前用户写不进去。",
+    "处理（任选其一，都不用重新下载，重跑该条目即可补上）：",
+    '  1) 容器加 CHOWN_RECURSE: "1" 重启一次，把历史文件属主一起改成运行账号；',
+    "  2) 宿主机上直接改属主（1000:1000 换成你的 PUID/PGID）：",
+    `       sudo chown -R 1000:1000 <宿主机上 ${path.basename(dir)} 对应的目录>`,
+    "  3) 目录来自 SMB/CIFS 共享时 chown 无效，把 PUID/PGID 改成该共享账号的 uid/gid。",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * 属主是当前用户、但权限位缺写时补上，返回 true 表示值得重试一次。
+ *
+ * 属主不是自己时不做无用功（改了也会被拒），这种情况只能由用户改属主。
+ */
+async function relaxWriteTarget(file: string, dir: string): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  const uid = currentUid();
+  if (uid < 0) return false;
+
+  // 先看文件本身：老版本以 root 写的 .nfo 可能是 0444，目录能写也覆盖不了
+  try {
+    const st = await fs.promises.stat(file);
+    if (st.uid === uid && !hasUserWrite(st.mode)) {
+      await fs.promises.chmod(file, st.mode | 0o200);
+      logger.info({ file: path.basename(file) }, "媒体信息文件是只读的，已自动加上写权限并重试");
+      return true;
+    }
+  } catch {
+    // 文件不存在，问题只可能在目录
+  }
+
+  try {
+    const st = await fs.promises.stat(dir);
+    if (st.uid === uid && !hasUserWrite(st.mode)) {
+      await fs.promises.chmod(dir, st.mode | 0o200);
+      logger.info({ dir: path.basename(dir) }, "剧集目录缺少写权限位，已自动补上并重试");
+      return true;
+    }
+  } catch {
+    // 目录不可 stat：交给上层报错
+  }
+  return false;
+}
+
+/** 写媒体信息文件；权限类失败先尝试自救，再重试一次 */
+async function writeMediaFile(file: string, data: string, dir: string): Promise<void> {
+  try {
+    await fs.promises.writeFile(file, data, "utf8");
+  } catch (err) {
+    if (!isPermissionError(err) || !(await relaxWriteTarget(file, dir))) throw err;
+    await fs.promises.writeFile(file, data, "utf8");
+  }
+}
+
 /** 视频落盘后：写剧集 nfo + 剧集信息 + 本集缩略图与剧集封面 */
 export async function finalizeMedia(filePath: string, rawMeta: string | null | undefined): Promise<void> {
   const meta = decodeMeta(rawMeta);
@@ -175,11 +283,11 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
   try {
     if (meta.kind !== "art") {
       const nfoPath = path.join(dir, `${sanitizeSegment(base, 120)}.nfo`);
-      await fs.promises.writeFile(nfoPath, buildEpisodeNfo(meta), "utf8");
+      await writeMediaFile(nfoPath, buildEpisodeNfo(meta), dir);
 
       const showPath = path.join(dir, "tvshow.nfo");
       if (!fs.existsSync(showPath)) {
-        await fs.promises.writeFile(showPath, buildShowNfo(meta), "utf8");
+        await writeMediaFile(showPath, buildShowNfo(meta), dir);
       }
       logger.info(
         {
@@ -211,9 +319,11 @@ export async function finalizeMedia(filePath: string, rawMeta: string | null | u
       }
     }
   } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    const hint = isPermissionError(err) ? `\n${buildWritePermissionHint(dir, path.basename(filePath), err)}` : "";
     logger.warn(
-      { err: (err as Error).message, dir: path.basename(dir), series: meta.series, episode: meta.episode },
-      `生成 Emby 媒体信息失败：${label}`,
+      { err: e.message, code: e.code ?? null, dir: path.basename(dir), series: meta.series, episode: meta.episode },
+      `生成 Emby 媒体信息失败：${label}${hint}`,
     );
   }
 }
