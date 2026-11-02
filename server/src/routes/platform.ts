@@ -33,6 +33,7 @@ platformRouter.get(
       root: platformRootDir(),
       meta: settings.platform_meta,
       proxy: settings.platform_proxy,
+      proxyDomestic: settings.platform_proxy_domestic,
       ytdlp: info,
       update,
       platforms: PLATFORM_IDS.map((id) => {

@@ -11,24 +11,88 @@ import { PlatformId } from "../types";
 /** 每个平台至少要有其中一项；数组里的多个元素是「任一命中即可」 */
 export const COOKIE_REQUIRED: Record<PlatformId, string[][]> = {
   bilibili: [["SESSDATA"], ["bili_jct"]],
-  douyin: [["ttwid", "msToken", "odin_tt"]],
+  // msToken 是 JS 生成、不一定写进 Cookie，不能当硬指标；ttwid 或任一登录态键就算够用
+  douyin: [["ttwid", "sessionid", "sessionid_ss", "sid_guard", "odin_tt"]],
   xiaohongshu: [["web_session"], ["a1"]],
-  youtube: [["SID", "SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"]],
+  youtube: [["SID", "SAPISID", "__Secure-3PAPISID", "__Secure-3PSID", "LOGIN_INFO", "SIDCC"]],
 };
 
-export interface CookieSummary {
-  /** 键值对数量 */
-  count: number;
-  /** 认出来的键名（保持原顺序、去重） */
-  keys: string[];
-  /** 缺失的必要项，显示时用组内第一个键名代表 */
-  missing: string[];
+export interface CookiePair {
+  name: string;
+  value: string;
+}
+
+/** Cookie-Editor 之类扩展导出的 JSON（数组或 {k: v}） */
+function fromJson(text: string): CookiePair[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const out: CookiePair[] = [];
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as Record<string, unknown>;
+      // 空值（退出登录后残留的 "sid="）没有意义，直接丢掉
+      if (typeof rec.name === "string" && typeof rec.value === "string" && rec.name && rec.value) {
+        out.push({ name: rec.name, value: rec.value });
+      }
+    }
+    return out;
+  }
+  if (data && typeof data === "object") {
+    for (const [name, value] of Object.entries(data as Record<string, unknown>)) {
+      if (typeof value === "string" && name && value) out.push({ name, value });
+    }
+  }
+  return out;
+}
+
+/** 浏览器扩展导出的 cookies.txt（Netscape 格式，TAB 分隔 7 列） */
+function isNetscape(text: string): boolean {
+  if (/^#\s*(Netscape|HttpOnly_)/i.test(text)) return true;
+  return text.split(/\r?\n/).some((line) => line.split("\t").length >= 7);
+}
+
+function fromNetscape(text: string): CookiePair[] {
+  const out: CookiePair[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^#HttpOnly_/i, "").trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split("\t");
+    if (parts.length < 7) continue;
+    const name = parts[5].trim();
+    const value = parts[6].trim();
+    if (name) out.push({ name, value });
+  }
+  return out;
+}
+
+/**
+ * 把用户可能粘进来的几种格式统一成 `k=v; k2=v2`：
+ * 普通 Cookie 串（可能带换行）、`Cookie: ...` 前缀、JSON 导出、Netscape cookies.txt。
+ * 之后所有解析都基于统一格式，避免「界面认得出、写文件时认不出」。
+ */
+export function normalizeCookie(raw: string): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  if (text.startsWith("[") || text.startsWith("{")) {
+    const pairs = fromJson(text);
+    if (pairs.length) return pairs.map((p) => `${p.name}=${p.value}`).join("; ");
+  }
+  if (isNetscape(text)) {
+    const pairs = fromNetscape(text);
+    if (pairs.length) return pairs.map((p) => `${p.name}=${p.value}`).join("; ");
+  }
+  return text.replace(/^cookie\s*:\s*/i, "");
 }
 
 /** 拆 `k=v; k2=v2`；容忍换行、制表符、多余空格与结尾分号 */
-export function parseCookiePairs(raw: string): Array<{ name: string; value: string }> {
-  const out: Array<{ name: string; value: string }> = [];
-  for (const chunk of String(raw ?? "").split(/[;\n]/)) {
+export function parseCookiePairs(raw: string): CookiePair[] {
+  const out: CookiePair[] = [];
+  for (const chunk of normalizeCookie(raw).split(/[;\n]/)) {
     const item = chunk.trim();
     if (!item) continue;
     const eq = item.indexOf("=");
@@ -39,6 +103,15 @@ export function parseCookiePairs(raw: string): Array<{ name: string; value: stri
     out.push({ name, value });
   }
   return out;
+}
+
+export interface CookieSummary {
+  /** 键值对数量 */
+  count: number;
+  /** 认出来的键名（保持原顺序、去重） */
+  keys: string[];
+  /** 缺失的必要项，显示时用组内第一个键名代表 */
+  missing: string[];
 }
 
 /** 体检：认出几项、缺什么 */

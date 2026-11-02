@@ -8,6 +8,7 @@ import { env } from "../env";
 import { PlatformId, PLATFORM_LABEL } from "../types";
 import { ffmpegInfo } from "../tg/ffmpeg";
 import { normalizeProxyUrl, parseProxy } from "../lib/netprobe";
+import { parseCookiePairs } from "./cookie";
 
 /**
  * yt-dlp 封装：B站 / 抖音 / 小红书 / YouTube 都交给它。
@@ -112,11 +113,38 @@ export function supportsJsRuntime(version: string | null): boolean {
   return versionRank(version) >= JS_RUNTIME_SINCE;
 }
 
-/** 平台相关的通用参数 */
+/**
+ * 平台相关的通用参数。
+ *
+ * 代理默认只给 YouTube：B站 的 upos CDN 会把海外代理 IP 直接判成
+ * `HTTP Error 567: Unknown Status`（解析正常、只有传数据失败），
+ * 抖音 / 小红书 走代理也只会更慢。人在海外要下国内平台时，
+ * 在设置里打开「国内平台也走代理」。
+ */
 function platformArgs(platform: PlatformId, version: string | null): string[] {
-  const args = platformProxyArg();
+  const args: string[] = [];
+  let useProxy = platform === "youtube";
+  if (!useProxy) {
+    try {
+      useProxy = getSettings().platform_proxy_domestic;
+    } catch {
+      useProxy = false;
+    }
+  }
+  if (useProxy) args.push(...platformProxyArg());
   if (platform === "youtube" && supportsJsRuntime(version)) args.push("--js-runtimes", "node");
   return args;
+}
+
+/** 给界面 / 报错文案用：这次请求到底会不会真的带上代理（没填代理就算想走也走不了） */
+export function platformUsesProxy(platform: PlatformId, proxy?: string): boolean {
+  try {
+    const raw = proxy === undefined ? getSettings().platform_proxy : proxy;
+    if (!String(raw ?? "").trim()) return false;
+    return platform === "youtube" || getSettings().platform_proxy_domestic;
+  } catch {
+    return false;
+  }
 }
 
 let cache: { at: number; info: YtdlpInfo } | null = null;
@@ -167,32 +195,32 @@ export function clearYtdlpCache(): void {
 /* Cookie                                                              */
 /* ------------------------------------------------------------------ */
 
-const COOKIE_DOMAIN: Record<PlatformId, string> = {
-  bilibili: ".bilibili.com",
-  douyin: ".douyin.com",
-  xiaohongshu: ".xiaohongshu.com",
-  youtube: ".youtube.com",
+const COOKIE_DOMAIN: Record<PlatformId, string[]> = {
+  bilibili: [".bilibili.com"],
+  // 分享短链会跳到 iesdouyin.com，只写 .douyin.com 的话那一跳拿不到登录态
+  douyin: [".douyin.com", ".iesdouyin.com"],
+  xiaohongshu: [".xiaohongshu.com"],
+  // SID / SAPISID 实际种在 .google.com 上，只写 .youtube.com 会漏掉一半登录态
+  youtube: [".youtube.com", ".google.com"],
 };
 
 /**
- * 把「k=v; k2=v2」转成 yt-dlp 要的 Netscape cookies.txt。
+ * 把 Cookie 转成 yt-dlp 要的 Netscape cookies.txt。
  *
  * yt-dlp 的很多 extractor 会检查 `self._get_cookies()`，只塞
  * `--add-header "Cookie: ..."` 不生效，必须喂文件。
+ * 传入的串先经过 `parseCookiePairs`（兼容换行、JSON、Netscape 三种粘法），
+ * 再按平台可能用到的多个域名各写一遍。
  */
 export function cookieToNetscape(cookie: string, platform: PlatformId): string {
-  const domain = COOKIE_DOMAIN[platform];
+  const domains = COOKIE_DOMAIN[platform];
   const lines = ["# Netscape HTTP Cookie File", "# 由 tgsub 自动生成，请勿手动编辑", ""];
-  for (const raw of cookie.split(";")) {
-    const item = raw.trim();
-    if (!item) continue;
-    const eq = item.indexOf("=");
-    if (eq <= 0) continue;
-    const name = item.slice(0, eq).trim();
-    const value = item.slice(eq + 1).trim();
-    if (!name) continue;
-    // domain / includeSubdomains / path / secure / expiry(0=会话) / name / value
-    lines.push([domain, "TRUE", "/", "TRUE", "0", name, value].join("\t"));
+  const pairs = parseCookiePairs(cookie);
+  for (const domain of domains) {
+    for (const pair of pairs) {
+      // domain / includeSubdomains / path / secure / expiry(0=会话) / name / value
+      lines.push([domain, "TRUE", "/", "TRUE", "0", pair.name, pair.value].join("\t"));
+    }
   }
   return `${lines.join("\n")}\n`;
 }
@@ -442,7 +470,7 @@ export async function probePlatform(
 
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.1 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.2 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const first = await dumpJson(info, platform, cookie, ["--flat-playlist", "--playlist-end", String(PLAYLIST_LIMIT)], url);
@@ -514,7 +542,7 @@ export async function downloadPlatform(
 ): Promise<PlatformDownloadResult> {
   const info = await ytdlpInfo();
   if (!info.available || !info.path) {
-    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.1 以上，或在设置里填写 yt-dlp 路径");
+    throw new Error("yt-dlp 不可用：请确认镜像是 1.1.2 以上，或在设置里填写 yt-dlp 路径");
   }
 
   const ffmpeg = await ffmpegInfo().catch(() => null);
@@ -709,6 +737,13 @@ export function explainYtdlpError(raw: string, platform: PlatformId): string {
     )
   ) {
     return `音视频合并失败（ffmpeg）：${ffmpegReason(text)}。删掉该视频目录里的 .part / .webm / .m4a 残留再重试；反复失败请把完整日志发出来`;
+  }
+  // B站 CDN 会把海外代理 IP 判成 567：网页解析正常，只有下分片被拒。
+  // 必须区分「这次到底走没走代理」，否则会给出一个用户根本没开的开关。
+  if (/HTTP Error 567|Unknown Status/i.test(text)) {
+    return platformUsesProxy(platform)
+      ? `${label} CDN 拒绝了下载请求（567）：B站 会把海外代理 IP 判成 567。到设置 → 第三方平台，把「国内平台也走代理」关掉（国内平台直连），或换一个国内中转节点再试`
+      : `${label} CDN 拒绝了下载请求（567）：Cookie 过期或缺少 buvid3 时会这样，重新复制一次 Cookie 再试；仍失败就在设置里点「检查更新」把 yt-dlp 升到最新`;
   }
   if (/Unable to download|urlopen error|timed out|Connection|Tunnel connection failed/i.test(text)) {
     return youtube

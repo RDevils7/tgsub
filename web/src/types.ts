@@ -250,6 +250,8 @@ export interface AppSettings {
   platform_meta: boolean;
   /** 只给 yt-dlp 用的代理；下 YouTube 通常必须填 */
   platform_proxy: string;
+  /** 国内平台（B站 / 抖音 / 小红书）是否也走这条代理，默认关 */
+  platform_proxy_domestic: boolean;
   /** 定时检查 yt-dlp 新版本 */
   ytdlp_auto_update: boolean;
   /** 检查间隔（小时） */
@@ -308,6 +310,8 @@ export interface PlatformStatus {
   root: string;
   meta: boolean;
   proxy: string;
+  /** 国内平台是否也走代理（默认 false：B站直连，避免 567） */
+  proxyDomestic: boolean;
   ytdlp: YtdlpInfo;
   update: EngineUpdateState;
   platforms: PlatformInfo[];

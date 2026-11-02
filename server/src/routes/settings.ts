@@ -139,6 +139,9 @@ settingsRouter.put(
     /* 第三方平台（B站 / 抖音 / 小红书 / YouTube） */
     if (body.platform_enabled !== undefined) patch.platform_enabled = Boolean(body.platform_enabled);
     if (typeof body.platform_proxy === "string") patch.platform_proxy = normalizeProxyUrl(body.platform_proxy);
+    if (body.platform_proxy_domestic !== undefined) {
+      patch.platform_proxy_domestic = Boolean(body.platform_proxy_domestic);
+    }
     if (body.ytdlp_auto_update !== undefined) patch.ytdlp_auto_update = Boolean(body.ytdlp_auto_update);
     if (body.ytdlp_check_hours !== undefined) {
       patch.ytdlp_check_hours = clampInt(body.ytdlp_check_hours, 1, 720, current.ytdlp_check_hours);

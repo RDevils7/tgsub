@@ -37,22 +37,25 @@ const PLATFORMS: PlatformMeta[] = [
       "在请求列表里点任意一条发往 bilibili.com 的请求",
       "右侧 Headers → Request Headers，复制 Cookie: 后面那一整串",
       "至少要包含 SESSDATA、bili_jct、DedeUserID；一般一个月左右过期",
+      "高码率（1080P+ / 4K）必须要大会员账号的 Cookie，否则只能拿到 480P",
     ],
     required: [["SESSDATA"], ["bili_jct"]],
   },
   {
     id: "douyin",
     label: "抖音",
-    placeholder: "ttwid=xxx; msToken=yyy; …",
-    cookieHint: "需要 ttwid、msToken 等；不填往往只能拿到带水印的低清版本，且容易被风控",
+    placeholder: "ttwid=xxx; sessionid=yyy; …",
+    cookieHint:
+      "至少要 ttwid 或 sessionid（登录后才有）；msToken 是网页脚本现算的，不在 Cookie 里，没有也正常",
     cookieSteps: [
-      "浏览器打开 douyin.com，用手机抖音扫码登录",
-      "F12 → Network / 网络 → 在筛选框输入 douyin.com，然后刷新",
-      "点任意一条请求，复制 Request Headers 里的 Cookie 整串",
-      "关键字段：ttwid、msToken、odin_tt、passport_csrf_token",
-      "有效期最短，通常几天到几周；失效时会报 412 或只能拿到带水印版本",
+      "浏览器打开 douyin.com，用手机抖音扫码登录，随便打开一个视频页",
+      "F12 → Network / 网络 → 筛框输入 douyin.com，刷新页面",
+      "点任意一条 douyin.com 的请求（状态码 200 的），右侧 Headers → Request Headers",
+      "复制 Cookie: 后面那一整串；关键字段是 ttwid、sessionid、sessionid_ss、odin_tt、passport_csrf_token",
+      "注意：在 Console 里敲 document.cookie 拿不到 HttpOnly 的 ttwid，那样复制出来的串一定不完整 —— 必须从 Request Headers 复制，或用 Cookie-Editor 导出",
+      "只支持单个视频 / 图文页；主页、合集页认不出来。有效期几天到几周，失效会报 412",
     ],
-    required: [["ttwid", "msToken", "odin_tt"]],
+    required: [["ttwid", "sessionid", "sessionid_ss", "sid_guard", "odin_tt"]],
   },
   {
     id: "xiaohongshu",
@@ -80,7 +83,7 @@ const PLATFORMS: PlatformMeta[] = [
       "大陆网络必须先填下面的「第三方平台代理」，否则解析阶段就会失败",
       "公开视频不用 Cookie；会员专享、年龄限制的视频才需要",
     ],
-    required: [["SID", "SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"]],
+    required: [["SID", "SAPISID", "__Secure-3PAPISID", "__Secure-3PSID", "LOGIN_INFO", "SIDCC"]],
     needsProxy: true,
   },
 ];
@@ -92,11 +95,62 @@ const QUALITIES = [
   { value: "480", label: "480P" },
 ];
 
-/** 拆 Cookie 串，和后天解析规则保持一致（前端只用来即时提示） */
+/**
+ * Cookie 统一格式，规则与服务端 `server/src/platform/cookie.ts` 的
+ * `normalizeCookie` 完全一致（两边没有共享模块，改一处必须改两处）：
+ * 普通串 / `Cookie:` 前缀 / JSON 导出 / Netscape cookies.txt。
+ */
+function normalizeCookie(raw: string): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  const asPairs = (pairs: Array<{ name: string; value: string }>) =>
+    pairs.map((p) => `${p.name}=${p.value}`).join("; ");
+
+  if (text.startsWith("[") || text.startsWith("{")) {
+    try {
+      const data = JSON.parse(text) as unknown;
+      const pairs: Array<{ name: string; value: string }> = [];
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (!item || typeof item !== "object") continue;
+          const rec = item as Record<string, unknown>;
+          if (typeof rec.name === "string" && typeof rec.value === "string" && rec.name && rec.value) {
+            pairs.push({ name: rec.name, value: rec.value });
+          }
+        }
+      } else if (data && typeof data === "object") {
+        for (const [name, value] of Object.entries(data as Record<string, unknown>)) {
+          if (typeof value === "string" && name && value) pairs.push({ name, value });
+        }
+      }
+      if (pairs.length) return asPairs(pairs);
+    } catch {
+      /* 不是 JSON，按普通串处理 */
+    }
+  }
+
+  if (/^#\s*(Netscape|HttpOnly_)/i.test(text) || text.split(/\r?\n/).some((l) => l.split("\t").length >= 7)) {
+    const pairs: Array<{ name: string; value: string }> = [];
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.replace(/^#HttpOnly_/i, "").trim();
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split("\t");
+      if (parts.length < 7) continue;
+      const name = parts[5].trim();
+      const value = parts[6].trim();
+      if (name) pairs.push({ name, value });
+    }
+    if (pairs.length) return asPairs(pairs);
+  }
+
+  return text.replace(/^cookie\s*:\s*/i, "");
+}
+
+/** 拆 Cookie 串（兼容三种粘贴格式），前端只用来即时提示 */
 function parseCookie(raw: string): { count: number; keys: string[]; missing: string[] } {
   const keys: string[] = [];
   let count = 0;
-  for (const chunk of String(raw ?? "").split(/[;\n]/)) {
+  for (const chunk of normalizeCookie(raw).split(/[;\n]/)) {
     const item = chunk.trim();
     if (!item) continue;
     const eq = item.indexOf("=");
@@ -189,6 +243,7 @@ export default function PlatformPanel() {
   const [dir, setDir] = useState("第三方");
   const [meta, setMeta] = useState(true);
   const [proxy, setProxy] = useState("");
+  const [proxyDomestic, setProxyDomestic] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [checkHours, setCheckHours] = useState(24);
   const [ytdlpPath, setYtdlpPath] = useState("");
@@ -212,6 +267,7 @@ export default function PlatformPanel() {
     setDir(res.dir || "第三方");
     setMeta(res.meta);
     setProxy(res.proxy ?? "");
+    setProxyDomestic(Boolean(res.proxyDomestic));
     setAutoUpdate(res.update?.autoUpdate ?? true);
     setCheckHours(res.update?.checkHours ?? 24);
     return res;
@@ -237,6 +293,7 @@ export default function PlatformPanel() {
         platform_dir: dir,
         platform_meta: meta,
         platform_proxy: proxy.trim(),
+        platform_proxy_domestic: proxyDomestic,
         ytdlp_auto_update: autoUpdate,
         ytdlp_check_hours: checkHours,
         ytdlp_path: ytdlpPath.trim(),
@@ -507,9 +564,22 @@ export default function PlatformPanel() {
           spellCheck={false}
         />
         <p className="mt-1 text-[10.5px] leading-relaxed text-slate-500">
-          B站 / 抖音 / 小红书 在墙内直连最快，留空即可；<span className="text-slate-400">YouTube 与检查更新必须走代理</span>。
-          与上面「网络与代理」里的 Telegram 代理互相独立。
+          <span className="text-slate-400">只有 YouTube 与「检查更新」走这条代理</span>；B站 / 抖音 / 小红书 默认直连
+          —— B站 CDN 会把海外代理 IP 判成 <span className="font-mono text-slate-400">HTTP 567</span>。
+          与「网络与代理」里的 Telegram 代理互相独立。
         </p>
+        <label className="mt-2 flex cursor-pointer items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+          <input
+            type="checkbox"
+            className="mt-[2px] h-3.5 w-3.5 accent-brand-500"
+            checked={proxyDomestic}
+            onChange={(e) => setProxyDomestic(e.target.checked)}
+          />
+          <span className="text-[11px] leading-relaxed text-slate-400">
+            国内平台也走代理
+            <span className="ml-1 text-slate-600">（服务器在海外才需要；打开后 B站 容易报 567）</span>
+          </span>
+        </label>
       </div>
 
       <div className="mt-3 flex items-center justify-between gap-2">
@@ -592,17 +662,24 @@ export default function PlatformPanel() {
 
                 {/* 状态行：输入中显示识别结果，已保存显示摘要与时间 */}
                 {live ? (
-                  <p
-                    className={
-                      hasMissing
-                        ? "mt-1 text-[10.5px] leading-relaxed text-warn/90"
-                        : "mt-1 text-[10.5px] leading-relaxed text-ok/90"
-                    }
-                  >
-                    识别到 {live.count} 项
-                    {live.keys.length > 0 && <span className="text-slate-500"> · {live.keys.slice(0, 4).join(" / ")}{live.keys.length > 4 ? " …" : ""}</span>}
-                    {hasMissing && <span> · 缺少 {missing.join(" / ")}，可能不算登录态</span>}
-                  </p>
+                  live.count === 0 ? (
+                    <p className="mt-1 text-[10.5px] leading-relaxed text-err/90">
+                      没认出任何键值对：要粘 <span className="font-mono">name=value</span> 形式的整串
+                      （从 Request Headers 的 Cookie: 后面复制），只粘值或只粘字段名都无效
+                    </p>
+                  ) : (
+                    <p
+                      className={
+                        hasMissing
+                          ? "mt-1 text-[10.5px] leading-relaxed text-warn/90"
+                          : "mt-1 text-[10.5px] leading-relaxed text-ok/90"
+                      }
+                    >
+                      识别到 {live.count} 项
+                      {live.keys.length > 0 && <span className="text-slate-500"> · {live.keys.slice(0, 4).join(" / ")}{live.keys.length > 4 ? " …" : ""}</span>}
+                      {hasMissing && <span> · 缺少 {missing.join(" / ")}，可能不算登录态</span>}
+                    </p>
+                  )
                 ) : saved ? (
                   <p className="mt-1 text-[10.5px] leading-relaxed text-slate-500">
                     {state?.cookieHint ?? `${count} 项`}

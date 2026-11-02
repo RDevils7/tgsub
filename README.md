@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.1-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.2-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
@@ -18,16 +18,18 @@
 
 ---
 
-## 本版更新（1.1.1）
+## 本版更新（1.1.2）
 
-**一句话：修掉 1.1.0 上真实踩到的两个坑 —— YouTube 下到一半断线，以及合并阶段直接失败。**
+**一句话：B站 下不动、抖音 Cookie 填不对，两个平台问题一起修掉 —— 代理不再拖累国内平台，Cookie 怎么粘都能认。**
 
-1. **合并容器不再写死 mp4**：YouTube 常见的「VP9 / AV1 视频 + Opus 音频」塞不进 mp4，ffmpeg 报 `Could not find tag for codec opus`，任务在最后一步（Postprocessing）失败。现在允许 `mp4/mkv`：能 mp4 就 mp4，编码不兼容自动落 mkv，Emby 照常识别。
-2. **断线重试 3 次 → 10 次**：代理掐长连接时的典型报错是 `[SSL: UNEXPECTED_EOF_WHILE_READING] ... Giving up after 3 retries`。现在 10 次重试、间隔 3 秒、socket 超时 20s → 30s，配合断点续传基本能下完。
-3. **报错说人话**：新增 TLS 中断、ffmpeg 合并失败（指出具体编码）、磁盘满、目录无写权限四类翻译；合并失败不再把 `Postprocessing: Stream #1:0 -> #0:1 (copy)` 这种 ffmpeg 中间输出丢给你。
-4. **顺手修了 lockfile**：前两次升版本号误改了 `cookie-signature`、`path-parse` 两个依赖的版本字段（实际安装无影响，但 lock 与真实依赖不一致），已改回 `1.0.7`。
+1. **代理默认只管 YouTube**。B站 的 upos CDN 会把海外代理 IP 判成 `HTTP Error 567`（解析正常，只有下分片被拒）。现在 B站 / 抖音 / 小红书 默认**直连**，只有 YouTube 与「检查更新」走「第三方平台代理」；服务器在海外要下国内平台，再打开新加的「国内平台也走代理」开关。
+2. **567 的报错按真实情况给建议**：开了代理就提示去关，没开就提示换 Cookie / 升级 yt-dlp，不再让你去关一个本来就没开的开关。
+3. **Cookie 三种粘法都能认**：普通 `k=v; k2=v2`、`Cookie:` 前缀、Cookie-Editor 导出的 **JSON**、Get cookies.txt 导出的 **Netscape 文件**，以及换行分隔的多行粘贴。以前粘 JSON 进去会显示「未识别到任何键值对」。
+4. **抖音 Cookie 判定不再误报**：`msToken` 是网页脚本现算的，根本不在 Cookie 里，原来拿它当必要项会一直显示「缺关键项」；现在 `ttwid` / `sessionid` / `odin_tt` 任一即可。悬停说明也补了「Console 里 `document.cookie` 拿不到 HttpOnly 的 ttwid，必须从 Request Headers 复制」。
+5. **Cookie 文件写全域名**：抖音同时写 `.douyin.com` 与 `.iesdouyin.com`（分享短链要跳一次），YouTube 同时写 `.youtube.com` 与 `.google.com`（`SID` / `SAPISID` 实际种在 google.com 上），漏域名的表现就是「Cookie 明明填了却仍要求登录」。
+6. **粘贴识别**：粘进来只剩值、或只剩字段名时，界面直接说「没认出任何键值对」，而不是留下一句含糊的「0 项」。
 
-> 1.1.0 的官方封面、完整元数据、合集选择下载全部保留，本次只动下载与合并链路。
+> 1.1.0 的官方封面 / 完整元数据 / 合集选择、1.1.1 的合并兜底与重试全部保留。
 
 ---
 
@@ -152,11 +154,13 @@ docker compose up -d && docker compose logs -f --tail=200
 | 平台 | 关键字段 | 不填会怎样 |
 | --- | --- | --- |
 | B站 | `SESSDATA`（大会员还需 `bili_jct`、`DedeUserID`） | 只能拿 480P 左右，部分视频直接 412 |
-| 抖音 | `ttwid`、`msToken`、`odin_tt` | 常拿到带水印低清版，更易被风控 |
+| 抖音 | `ttwid`、`sessionid`（`msToken` 不在 Cookie 里，不用管） | 常拿到带水印低清版，更易被风控 |
 | 小红书 | `web_session`、`a1` | 大概率空流或要求登录 |
 | YouTube | `SID`、`SAPISID`（会员 / 年龄限制才需要） | 公开视频不填也行 |
 
-**代理**：B站 / 抖音 / 小红书直连最快，YouTube 必须走代理。设置 → 第三方平台 → 「第三方平台代理」填 `http://192.168.1.2:7890`，只作用于 yt-dlp，不影响 Telegram。yt-dlp 的自动更新（走 GitHub）也用它。
+**代理**：默认只有 YouTube 与「检查更新」走代理（设置 → 第三方平台 → 「第三方平台代理」填 `http://192.168.1.2:7890`，只作用于 yt-dlp，不影响 Telegram）。
+B站 / 抖音 / 小红书 **默认直连** —— B站 的 CDN 会把海外代理 IP 判成 `HTTP Error 567`，绕出去反而下不动。
+服务器本身在海外、又要下国内平台时，勾上「国内平台也走代理」即可，但 B站 仍可能 567。
 
 **落盘结构**（每条视频一个目录，Emby 里是独立条目）：
 
@@ -177,7 +181,7 @@ downloads/第三方/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.1.1` | 固定版本（**生产环境建议锁定**） |
+| `v1.1.2` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push `main` 只跑构建与冒烟测试、不发布镜像。
 
@@ -206,11 +210,12 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 「连接异常，延迟重连」刷屏 | 先看设置页「联网测试」：Telegram API 超时就是代理没生效 |
 | 扫码后立刻掉线 | 代理不稳定或 IP 被风控；换节点，必要时走「彻底重置并重新登录」 |
 | 新集没出现在 Emby | 确认「Emby 入库通知」地址 / API Key / 路径映射三项都对，点「测试连接」 |
-| `yt-dlp 不可用` | 镜像低于 1.1.1 或本地开发没装；升级镜像，或在设置里手填路径 |
+| `yt-dlp 不可用` | 镜像低于 1.1.2 或本地开发没装；升级镜像，或在设置里手填路径 |
 | `要求登录` / `风控拦截（412）` | Cookie 过期，重新复制一次；已下载的文件不受影响 |
 | `连不上 YouTube` | 没配第三方平台代理，或节点不通；YouTube 还需在代理地区可用 |
-| 日志 `SSL: UNEXPECTED_EOF_WHILE_READING` | 代理把长连接掐了（1.1.1 已自动重试 10 次）；仍频繁出现就换节点或避开高峰期 |
-| 日志 `Postprocessing` / `Could not find tag for codec` | 音视频合并失败，1.1.1 已用 `mp4/mkv` 兜底；老任务先删掉该目录里的 `.part` / `.webm` / `.m4a` 再重试 |
+| 日志 `SSL: UNEXPECTED_EOF_WHILE_READING` | 代理把长连接掐了（1.1.1 起自动重试 10 次）；仍频繁出现就换节点或避开高峰期 |
+| 日志 `Postprocessing` / `Could not find tag for codec` | 音视频合并失败，1.1.1 起用 `mp4/mkv` 兜底；老任务先删掉该目录里的 `.part` / `.webm` / `.m4a` 再重试 |
+| `HTTP Error 567: Unknown Status`（B站） | CDN 拒绝了下载分片：先确认没开「国内平台也走代理」（海外 IP 会被判 567），再确认 Cookie 没过期 |
 
 更多报错与细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 

@@ -1135,7 +1135,7 @@ async function platformChecks(): Promise<void> {
   const { cookieToNetscape, formatSelector, explainYtdlpError, platformProxyArg, supportsJsRuntime, versionRank, playlistEntries, readPlaylist, MERGE_CONTAINERS } =
     await import("../server/src/platform/ytdlp");
   const { buildEpisodeNfo, decodeMeta } = await import("../server/src/tg/emby");
-  const { parseCookiePairs, summarizeCookie, describeCookie, humanAge } = await import(
+  const { parseCookiePairs, summarizeCookie, describeCookie, humanAge, normalizeCookie } = await import(
     "../server/src/platform/cookie"
   );
   const { assetName, normalizeTag } = await import("../server/src/platform/updater");
@@ -1307,6 +1307,14 @@ async function platformChecks(): Promise<void> {
     assert.ok(merge.includes("合并"), "应说明是合并阶段");
     assert.ok(!merge.startsWith("Postprocessing:"), "不能把 ffmpeg 的 stream 映射当错误抛给用户");
     assert.equal(MERGE_CONTAINERS, "mp4/mkv", "合并容器要给 mkv 兜底");
+    // B站 567：默认没开代理，文案不能让用户去关一个没开的开关
+    const denied = explainYtdlpError(
+      "ERROR: unable to download video data: HTTP Error 567: Unknown Status",
+      "bilibili",
+    );
+    assert.ok(denied.includes("567"), "要说明是 CDN 拒绝");
+    assert.ok(!denied.includes("关掉"), "没有启用代理时不该让用户去关代理开关");
+    assert.ok(denied.includes("Cookie") || denied.includes("更新"), "要给出可照做的下一步");
   });
 
   check("Cookie 串解析与体检", () => {
@@ -1330,6 +1338,60 @@ async function platformChecks(): Promise<void> {
     // YouTube 认 SID / SAPISID 任意一个
     assert.equal(summarizeCookie("SID=abc; HSID=1", "youtube").missing.length, 0);
     assert.equal(summarizeCookie("PREF=xx", "youtube").missing.length, 1);
+  });
+
+  check("Cookie 的四种粘法都能认出来", () => {
+    // Cookie-Editor 导出的 JSON 数组
+    const json = JSON.stringify([
+      { name: "ttwid", value: "1|abc" },
+      { name: "sessionid", value: "def" },
+      { name: "空值", value: "" },
+    ]);
+    assert.equal(normalizeCookie(json), "ttwid=1|abc; sessionid=def");
+    assert.equal(summarizeCookie(json, "douyin").missing.length, 0);
+
+    // 简化的 {name: value} 对象
+    assert.equal(parseCookiePairs('{"ttwid":"1","msToken":"x"}').length, 2);
+
+    // Netscape cookies.txt（Get cookies.txt 扩展导出的样子）
+    const netscape = [
+      "# Netscape HTTP Cookie File",
+      ".douyin.com\tTRUE\t/\tTRUE\t0\tttwid\t1",
+      "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tdef",
+      "",
+    ].join("\n");
+    const pairs = parseCookiePairs(netscape);
+    assert.equal(pairs.length, 2, "注释行要跳过");
+    assert.equal(pairs[1].name, "sessionid");
+
+    // F12 复制时连带 "Cookie: " 前缀
+    assert.equal(normalizeCookie("Cookie: ttwid=1; a=2"), "ttwid=1; a=2");
+
+    // 只粘了值 / 只粘了字段名：认不出，界面要明确说「没认出键值对」
+    assert.equal(summarizeCookie("abc123", "douyin").count, 0);
+    assert.equal(summarizeCookie("ttwid sessionid", "douyin").count, 0);
+
+    // 抖音：ttwid 单独一项就算够用 —— msToken 是网页脚本现算的，不在 Cookie 里
+    assert.equal(summarizeCookie("ttwid=1", "douyin").missing.length, 0);
+    assert.equal(summarizeCookie("msToken=abc", "douyin").missing.length, 1);
+    // YouTube 的 SID 实际种在 google.com，也要认
+    assert.equal(summarizeCookie("__Secure-3PSID=1", "youtube").missing.length, 0);
+  });
+
+  check("Cookie 文件按平台写全多个域名", () => {
+    const douyin = cookieToNetscape("ttwid=1", "douyin");
+    assert.ok(douyin.includes(".douyin.com"));
+    assert.ok(douyin.includes(".iesdouyin.com"), "分享短链那一跳也要带登录态");
+    const yt = cookieToNetscape("SID=1", "youtube");
+    assert.ok(yt.includes(".google.com"), "SID / SAPISID 种在 google.com 上");
+    // 换行分隔的粘贴要拆成两条，而不是当成一条
+    const multi = cookieToNetscape("a=1\nb=2", "bilibili")
+      .split("\n")
+      .filter((line) => line && !line.startsWith("#"));
+    assert.equal(multi.length, 2);
+    // JSON 导出直接粘进来也能写
+    const fromJson = cookieToNetscape('[{"name":"SESSDATA","value":"x"}]', "bilibili");
+    assert.ok(fromJson.includes("\tSESSDATA\tx"));
   });
 
   check("Cookie 保存时间的相对描述", () => {

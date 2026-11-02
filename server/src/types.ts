@@ -174,6 +174,12 @@ export interface AppSettings {
    * 下 B站 / 抖音 / 小红书一般留空；下 YouTube 通常必须填。
    */
   platform_proxy: string;
+  /**
+   * 国内平台（B站 / 抖音 / 小红书）是否也走上面那条代理。
+   * 默认关闭：B站 CDN 会把海外代理 IP 判成 567，直连最快也最稳；
+   * 只有服务器在海外、又要下国内平台时才需要打开。
+   */
+  platform_proxy_domestic: boolean;
   /** 定时检查 yt-dlp 新版本，有就自动下载到 data/bin */
   ytdlp_auto_update: boolean;
   /** 多久检查一次（小时），默认 24 */
@@ -225,6 +231,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   platform_dir: "第三方",
   platform_meta: true,
   platform_proxy: "",
+  platform_proxy_domestic: false,
   ytdlp_auto_update: true,
   ytdlp_check_hours: 24,
 };

@@ -384,13 +384,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.1.1` | 打 `v1.1.1` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.1.2` | 打 `v1.1.2` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.1.1
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.1.2
 docker compose up -d
 ```
 
@@ -554,7 +554,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
 | ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
-| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度（默认「最高（原画）」）、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存（平台名后的 `?` 悬停看分步取法） |
+| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度（默认「最高（原画）」）、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存（平台名后的 `?` 悬停看分步取法）；「第三方平台代理」与其下的「国内平台也走代理」（默认关） |
 | 第三方平台代理 | 空 | 只给 yt-dlp 用（`--proxy`），与上面 Telegram 的代理互相独立；YouTube 与检查更新必须填 |
 | yt-dlp 自动更新 | 开 | 到点去 GitHub 看新版，有就下到 `data/bin` 并切过去（先 `--version` 校验，失败回滚） |
 | yt-dlp 检查间隔 | 24 | 单位小时，1–720 |
@@ -565,7 +565,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 ---
 
-## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.5 – 1.1.0）
+## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.5 – 1.1.2）
 
 **为什么用 yt-dlp 而不是自己写接口**：这几个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
 小红书 `x-s`、YouTube `nsig`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，
@@ -594,6 +594,14 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 - **中断**：暂停/停止调用 `AbortController.abort()` → SIGTERM，2 秒后 SIGKILL；随后清理 `.part` / `.ytdl` 残片。
 - **Cookie**：与 session 同级加密（`setPlatformCookie` / `getPlatformCookie`），不进 AppSettings，
   接口只回「N 项，首项 <name>」。传空字符串 = 清除，传掩码 = 不变。
+  `normalizeCookie`（1.1.2）先把四种粘法统一成 `k=v; k2=v2`：普通串 / `Cookie:` 前缀 / JSON 导出
+  （Cookie-Editor 的 `[{name,value}]` 或 `{k:v}`）/ Netscape cookies.txt（`#HttpOnly_` 前缀剥掉），
+  空值丢弃。前端 `PlatformPanel.tsx` 里有一份等价实现（两边没有共享模块，改一处必须改两处）。
+  `cookieToNetscape` 按平台写多个域名：抖音 `.douyin.com` + `.iesdouyin.com`（分享短链要跳一次），
+  YouTube `.youtube.com` + `.google.com`（`SID` / `SAPISID` 实际种在 google.com），
+  漏域名的典型表现是「Cookie 填了却仍要求登录」。
+  `COOKIE_REQUIRED` 同步放宽：抖音不再把 `msToken` 当必要项（网页脚本现算、不在 Cookie 里），
+  `ttwid` / `sessionid` / `sessionid_ss` / `sid_guard` / `odin_tt` 任一即可。
 - **扩展名**：由 yt-dlp 决定（mkv/webm 都可能），下载完成后回填 `save_name` / `file_name`。
 - **目录**：`<platform_dir>/<平台>/<作者>/<标题> [ID]/`，每条视频一个目录，避免 `tvshow.nfo` 互相覆盖。
 - **分享口令**：不能用「按空白切词」——App 复制出来的是整段文案，链接常被 `<>` 包着、紧贴中文。
@@ -603,8 +611,13 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   机器人私聊（`splitPlatformLinks` + `enqueuePlatformLinks`，一次最多 5 条）三条路都吃整段口令。
 - **默认画质**：`platform_quality` 默认 `best`（`bv*+ba/b`，视频音频分离后合并）。
   老库里若存过旧默认值 `1080`，启动时由 `migration_platform_quality_v106` 迁成 `best`，用户自选的 720/480 不动。
-- **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`。
-  国内平台直连最快，YouTube 与「检查更新」必须走它；`parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
+- **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`；
+  `parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
+- **国内平台默认直连（1.1.2）**：B站 的 upos CDN 把海外代理 IP 判成 `HTTP Error 567`
+  （解析成功、只有传分片被拒），所以 `platformArgs()` 只对 YouTube 追加 `--proxy`；
+  新增 `platform_proxy_domestic`（默认 false），服务器在海外又要下国内平台时才打开。
+  `platformUsesProxy()` 供报错文案判断「这次到底带没带代理」，567 的提示据此分两种说法，
+  避免让用户去关一个根本没开的开关。前端「第三方平台代理」下面多了同名复选框，状态接口回 `proxyDomestic`。
 - **下载与合并的稳定性（1.1.1）**：`--retries` / `--fragment-retries` 由 3 提到 10，
   加 `--retry-sleep 3`，`--socket-timeout` 提到 30 —— 代理掐长连接时报
   `[SSL: UNEXPECTED_EOF_WHILE_READING] ... Giving up after 3 retries` 的主因是重试预算太小。
@@ -647,9 +660,9 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 用 node 的 fetch 下载（不额外装 curl），失败即构建失败；`--build-arg INSTALL_YTDLP=0` 可跳过。
 镜像里的那份是「兜底」，实际生效的可能是 `data/bin` 里自动更新下来的那份。
 
-**自检**：`platformChecks()` 21 项（三平台真实分享口令、链接识别含 YouTube 四种形态、冒充域名、中文标点、
-去重、Cookie 格式与体检、画质映射、错误文案含 YouTube 专属两类、版本比较、资产名、代理参数），
-全部是纯函数，不依赖网络与二进制。
+**自检**：`platformChecks()` 24 项（三平台真实分享口令、链接识别含 YouTube 四种形态、冒充域名、中文标点、
+去重、Cookie 四种粘法与体检、Cookie 文件多域名、画质映射、错误文案（YouTube 两类 + TLS 中断 + ffmpeg 合并 +
+B站 567 两种说法）、版本比较、资产名、代理参数），全部是纯函数，不依赖网络与二进制。
 
 ---
 
