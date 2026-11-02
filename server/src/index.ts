@@ -21,9 +21,11 @@ import { messagesRouter } from "./routes/messages";
 import { metadataRouter } from "./routes/metadata";
 import { settingsRouter } from "./routes/settings";
 import { embyRouter } from "./routes/emby";
+import { cacheRouter } from "./routes/cache";
 import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
 import { hydrateFromFile } from "./lib/logstore";
+import { requestCacheTrim } from "./cache";
 
 const app = express();
 app.disable("x-powered-by");
@@ -75,6 +77,7 @@ app.use("/api/messages", messagesRouter);
 app.use("/api/metadata", metadataRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/emby", embyRouter);
+app.use("/api/cache", cacheRouter);
 app.use("/api/logs", logsRouter);
 app.use("/api", systemRouter);
 
@@ -200,6 +203,9 @@ startAuthWatchdog();
 // 机器人用独立 authKey（bot token 授权），可以和用户账号同时在线。
 // 稍微延后一点启动：先让用户账号的连接稳定下来，避免两个连接同时握手。
 setTimeout(() => void startBot(), 8000).unref();
+
+// 启动后按上限收拾一次缓存：上一次进程可能是被强杀的，没来得及清理
+setTimeout(() => requestCacheTrim(0), 4000).unref();
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "正在关闭");

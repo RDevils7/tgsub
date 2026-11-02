@@ -27,6 +27,12 @@ import {
 } from "../server/src/tg/entity";
 import { Subscription } from "../server/src/types";
 import { mapEmbyPath, normalizeEmbyUrl, parsePathMap } from "../server/src/tg/embypath";
+import {
+  coverGroupKey,
+  humanBytes as humanCacheBytes,
+  selectEvictions,
+  type CacheGroup,
+} from "../server/src/lib/cacheplan";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -990,42 +996,98 @@ async function embyChecks(): Promise<void> {
   await fs.rm(dir, { recursive: true, force: true });
 }
 
+console.log("\n缓存：分组、上限与清理顺序");
+
+const MB = 1024 * 1024;
+
+/** 造一个缓存组：mb 是大小，mtime 是最后写入时间 */
+function cacheGroup(key: string, mb: number, mtime: number): CacheGroup {
+  return { key, scope: "covers", paths: [`/tmp/${key}`], bytes: mb * MB, files: 1, mtime };
+}
+
+function cacheChecks(): void {
+  check("缓存分组：同一条消息的几张图算一组", () => {
+    assert.equal(coverGroupKey("1-10538-1.jpg"), "1-10538");
+    assert.equal(coverGroupKey("1-10538-3.jpg"), "1-10538");
+    assert.equal(coverGroupKey("1-10538.json"), "1-10538");
+    // 频道 ID 可能是负数
+    assert.equal(coverGroupKey("-1001234567890-42-2.jpg"), "-1001234567890-42");
+    // 认不出格式的名字自己一组
+    assert.equal(coverGroupKey("readme.txt"), "readme.txt");
+  });
+
+  check("缓存没超上限时什么都不删", () => {
+    const groups = [cacheGroup("a", 10, 1000), cacheGroup("b", 20, 2000)];
+    assert.deepEqual(selectEvictions(groups, 100 * MB, { now: 9e9 }), []);
+    // 刚好等于上限也不删
+    assert.deepEqual(selectEvictions(groups, 30 * MB, { now: 9e9 }), []);
+  });
+
+  check("超过上限时从最旧的删起，一次清到 80%", () => {
+    // 10 组 × 10MB = 100MB，上限 50MB → 目标是 40MB，删最旧的 6 组后剩 40MB
+    const groups = Array.from({ length: 10 }, (_, i) => cacheGroup(`g${i + 1}`, 10, (i + 1) * 1000));
+    const evicted = selectEvictions(groups, 50 * MB, { now: 9e9 });
+    assert.deepEqual(evicted.map((g) => g.key), ["g1", "g2", "g3", "g4", "g5", "g6"]);
+  });
+
+  check("keepRatio 决定清到多少", () => {
+    const groups = Array.from({ length: 10 }, (_, i) => cacheGroup(`g${i + 1}`, 10, (i + 1) * 1000));
+    const evicted = selectEvictions(groups, 50 * MB, { now: 9e9, keepRatio: 0.5 });
+    // 目标 25MB，删到只剩 20MB
+    assert.equal(evicted.length, 8);
+    assert.equal(evicted[evicted.length - 1].key, "g8");
+  });
+
+  check("上限为 0 表示不清理", () => {
+    const groups = [cacheGroup("a", 500, 1000)];
+    assert.deepEqual(selectEvictions(groups, 0, { now: 9e9 }), []);
+    assert.deepEqual(selectEvictions(groups, -1, { now: 9e9 }), []);
+  });
+
+  check("刚写入过的组先不动，避免删掉正在挑的候选帧", () => {
+    const now = 10_000_000;
+    const groups = [
+      cacheGroup("fresh", 10, now - 1000), // 刚刚生成
+      ...Array.from({ length: 9 }, (_, i) => cacheGroup(`old${i + 1}`, 10, (i + 1) * 1000)),
+    ];
+    const evicted = selectEvictions(groups, 50 * MB, { now });
+    assert.equal(evicted.some((g) => g.key === "fresh"), false);
+    // 100MB 要清到 40MB，fresh 的 10MB 留着，从旧的里删 6 组
+    assert.equal(evicted.length, 6);
+  });
+
+  check("全部都是刚生成的就不删（等下一轮）", () => {
+    const now = 10_000_000;
+    const groups = Array.from({ length: 10 }, (_, i) => cacheGroup(`g${i}`, 10, now - 1000));
+    assert.deepEqual(selectEvictions(groups, 50 * MB, { now }), []);
+  });
+
+  check("缓存大小的可读格式", () => {
+    assert.equal(humanCacheBytes(0), "0 B");
+    assert.equal(humanCacheBytes(512), "512 B");
+    assert.equal(humanCacheBytes(1536), "1.5 KB");
+    assert.equal(humanCacheBytes(3 * MB), "3.0 MB");
+    assert.equal(humanCacheBytes(1.5 * 1024 * MB), "1.50 GB");
+  });
+}
+
 async function main(): Promise<void> {
-  try {
-    await seriesDirChecks();
-  } catch (err) {
-    console.error(`  \u2717 剧集目录用例异常: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
-  try {
-  try {
-  try {
-    await logStoreChecks();
-  } catch (err) {
-    console.error(`  \u2717 \u65e5\u5fd7\u5b58\u50a8\u7528\u4f8b\u5f02\u5e38: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
-    await permissionChecks();
-  } catch (err) {
-    console.error(`  \u2717 \u6743\u9650\u68c0\u67e5\u7528\u4f8b\u5f02\u5e38: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
-    await embyChecks();
-  } catch (err) {
-    console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
-  try {
-    embyNotifyChecks();
-  } catch (err) {
-    console.error(`  \u2717 Emby 用例异常: ${(err as Error).message}`);
-    process.exitCode = 1;
-  }
-  try {
-    await ffmpegProbeChecks();
-  } catch (err) {
-    console.error(`  \u2717 ffmpeg 解析用例异常: ${(err as Error).message}`);
-    process.exitCode = 1;
+  const suites: Array<[string, () => unknown]> = [
+    ["剧集目录用例", () => seriesDirChecks()],
+    ["日志存储用例", () => logStoreChecks()],
+    ["权限检查用例", () => permissionChecks()],
+    ["Emby 用例", () => embyChecks()],
+    ["Emby 入库用例", () => embyNotifyChecks()],
+    ["缓存清理用例", () => cacheChecks()],
+    ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
+  ];
+  for (const [name, run] of suites) {
+    try {
+      await run();
+    } catch (err) {
+      console.error(`  \u2717 ${name}异常: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
   }
   console.log(`\n通过 ${passed} 项自检${process.exitCode ? "（存在失败）" : "，全部正常"}\n`);
 }

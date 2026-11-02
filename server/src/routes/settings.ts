@@ -99,6 +99,9 @@ settingsRouter.put(
       ].join(",");
     }
     if (body.bot_notify !== undefined) patch.bot_notify = Boolean(body.bot_notify);
+    if (body.cache_limit_mb !== undefined) {
+      patch.cache_limit_mb = clampInt(body.cache_limit_mb, 0, 102400, current.cache_limit_mb);
+    }
     if (body.emby_notify !== undefined) patch.emby_notify = Boolean(body.emby_notify);
     if (typeof body.emby_url === "string") patch.emby_url = normalizeEmbyUrl(body.emby_url);
     if (typeof body.emby_path_map === "string") {

@@ -10,6 +10,7 @@ import { extractMedia, targetRelativePath } from "./media";
 import { channelEntityKey } from "./entity";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 import { queueEmbyUpdate } from "./embyapi";
+import { requestCacheTrim } from "../cache";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -520,6 +521,8 @@ class DownloadQueue {
       // 最后通知 Emby 入库：放在元信息写完之后，Emby 扫到文件时海报简介已经就位。
       // 攒 2.5 秒批量提交，连着下完几集也只会触发一次增量扫描。
       if (!isArtTask && !isPhoto) queueEmbyUpdate(targetPath, "Created");
+      // 这集刚写了自己的缩略图与剧集封面，顺手看一眼缓存总量有没有超上限
+      requestCacheTrim();
     } catch (err) {
       // 用户手动中断：不是失败，别计入重试次数，也不要触发自动重试
       if (err instanceof CancelError) {

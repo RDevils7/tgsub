@@ -236,7 +236,39 @@ export interface AppSettings {
   bot_notify: boolean;
   /** ffmpeg 可执行文件路径，留空则自动查找 */
   ffmpeg_path: string;
+  /** 缓存目录（covers + frames）上限，单位 MB；0 = 不限制也不自动清理 */
+  cache_limit_mb: number;
   has_session?: boolean;
+}
+
+/* ------------------------------ 缓存 ------------------------------ */
+
+export interface CacheUsage {
+  bytes: number;
+  files: number;
+  groups: number;
+}
+
+export interface CacheStats {
+  covers: CacheUsage;
+  frames: CacheUsage;
+  total: CacheUsage;
+  limitMb: number;
+  /** 超出上限的字节数；没超为 0 */
+  overBytes: number;
+  lastTrimAt: number | null;
+  lastTrimFreed: number;
+  lastTrimReason: "auto" | "manual" | "clear" | null;
+}
+
+export interface CacheActionResult {
+  freed: number;
+  removedGroups: number;
+  removedFiles: number;
+  remaining: number;
+  triggered: boolean;
+  stats: CacheStats;
+  message: string;
 }
 
 export interface BotState {

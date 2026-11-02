@@ -150,6 +150,11 @@ export interface AppSettings {
   bot_notify: boolean;
   /** ffmpeg 可执行文件路径；留空则自动查找（内置 npm 包 → PATH） */
   ffmpeg_path: string;
+  /**
+   * 缓存目录（data/covers + data/frames）的上限，单位 MB。
+   * 超过后按最后写入时间从旧到新自动清理；0 = 不限制，也不自动清理。
+   */
+  cache_limit_mb: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -177,4 +182,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bot_allow_users: "",
   bot_notify: true,
   ffmpeg_path: "",
+  cache_limit_mb: 512,
 };

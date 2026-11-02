@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import { formatDateTime } from "../utils";
-import type { AppSettings, AuthState, BotState, QrState, SettingsResponse } from "../types";
+import { formatBytes, formatDateTime } from "../utils";
+import type { AppSettings, AuthState, BotState, CacheStats, QrState, SettingsResponse } from "../types";
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../components/ui";
-import { IconBot, IconDownload, IconKey, IconLogout, IconQr, IconShield, IconSpark } from "../components/icons";
+import {
+  IconBot,
+  IconDownload,
+  IconKey,
+  IconLogout,
+  IconQr,
+  IconShield,
+  IconSpark,
+  IconTrash,
+} from "../components/icons";
 
 type LoginStep = "idle" | "code" | "password";
 
@@ -34,13 +43,26 @@ export default function Settings() {
   const [bot, setBot] = useState<BotState | null>(null);
   const [botBusy, setBotBusy] = useState(false);
 
+  const [cache, setCache] = useState<CacheStats | null>(null);
+  const [cacheBusy, setCacheBusy] = useState<null | "trim" | "clear">(null);
+  /** 清空缓存要点两次：第一次只是把按钮变成「确认清空」 */
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  // 缓存占用比例；上限为 0（不限制）时不画进度条
+  const pct = cache?.limitMb ? Math.min(100, ((cache.total.bytes / (cache.limitMb * MB)) * 100)) : 0;
+
   const load = useCallback(async () => {
     try {
-      const [settingsRes, authRes] = await Promise.all([api.settings(), api.authState()]);
+      const [settingsRes, authRes, cacheRes] = await Promise.all([
+        api.settings(),
+        api.authState(),
+        api.cacheStatus().catch(() => null),
+      ]);
       setData(settingsRes);
       setDraft(settingsRes.settings);
       setAuth(authRes);
       setBot(settingsRes.bot ?? null);
+      if (cacheRes) setCache(cacheRes);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
@@ -98,10 +120,52 @@ export default function Settings() {
       setDraft(res.settings);
       toast.push("设置已保存", "success");
       if (section === "api") setAuth(await api.authState());
+      if (section === "cache") await refreshCache();
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
       setSavingSection(null);
+    }
+  };
+
+  const refreshCache = async () => {
+    try {
+      setCache(await api.cacheStatus());
+    } catch {
+      /* 状态拉不到不影响清理本身 */
+    }
+  };
+
+  const runCacheTrim = async () => {
+    setCacheBusy("trim");
+    try {
+      const res = await api.cacheTrim();
+      setCache(res.stats);
+      toast.push(res.message, res.triggered ? "success" : "info");
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setCacheBusy(null);
+    }
+  };
+
+  const runCacheClear = async () => {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      toast.push("再点一次「确认清空」就会删掉全部缓存", "info");
+      window.setTimeout(() => setConfirmClear(false), 4000);
+      return;
+    }
+    setConfirmClear(false);
+    setCacheBusy("clear");
+    try {
+      const res = await api.cacheClear();
+      setCache(res.stats);
+      toast.push(res.message, "success");
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setCacheBusy(null);
     }
   };
 
@@ -1050,6 +1114,132 @@ export default function Settings() {
             保存设置
           </Button>
         </div>
+      </section>
+
+      {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
+      <section className="card p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-sky-500/20 bg-sky-500/10 text-sky-300">
+              <IconTrash className="h-4 w-4" />
+            </span>
+            <div>
+              <h2 className="text-[14px] font-semibold text-white">缓存清理</h2>
+              <p className="mt-0.5 text-[12px] text-slate-500">
+                封面预览与截帧候选图存在 data 目录下，删掉会自动重建；数据库、下载文件与日志不受影响
+              </p>
+            </div>
+          </div>
+          <Badge
+            className={
+              (cache?.overBytes ?? 0) > 0
+                ? "border-amber-500/25 bg-amber-500/10 text-warn"
+                : "border-sky-500/20 bg-sky-500/10 text-sky-300"
+            }
+          >
+            {cache ? formatBytes(cache.total.bytes) : "—"}
+          </Badge>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {[
+            { label: "合计", usage: cache?.total, note: `${cache?.total.groups ?? 0} 组` },
+            { label: "封面预览", usage: cache?.covers, note: "消息列表用" },
+            { label: "截帧缓存", usage: cache?.frames, note: "元数据页用" },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3"
+            >
+              <p className="text-[11px] uppercase tracking-wider text-slate-500">{item.label}</p>
+              <p className="mt-1 font-mono text-[15px] text-white">{formatBytes(item.usage?.bytes ?? 0)}</p>
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                {item.usage?.files ?? 0} 个文件 · {item.note}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {cache && cache.limitMb > 0 && (
+          <div className="mt-3">
+            <div className="flex items-center justify-between text-[11px] text-slate-500">
+              <span>
+                已用 {formatBytes(cache.total.bytes)} / 上限 {cache.limitMb} MB
+              </span>
+              <span
+                className={
+                  pct >= 90 ? "text-err" : pct >= 70 ? "text-warn" : "text-slate-400"
+                }
+              >
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
+              <div
+                className={
+                  pct >= 90 ? "h-full rounded-full bg-rose-400/80" : pct >= 70 ? "h-full rounded-full bg-amber-400/80" : "h-full rounded-full bg-sky-400/70"
+                }
+                style={{ width: `${Math.max(1.5, Math.min(100, pct))}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <Field
+            label="缓存上限（MB）"
+            hint="超过上限时自动清理最旧的那批，留出 20% 余量；填 0 表示不自动清理"
+            className="w-full sm:w-56"
+          >
+            <input
+              type="number"
+              min={0}
+              max={102400}
+              className="field"
+              value={draft.cache_limit_mb}
+              onChange={(e) => patch("cache_limit_mb", Number(e.target.value))}
+            />
+          </Field>
+          <div className="flex flex-wrap items-center gap-2 pb-[19px]">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void saveSection("cache", ["cache_limit_mb"])}
+              loading={savingSection === "cache"}
+            >
+              保存上限
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void runCacheTrim()}
+              loading={cacheBusy === "trim"}
+              disabled={!draft.cache_limit_mb}
+            >
+              按上限清理一次
+            </Button>
+            <Button
+              variant={confirmClear ? "danger" : "ghost"}
+              size="sm"
+              onClick={() => void runCacheClear()}
+              loading={cacheBusy === "clear"}
+            >
+              {confirmClear ? "确认清空" : "一键清空"}
+            </Button>
+          </div>
+        </div>
+
+        <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+          {cache?.lastTrimAt
+            ? `上次${
+                cache.lastTrimReason === "clear"
+                  ? "清空"
+                  : cache.lastTrimReason === "auto"
+                    ? "自动清理"
+                    : "手动清理"
+              }：${formatDateTime(cache.lastTrimAt)}，释放 ${formatBytes(cache.lastTrimFreed)}`
+            : "还没有清理过。下载完成与截帧之后会各检查一次，超过上限自动清理。"}
+        </p>
       </section>
 
       {/* Telegram 机器人 */}

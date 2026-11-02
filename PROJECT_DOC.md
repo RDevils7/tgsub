@@ -385,12 +385,12 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
 | `main` | 与 `latest` 同步 |
-| `v1.0.3` / `1.0.3` | 打 `v1.0.3` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.0.4` / `1.0.4` | 打 `v1.0.4` 标签时产生的固定版本（建议生产环境锁定） |
 | `1.0` | 只带大版本号的滚动标签 |
 | `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.3
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.4
 docker compose up -d
 ```
 
@@ -550,6 +550,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | Emby 地址 | 空 | 例如 `http://192.168.1.10:8096`，不写协议按 http，末尾 `/web` 自动去掉 |
 | Emby API Key | 空 | 管理员密钥，AES 加密落盘，接口只回末四位掩码 |
 | Emby 路径映射 | 空 | 每行「本机路径=Emby 路径」，如 `/downloads=/volume1/media/tgsub` |
+| 缓存上限 | 512 MB | `data/covers` + `data/frames` 超过它就自动清理最旧的；0 = 不清理 |
 | ffmpeg 路径 | 空 | 「元数据」页截帧用；留空自动查找内置二进制或系统 PATH |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
 
@@ -636,6 +637,9 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
 | POST | `/api/emby/refresh` | 让 Emby 立刻全库扫描（兜底用） |
 | POST | `/api/emby/notify` | 手动补推一个路径（相对路径按下载目录解析） |
+| GET | `/api/cache/status` | 缓存占用：covers / frames 各自的字节数与文件数、上限、超限字节、上次清理 |
+| POST | `/api/cache/trim` | 按当前上限立刻清理一次（忽略「最近 10 分钟不动」的保护） |
+| POST | `/api/cache/clear` | 一键清空 covers 与 frames，返回删除数、释放空间与剩余占用 |
 | GET | `/api/settings/stats` | 概览统计（总数、今日、队列、频道数等） |
 | GET | `/api/scan/state`、POST `/api/scan` | 扫描状态 / 触发扫描 |
 | GET | `/api/bot`、POST `/api/bot/start`、`stop`、`restart` | 机器人状态与开关 |
@@ -780,14 +784,14 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 
 ```bash
 bash scripts/check-ghcr.sh                              # 检查 latest
-GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.3
+GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgsub v1.0.4
 ```
 
 手动触发或指定版本发布：
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.3 && git push origin v1.0.3    # 发布 v1.0.3 / 1.0 / latest
+git tag v1.0.4 && git push origin v1.0.4    # 发布 v1.0.4 / 1.0 / latest
 ```
 
 本地想验证镜像（需要本机装了 Docker）：

@@ -9,6 +9,7 @@ import { sanitizeSegment } from "../utils";
 import { decodeMeta, encodeMeta, EmbyMeta } from "../tg/emby";
 import { queueEmbyUpdate } from "../tg/embyapi";
 import { listCovers } from "../tg/covers";
+import { requestCacheTrim } from "../cache";
 import { autoCoversFromVideo } from "../tg/autocover";
 import {
   captureCandidates,
@@ -1018,6 +1019,8 @@ metadataRouter.post(
     const dir = await framesDirOf(key);
     const frames = await captureCandidates(target.video, probe?.duration ?? null, count, dir);
     assert(frames.length > 0, 500, "抽帧失败，请检查视频文件是否完整");
+    // 候选帧落在 data/frames 里，攒一会儿再看要不要按上限清理
+    requestCacheTrim();
 
     res.json({
       items: frames.map((frame, index) => ({

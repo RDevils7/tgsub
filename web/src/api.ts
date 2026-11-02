@@ -11,6 +11,8 @@ import type {
   EmbyNotifyRecord,
   EmbyProbeResult,
   EmbyStatus,
+  CacheActionResult,
+  CacheStats,
   MetadataDetail,
   MetadataFolderItem,
   MetadataSource,
@@ -165,6 +167,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+
+  /* ------------------------------ 缓存 ------------------------------ */
+  cacheStatus: () => request<CacheStats>("/cache/status"),
+  /** 按上限立即清理（忽略「最近 10 分钟不动」的保护） */
+  cacheTrim: () => request<CacheActionResult>("/cache/trim", { method: "POST" }),
+  /** 一键清空 covers 与 frames */
+  cacheClear: () => request<CacheActionResult>("/cache/clear", { method: "POST" }),
 
   botState: () => request<{ bot: BotState }>("/bot"),
   botRestart: () => request<{ ok: boolean }>("/bot/restart", { method: "POST" }),
