@@ -383,11 +383,11 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 
 | 标签 | 含义 |
 | --- | --- |
-| `latest` | 最新一次 `main` 推送或 `v*` 发布构建的镜像 |
-| `main` | 与 `latest` 同步 |
-| `v1.0.4` / `1.0.4` | 打 `v1.0.4` 标签时产生的固定版本（建议生产环境锁定） |
-| `1.0` | 只带大版本号的滚动标签 |
-| `sha-<完整提交号>` | 每个提交一个不可变版本，便于回滚定位 |
+| `latest` | 最新一次 `v*` 发布构建的镜像 |
+| `v1.0.4` | 打 `v1.0.4` 标签时产生的固定版本（建议生产环境锁定） |
+
+> 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
+> 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
 # 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.0.4
@@ -796,7 +796,7 @@ GHCR_PROXY=http://127.0.0.1:7897 bash scripts/check-ghcr.sh ghcr.io/rdevils7/tgs
 
 ```bash
 # 手动触发一次构建（GitHub 页面 Actions → Docker 镜像 → Run workflow）
-git tag v1.0.4 && git push origin v1.0.4    # 发布 v1.0.4 / 1.0 / latest
+git tag v1.0.4 && git push origin v1.0.4    # 发布 v1.0.4 / latest 两个标签
 ```
 
 本地想验证镜像（需要本机装了 Docker）：
