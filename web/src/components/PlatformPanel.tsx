@@ -43,22 +43,6 @@ const PLATFORMS: PlatformMeta[] = [
     required: [["SESSDATA"], ["bili_jct"]],
   },
   {
-    id: "douyin",
-    label: "抖音",
-    placeholder: "ttwid=xxx; sessionid=yyy; …",
-    cookieHint:
-      "至少要 ttwid 或 sessionid（登录后才有）；msToken 是网页脚本现算的，不在 Cookie 里，没有也正常",
-    cookieSteps: [
-      "浏览器打开 douyin.com，用手机抖音扫码登录，随便打开一个视频页",
-      "F12 → Network / 网络 → 筛框输入 douyin.com，刷新页面",
-      "点任意一条 douyin.com 的请求（状态码 200 的），右侧 Headers → Request Headers",
-      "复制 Cookie: 后面那一整串；关键字段是 ttwid、sessionid、sessionid_ss、odin_tt、passport_csrf_token",
-      "注意：在 Console 里敲 document.cookie 拿不到 HttpOnly 的 ttwid，那样复制出来的串一定不完整 —— 必须从 Request Headers 复制，或用 Cookie-Editor 导出",
-      "只支持单个视频 / 图文页；主页、合集页认不出来。有效期几天到几周，失效会报 412",
-    ],
-    required: [["ttwid", "sessionid", "sessionid_ss", "sid_guard", "odin_tt"]],
-  },
-  {
     id: "xiaohongshu",
     label: "小红书",
     placeholder: "web_session=xxx; a1=yyy; …",
@@ -382,7 +366,7 @@ export default function PlatformPanel() {
       tint="fuchsia"
       icon={<IconLink className="h-4 w-4" />}
       title="第三方平台"
-      desc="B站 / 抖音 / 小红书 / YouTube 链接下载，引擎是 yt-dlp；在「手动下载」页粘贴链接即可"
+      desc="B站 / 小红书 / YouTube 链接下载，引擎是 yt-dlp；在「手动下载」页粘贴链接即可"
       extra={
         <>
           <Badge
@@ -559,7 +543,7 @@ export default function PlatformPanel() {
           spellCheck={false}
         />
         <p className="mt-1 text-[10.5px] leading-relaxed text-slate-500">
-          <span className="text-slate-400">只有 YouTube 与「检查更新」走这条代理</span>；B站 / 抖音 / 小红书 默认直连
+          <span className="text-slate-400">只有 YouTube 与「检查更新」走这条代理</span>；B站 / 小红书 默认直连
           —— B站 CDN 会把海外代理 IP 判成 <span className="font-mono text-slate-400">HTTP 567</span>。
           与「网络与代理」里的 Telegram 代理互相独立。
         </p>

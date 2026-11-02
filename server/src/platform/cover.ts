@@ -13,8 +13,8 @@ import { PlatformId } from "../types";
 /**
  * 平台官方封面 → Emby 封面。
  *
- * yt-dlp 解析时已经拿到了封面地址（B站横版大图、YouTube maxresdefault、
- * 抖音 dynamic cover…），比从视频里随机截帧好看得多：截帧经常拍到人脸特写、
+ * yt-dlp 解析时已经拿到了封面地址（B站横版大图、YouTube maxresdefault…），
+ * 比从视频里随机截帧好看得多：截帧经常拍到人脸特写、
  * 字幕条或者过场黑屏。这里把官方图下下来，按 Emby 认的文件名重新裁一遍：
  *
  *   poster.jpg      1000×1500（2:3，Emby 首选竖版）
@@ -54,7 +54,6 @@ const SHOW_SLOTS: CoverSlot[] = [
 /** 图床基本都校验 Referer，不带就 403；按平台给一个主页地址 */
 const REFERER: Record<PlatformId, string> = {
   bilibili: "https://www.bilibili.com/",
-  douyin: "https://www.douyin.com/",
   xiaohongshu: "https://www.xiaohongshu.com/",
   youtube: "https://www.youtube.com/",
 };

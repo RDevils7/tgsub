@@ -19,7 +19,6 @@ interface Entry {
 
 const PLATFORM_LABEL: Record<string, string> = {
   bilibili: "B站",
-  douyin: "抖音",
   xiaohongshu: "小红书",
   youtube: "YouTube",
 };
@@ -27,14 +26,13 @@ const PLATFORM_LABEL: Record<string, string> = {
 const EXAMPLES = [
   "https://t.me/频道用户名/12345",
   "https://b23.tv/29inbIp",
-  "https://v.douyin.com/dVS6cveLVCw/",
   "https://xhslink.cn/o/8c7hpV57rvQ",
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
 ];
 
 /** 只认这几个平台的域名，避免把任意链接都当第三方任务提交 */
 const PLATFORM_HOST_RE =
-  /(?:^|\.)(?:bilibili\.com|b23\.tv|bili2233\.cn|douyin\.com|iesdouyin\.com|xiaohongshu\.com|xhslink\.com|xhslink\.cn|youtube\.com|youtu\.be|youtube-nocookie\.com)$/i;
+  /(?:^|\.)(?:bilibili\.com|b23\.tv|bili2233\.cn|xiaohongshu\.com|xhslink\.com|xhslink\.cn|youtube\.com|youtu\.be|youtube-nocookie\.com)$/i;
 
 /**
  * 从分享口令里捞链接。
@@ -106,7 +104,7 @@ export default function Manual() {
 
   const start = async () => {
     if (!links.length) {
-      toast.push("没找到可识别的链接：支持 Telegram 消息链接与 B站 / 抖音 / 小红书 / YouTube", "error");
+      toast.push("没找到可识别的链接：支持 Telegram 消息链接与 B站 / 小红书 / YouTube", "error");
       return;
     }
     setRunning(true);
@@ -177,7 +175,7 @@ export default function Manual() {
               <h3 className="text-[13.5px] font-medium text-slate-100">粘贴链接下载</h3>
               <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
                 Telegram 消息链接直接把这条消息里的文件（含相册整组）加入队列；
-                B站 / 抖音 / 小红书 / YouTube 交给 yt-dlp 解析后下载。命名、封面与 Emby 元信息跟自动扫描一致。
+                B站 / 小红书 / YouTube 交给 yt-dlp 解析后下载。命名、封面与 Emby 元信息跟自动扫描一致。
               </p>
             </div>
           </div>
@@ -240,7 +238,7 @@ export default function Manual() {
             <ul className="space-y-0.5 break-words text-[10.5px] leading-relaxed text-slate-400">
               <li>· 公开频道用 https://t.me/用户名/消息ID</li>
               <li>· 私有频道用 https://t.me/c/频道ID/消息ID（手机端「复制链接」就是这个格式）</li>
-              <li>· B站 / 抖音 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、v.douyin.com、xhslink.cn、youtu.be）</li>
+              <li>· B站 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、xhslink.cn、youtu.be）</li>
               <li>· 也可以把 App 里「复制链接」的整段分享口令原样粘进来，说明文字会自动忽略</li>
               <li>· 合集 / 多P 链接会先弹窗问「只下第一个」还是「全部下载」，最多展开 200 个</li>
               <li>· 各平台的 Cookie 在设置 → 第三方平台里填，缺了会影响清晰度和成功率</li>
@@ -435,7 +433,7 @@ export default function Manual() {
           </span>
           <p className="text-[13px] text-slate-300">还没有提交链接</p>
           <p className="max-w-md text-[11.5px] leading-relaxed text-slate-500">
-            在上面粘贴 Telegram 消息链接或 B站 / 抖音 / 小红书 / YouTube 视频链接后点「开始下载」。
+            在上面粘贴 Telegram 消息链接或 B站 / 小红书 / YouTube 视频链接后点「开始下载」。
             也可以用手机把链接发给 Telegram 机器人，同样会立即开始下载。
           </p>
         </div>

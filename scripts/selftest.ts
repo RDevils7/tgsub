@@ -1158,7 +1158,7 @@ function cacheChecks(): void {
 console.log("\n第三方平台：链接识别、Cookie 与 yt-dlp 参数");
 
 /**
- * B站 / 抖音 / 小红书 的链接识别与 yt-dlp 参数拼装。
+ * B站 / 小红书 / YouTube 的链接识别与 yt-dlp 参数拼装。
  *
  * 这些平台最容易出问题的地方是「链接认错了」和「Cookie 拼错了」，
  * 所以这里全部用纯函数验证，不依赖网络与二进制。
@@ -1195,15 +1195,14 @@ async function platformChecks(): Promise<void> {
     assert.ok(link?.key.includes("b23.tv"));
   });
 
-  check("抖音长链 / 分享链 / 短链", () => {
-    assert.equal(parsePlatformLink("https://www.douyin.com/video/7300000000000000000")?.id, "7300000000000000000");
-    assert.equal(
-      parsePlatformLink("https://www.iesdouyin.com/share/video/7300000000000000000/")?.id,
-      "7300000000000000000",
-    );
-    const short = parsePlatformLink("https://v.douyin.com/iRxAbCd/");
-    assert.equal(short?.platform, "douyin");
-    assert.equal(short?.id, null);
+  check("抖音链接不再被识别（1.2.1 移除该平台）", () => {
+    // yt-dlp 的 DouyinIE 生成不出接口要的 a_bogus 签名，Cookie 再对也会被风控拦下，
+    // 所以整块摘掉了。抖音链接要当成「不是本程序支持的链接」，不能误识别成别的平台。
+    assert.equal(parsePlatformLink("https://www.douyin.com/video/7300000000000000000"), null);
+    assert.equal(parsePlatformLink("https://www.iesdouyin.com/share/video/7300000000000000000/"), null);
+    assert.equal(parsePlatformLink("https://v.douyin.com/iRxAbCd/"), null);
+    assert.equal(detectPlatform("https://www.douyin.com/"), null);
+    assert.equal(splitPlatformLinks("https://v.douyin.com/iRxAbCd/").length, 0);
   });
 
   check("小红书笔记链接与短链", () => {
@@ -1213,6 +1212,15 @@ async function platformChecks(): Promise<void> {
     );
     const short = parsePlatformLink("http://xhslink.com/a/AbCdEf");
     assert.equal(short?.platform, "xiaohongshu");
+  });
+
+  check("缺登录态的报错会提示去填 Cookie", () => {
+    // yt-dlp 三个平台统一说「Fresh cookies are needed」，翻成「要求登录」并指出去哪里填
+    const bili = explainYtdlpError("ERROR: Fresh cookies are needed", "bilibili");
+    assert.ok(/要求登录/.test(bili), `B站应提示登录：${bili}`);
+    const xhs = explainYtdlpError("ERROR: [Xiaohongshu] Fresh cookies are needed", "xiaohongshu");
+    assert.ok(/要求登录/.test(xhs), `小红书应提示登录：${xhs}`);
+    assert.ok(/第三方平台/.test(bili), `应指出去哪里填：${bili}`);
   });
 
   check("YouTube 各种链接形态", () => {
@@ -1240,11 +1248,11 @@ async function platformChecks(): Promise<void> {
     const link = parsePlatformLink("https://www.bilibili.com/video/BV1xx411c7mD，");
     assert.equal(link?.id, "BV1xx411c7mD");
     const list = splitPlatformLinks(
-      "看这个 https://www.bilibili.com/video/BV1xx411c7mD 还有 https://v.douyin.com/iRxAbCd/ 挺好",
+      "看这个 https://www.bilibili.com/video/BV1xx411c7mD 还有 https://xhslink.cn/o/8c7hpV57rvQ 挺好",
     );
     assert.equal(list.length, 2);
     assert.equal(list[0].platform, "bilibili");
-    assert.equal(list[1].platform, "douyin");
+    assert.equal(list[1].platform, "xiaohongshu");
     assert.equal(hasPlatformLink("只有一句话"), false);
   });
 
@@ -1264,14 +1272,6 @@ async function platformChecks(): Promise<void> {
     assert.equal(a[0].platform, "xiaohongshu");
     assert.equal(a[0].url, "https://xhslink.cn/o/8c7hpV57rvQ", "尖括号不能带进 URL");
 
-    // 抖音：口令中间夹着「复制打开抖音…」和一串噪声字符
-    const douyin =
-      "4.87 复制打开抖音，看看【蓝心说影的作品】博物馆双子星联手暴打娇滴滴的马太太！ # 剪映 #... https://v.douyin.com/dVS6cveLVCw/ :1pm j@C.UL KWM:/ 09/14";
-    const b = splitPlatformLinks(douyin);
-    assert.equal(b.length, 1);
-    assert.equal(b[0].platform, "douyin");
-    assert.equal(b[0].url, "https://v.douyin.com/dVS6cveLVCw/");
-
     // B站：【标题-哔哩哔哩】后面跟 <短链>
     const bili = "【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】 <https://b23.tv/29inbIp>";
     const c = splitPlatformLinks(bili);
@@ -1279,11 +1279,11 @@ async function platformChecks(): Promise<void> {
     assert.equal(c[0].platform, "bilibili");
     assert.equal(c[0].url, "https://b23.tv/29inbIp");
 
-    // 三条口令一起粘：一次全认出来
-    const all = splitPlatformLinks([xhs, douyin, bili].join("\n"));
+    // 两条口令一起粘：一次全认出来
+    const all = splitPlatformLinks([xhs, bili].join("\n"));
     assert.deepEqual(
       all.map((item) => item.platform),
-      ["xiaohongshu", "douyin", "bilibili"],
+      ["xiaohongshu", "bilibili"],
     );
 
     // 版本号、普通中文不该被当成链接
@@ -1297,8 +1297,8 @@ async function platformChecks(): Promise<void> {
     assert.ok(lines[0].startsWith(".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tabc%2C123"));
     // 值里带 = 时只按第一个 = 切分
     assert.ok(lines[1].endsWith("\tbili_jct\txyz"));
-    const douyin = cookieToNetscape("ttwid=1", "douyin");
-    assert.ok(douyin.includes(".douyin.com"));
+    const yt = cookieToNetscape("SID=1", "youtube");
+    assert.ok(yt.includes(".youtube.com"));
   });
 
   check("画质映射成 yt-dlp 的格式串", () => {
@@ -1311,7 +1311,7 @@ async function platformChecks(): Promise<void> {
   });
 
   check("yt-dlp 报错翻成能照做的中文", () => {
-    const login = explainYtdlpError("ERROR: [Douyin] xxx: Fresh cookies (not yet expired) are needed", "douyin");
+    const login = explainYtdlpError("ERROR: [BiliBili] xxx: Fresh cookies (not yet expired) are needed", "bilibili");
     assert.ok(login.includes("Cookie"), "应提示去填 Cookie");
     const risk = explainYtdlpError("ERROR: [BiliBili] xxx: HTTP Error 412: Precondition Failed", "bilibili");
     assert.ok(risk.includes("风控"));
@@ -1383,7 +1383,19 @@ async function platformChecks(): Promise<void> {
       { name: "空值", value: "" },
     ]);
     assert.equal(normalizeCookie(json), "ttwid=1|abc; sessionid=def");
-    assert.equal(summarizeCookie(json, "douyin").missing.length, 0);
+    // 小红书要 web_session 与 a1，这串里没有，所以两项都该被提示
+    const xhsSummary = summarizeCookie(json, "xiaohongshu");
+    assert.ok(xhsSummary.missing.includes("web_session"), `应提示缺 web_session：${xhsSummary.missing.join(",")}`);
+    assert.ok(xhsSummary.missing.includes("a1"), `应提示缺 a1：${xhsSummary.missing.join(",")}`);
+    // 补齐之后才算齐全
+    const withAll = summarizeCookie(
+      JSON.stringify([
+        { name: "web_session", value: "def" },
+        { name: "a1", value: "abc" },
+      ]),
+      "xiaohongshu",
+    );
+    assert.equal(withAll.missing.length, 0, `补齐了就不该再缺：${withAll.missing.join(",")}`);
 
     // 简化的 {name: value} 对象
     assert.equal(parseCookiePairs('{"ttwid":"1","msToken":"x"}').length, 2);
@@ -1391,32 +1403,29 @@ async function platformChecks(): Promise<void> {
     // Netscape cookies.txt（Get cookies.txt 扩展导出的样子）
     const netscape = [
       "# Netscape HTTP Cookie File",
-      ".douyin.com\tTRUE\t/\tTRUE\t0\tttwid\t1",
-      "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tdef",
+      ".xiaohongshu.com\tTRUE\t/\tTRUE\t0\ta1\t1",
+      "#HttpOnly_.xiaohongshu.com\tTRUE\t/\tTRUE\t0\tweb_session\tdef",
       "",
     ].join("\n");
     const pairs = parseCookiePairs(netscape);
     assert.equal(pairs.length, 2, "注释行要跳过");
-    assert.equal(pairs[1].name, "sessionid");
+    assert.equal(pairs[1].name, "web_session");
 
     // F12 复制时连带 "Cookie: " 前缀
     assert.equal(normalizeCookie("Cookie: ttwid=1; a=2"), "ttwid=1; a=2");
 
     // 只粘了值 / 只粘了字段名：认不出，界面要明确说「没认出键值对」
-    assert.equal(summarizeCookie("abc123", "douyin").count, 0);
-    assert.equal(summarizeCookie("ttwid sessionid", "douyin").count, 0);
+    assert.equal(summarizeCookie("abc123", "xiaohongshu").count, 0);
+    assert.equal(summarizeCookie("web_session a1", "xiaohongshu").count, 0);
 
-    // 抖音：ttwid 单独一项就算够用 —— msToken 是网页脚本现算的，不在 Cookie 里
-    assert.equal(summarizeCookie("ttwid=1", "douyin").missing.length, 0);
-    assert.equal(summarizeCookie("msToken=abc", "douyin").missing.length, 1);
+    // 小红书：web_session 与 a1 各是一组，缺一个都要提示
+    const onlyA1 = summarizeCookie("a1=1", "xiaohongshu");
+    assert.ok(onlyA1.missing.includes("web_session"), `缺 web_session 应被提示：${onlyA1.missing.join(",")}`);
     // YouTube 的 SID 实际种在 google.com，也要认
     assert.equal(summarizeCookie("__Secure-3PSID=1", "youtube").missing.length, 0);
   });
 
   check("Cookie 文件按平台写全多个域名", () => {
-    const douyin = cookieToNetscape("ttwid=1", "douyin");
-    assert.ok(douyin.includes(".douyin.com"));
-    assert.ok(douyin.includes(".iesdouyin.com"), "分享短链那一跳也要带登录态");
     const yt = cookieToNetscape("SID=1", "youtube");
     assert.ok(yt.includes(".google.com"), "SID / SAPISID 种在 google.com 上");
     // 换行分隔的粘贴要拆成两条，而不是当成一条
@@ -1498,7 +1507,7 @@ async function platformChecks(): Promise<void> {
     assert.ok(nfo.includes("播放 12.3 万"), nfo);
     assert.ok(nfo.includes("点赞 4567"), nfo);
     assert.ok(nfo.includes("时长 12:34"), nfo);
-    // 抖音/小红书常常没有正文：用标题 + 作者兜底，别留空白简介
+    // 小红书常常没有正文：用标题 + 作者兜底，别留空白简介
     assert.ok(nfo.includes("某个视频，来自 某UP"), nfo);
     assert.ok(!nfo.includes("<episode>"), "平台单条视频不写集号");
   });
@@ -1649,6 +1658,62 @@ function proxyChecks(): void {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* 媒体删除相关的路径规则                                             */
+/* ------------------------------------------------------------------ */
+
+async function mediaPathChecks(): Promise<void> {
+  const { collectVideos, episodeArtifacts, isUnderPath, isVideoFile } = await import(
+    "../server/src/tg/mediapath"
+  );
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const nodePath = await import("node:path");
+
+  const root = nodePath.join(fs.mkdtempSync(nodePath.join(os.tmpdir(), "tgsub-mp-")), "剧");
+  fs.mkdirSync(nodePath.join(root, "Season 01"), { recursive: true });
+  const ep1 = nodePath.join(root, "剧S01E01.mp4");
+  const ep2 = nodePath.join(root, "Season 01", "剧S01E02.mkv");
+  fs.writeFileSync(ep1, "x");
+  fs.writeFileSync(ep2, "x");
+  fs.writeFileSync(nodePath.join(root, "剧S01E01.nfo"), "x");
+  fs.writeFileSync(nodePath.join(root, "剧S01E01-thumb.jpg"), "x");
+  fs.writeFileSync(nodePath.join(root, "poster.jpg"), "x");
+  fs.writeFileSync(nodePath.join(root, "说明.txt"), "x");
+
+  check("视频后缀识别", () => {
+    assert.equal(isVideoFile("a.mp4"), true);
+    assert.equal(isVideoFile("a.MKV"), true);
+    assert.equal(isVideoFile("a.nfo"), false);
+    assert.equal(isVideoFile("a.jpg"), false);
+  });
+
+  check("递归找视频：季目录里的也算", () => {
+    const found = collectVideos(root).map((p) => nodePath.basename(p)).sort();
+    assert.deepEqual(found, ["剧S01E01.mp4", "剧S01E02.mkv"]);
+  });
+
+  check("单集副产物：NFO 与 <base>-*.图片", () => {
+    const art = episodeArtifacts(ep1);
+    assert.equal(nodePath.basename(art.nfo), "剧S01E01.nfo");
+    assert.deepEqual(art.images.map((p) => nodePath.basename(p)), ["剧S01E01-thumb.jpg"]);
+  });
+
+  check("剧集级封面不算进单集副产物", () => {
+    const art = episodeArtifacts(ep2);
+    assert.equal(art.images.length, 0);
+  });
+
+  check("路径包含判断", () => {
+    assert.equal(isUnderPath(nodePath.join(root, "Season 01"), root), true);
+    assert.equal(isUnderPath(root, root), true);
+    assert.equal(isUnderPath(nodePath.dirname(root), root), false);
+    assert.equal(isUnderPath(root, nodePath.join(root, "剧")), false);
+  });
+
+  fs.rmSync(nodePath.dirname(root), { recursive: true, force: true });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -1660,6 +1725,7 @@ async function main(): Promise<void> {
     ["网络代理用例", () => proxyChecks()],
     ["第三方平台用例", () => platformChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
+    ["媒体删除路径用例", () => mediaPathChecks()],
   ];
   for (const [name, run] of suites) {
     try {

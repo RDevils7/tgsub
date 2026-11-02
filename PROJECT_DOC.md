@@ -175,6 +175,15 @@
   剧集条目下方标注了「来自 xxx」的来源路径。
 - **手动来源可删除**：手动来源的剧集条目右侧有删除按钮，点开二次确认后移除登记，
   只移除登记关系，磁盘上的视频、NFO 与封面都不会被删除。
+- **每一项都能删（1.2.1 起）**：目录树的剧集目录行、展开后的单集视频行都有删除按钮，
+  点开先出预览（会删哪些视频 / NFO / 封面图、哪些文件保留、会连带清掉几条下载记录），确认后才执行。
+  - **删除磁盘文件（purge）**：视频 + 它的 NFO + `<base>-*.jpg` 缩略图 + 剧集级 `tvshow.nfo` 与五张封面一起删；
+    删空了的目录（含季目录）会一并收走，字幕等其它文件保留并在预览里单独列出。
+  - **仅从列表移除（unlink）**：磁盘文件原封不动，只是不再显示与管理。写一条 `media_excluded` 隐藏登记，
+    因此文件仍被上级目录来源覆盖也不会再冒出来；在「添加」对话框的「已隐藏的项目」里可以一键恢复。
+  - 两种模式都会同步清掉指向这些文件的 `downloads` 记录、以及落在删除范围内的 `media_sources` 来源登记。
+  - purge 模式下删掉的视频会通知 Emby（`UpdateType=Deleted`），让 Emby 把这一条从库里摘掉。
+  - 删除范围受 `isAllowedPath` 约束：只有下载目录内、或已登记来源（含其子目录）里的路径能删，其余一律 403 拒绝。
 - **一键生成**：选中文件夹或视频点「一键生成」，自动按文件名解析剧名 / 季 / 集，为每个视频写单集 NFO、
   补一份 `tvshow.nfo`，目录里没有封面时用 ffmpeg 随机截帧补齐横版 / 竖版封面。
 - **表单改 NFO 不破坏手写内容**：保存时只替换目标标签，`<uniqueid>`、注释、自定义标签原样保留；
@@ -384,13 +393,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.2.0` | 打 `v1.2.0` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.2.1` | 打 `v1.2.1` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.2.0
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.2.1
 docker compose up -d
 ```
 
@@ -554,7 +563,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
 | ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
-| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度（默认「最高（原画）」）、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存（平台名后的 `?` 悬停看分步取法）；「第三方平台代理」与其下的「国内平台也走代理」（默认关） |
+| 第三方平台 | 关 | B站 / 小红书 / YouTube 下载开关；清晰度（默认「最高（原画）」）、存放子目录、是否写 nfo；三个平台的 Cookie 加密保存（平台名后的 `?` 悬停看分步取法）；「第三方平台代理」与其下的「国内平台也走代理」（默认关） |
 | 第三方平台代理 | 空 | 只给 yt-dlp 用（`--proxy`），与上面 Telegram 的代理互相独立；YouTube 与检查更新必须填 |
 | yt-dlp 自动更新 | 开 | 到点去 GitHub 看新版，有就下到 `data/bin` 并切过去（先 `--version` 校验，失败回滚） |
 | yt-dlp 检查间隔 | 24 | 单位小时，1–720 |
@@ -565,18 +574,29 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 ---
 
-## 第三方平台下载（B站 / 抖音 / 小红书 / YouTube，1.0.5 – 1.2.0）
+## 第三方平台下载（B站 / 小红书 / YouTube，1.0.5 – 1.2.1）
 
-**为什么用 yt-dlp 而不是自己写接口**：这几个平台的播放地址都要签名（B站 `w_rid`、抖音 `a_bogus`、
+**为什么用 yt-dlp 而不是自己写接口**：这几个平台的播放地址都要签名（B站 `w_rid`、
 小红书 `x-s`、YouTube `nsig`），算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟版，
 我们只负责喂 Cookie、读进度，并让它自己保持最新。
+
+**抖音为什么被摘掉（1.2.1）**：yt-dlp 的 `DouyinIE` 调 `aweme/v1/web/aweme/detail/`，
+接口要 `a_bogus` / `X-Bogus` / `msToken` / `__ac_signature` 一整套签名，yt-dlp 生成不出来
+（源码留有 TODO「Run verification challenge code to generate signature cookies」）。
+它那句 `Fresh cookies (not necessarily logged in) are needed` 是**误导性文案** ——
+源码只在接口没返回 `aweme_detail` 时抛这句，**压根不检查 Cookie**；
+实测带完整 Cookie 与完全不带 Cookie，报错一模一样。把签名链路全部走通
+（`abogus` + `signWebUrl` + `__ac_signature`）之后，抖音返回 HTTP 200 但 body 为空，
+响应头带 `x-vc-bdturing-parameters`（解出 `code:100000, type:verify, subtype:slide`）= 要求
+**滑动验证码**，脚本过不去。留着这个平台只会让人以为是 Cookie 的问题反复重填，
+所以整块移除：链接不再被识别、Cookie 加密数据由迁移清掉、队列里的遗留任务作废。
 
 **代码结构**
 
 | 文件 | 职责 |
 | --- | --- |
-| `server/src/platform/detect.ts` | 纯函数：`extractUrls`（从 App 分享口令里捞链接，兼容 `<https://…>`、紧贴中文、裸域名）→ 域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore、YouTube `v`/`shorts`/`embed`/`youtu.be`）、批量拆链接、去重键 |
-| `server/src/platform/ytdlp.ts` | 定位二进制（手填 → `data/bin` → 镜像内置 → PATH）、`--version` 探测、Cookie → Netscape、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、代理参数、YouTube JS runtime 判断、错误中文化 |
+| `server/src/platform/detect.ts` | 纯函数：`extractUrls`（从 App 分享口令里捞链接，兼容 `<https://…>`、紧贴中文、裸域名）→ 域名识别、ID 提取（BV / av / ep、小红书 explore、YouTube `v`/`shorts`/`embed`/`youtu.be`）、批量拆链接、去重键 |
+| `server/src/platform/ytdlp.ts` | 定位二进制（手填 → `data/bin` → 镜像内置 → PATH）、`--version` 探测、Cookie → Netscape、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、代理参数、YouTube JS runtime 判断、错误中文化、`withRawDetail`（把 yt-dlp 原始报错附在中文提示后面） |
 | `server/src/platform/cookie.ts` | 纯函数：`parseCookiePairs` / `summarizeCookie` / `describeCookie` / `humanAge`，给「状态可见」用 |
 | `server/src/platform/updater.ts` | GitHub Release 查询、按平台选资产、流式下载、`--version` 校验后原子替换、`data/bin` 优先、定时检查 |
 | `server/src/platform/jobs.ts` | 解析后写 `downloads`（`source='platform'`）、目录规划、去重与失败复用、合集展开与「只下第一个 / 全部下载」的令牌 |
@@ -597,11 +617,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   `normalizeCookie`（1.1.2）先把四种粘法统一成 `k=v; k2=v2`：普通串 / `Cookie:` 前缀 / JSON 导出
   （Cookie-Editor 的 `[{name,value}]` 或 `{k:v}`）/ Netscape cookies.txt（`#HttpOnly_` 前缀剥掉），
   空值丢弃。前端 `PlatformPanel.tsx` 里有一份等价实现（两边没有共享模块，改一处必须改两处）。
-  `cookieToNetscape` 按平台写多个域名：抖音 `.douyin.com` + `.iesdouyin.com`（分享短链要跳一次），
-  YouTube `.youtube.com` + `.google.com`（`SID` / `SAPISID` 实际种在 google.com），
-  漏域名的典型表现是「Cookie 填了却仍要求登录」。
-  `COOKIE_REQUIRED` 同步放宽：抖音不再把 `msToken` 当必要项（网页脚本现算、不在 Cookie 里），
-  `ttwid` / `sessionid` / `sessionid_ss` / `sid_guard` / `odin_tt` 任一即可。
+  `cookieToNetscape` 按平台写多个域名：YouTube `.youtube.com` + `.google.com`
+  （`SID` / `SAPISID` 实际种在 google.com），漏域名的典型表现是「Cookie 填了却仍要求登录」。
+  `COOKIE_REQUIRED` 现在只剩三组：B站 `SESSDATA` + `bili_jct`、小红书 `web_session` + `a1`、
+  YouTube `SID` / `SAPISID` 系列。
 - **扩展名**：由 yt-dlp 决定（mkv/webm 都可能），下载完成后回填 `save_name` / `file_name`。
 - **目录**：`<platform_dir>/<平台>/<作者>/<标题> [ID]/`，每条视频一个目录，避免 `tvshow.nfo` 互相覆盖。
 - **分享口令**：不能用「按空白切词」——App 复制出来的是整段文案，链接常被 `<>` 包着、紧贴中文。
@@ -629,7 +648,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 - **元数据（1.1.0）**：`--dump-single-json` 里的字段直接映射到 nfo —— 标题、简介（`plot`）、UP主（`studio` + `tag`）、
   发布日期（`aired` / `premiered` / `year`）、原链接（`uniqueid type="platform"`）、分区（`categories` → `genre`）、
   时长（`duration` → `runtime`）、播放量与点赞（Emby 没有对应字段，追加在简介尾部的「播放 12.3 万 · 点赞 4567 · 时长 12:34」一行）。
-  抖音/小红书常常没有正文，此时用「标题，来自 UP主」兜底，避免 Emby 详情页一片空白。
+  小红书常常没有正文，此时用「标题，来自 UP主」兜底，避免 Emby 详情页一片空白。
   `uniqueid type="tgsub"` 保证 Emby 不会拿「UP主+标题」去联网乱刮。
 - **官方封面 + 模糊填充（1.1.0 / 1.2.0）**：`probePlatform` 拿到的 `thumbnail` 存进 `emby_json.cover`，下载完成后由 `cover.ts` 取回；
   图床要 Referer（按平台给主页地址），走 `platform_proxy` 同一个代理。官方图宽 < 640px 撑不起海报时直接判「没有图」回退截帧；
@@ -642,6 +661,9 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   超过 200 条只取前 200，界面上会写明。
 - **YouTube 的 JS 运行时**：`--js-runtimes node` 是 yt-dlp 2025.10.22 才有的参数，老版本传了会直接报未知参数，
   所以先用 `versionRank()` 比较版本，够了才加；镜像自带 Node，不需要额外装 deno。
+- **原始报错附带（1.2.1）**：`withRawDetail(message, raw)` 把 yt-dlp 原始 stderr 里的关键行
+  （挑含 error / failed / forbidden / required / not found 的片段，截断 220 字）附在中文提示后面，
+  界面上既有人话又有原始证据，排查时不用再去翻日志。
 
 **自更新设计（1.0.6）**
 
@@ -660,9 +682,10 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 用 node 的 fetch 下载（不额外装 curl），失败即构建失败；`--build-arg INSTALL_YTDLP=0` 可跳过。
 镜像里的那份是「兜底」，实际生效的可能是 `data/bin` 里自动更新下来的那份。
 
-**自检**：`platformChecks()` 24 项（三平台真实分享口令、链接识别含 YouTube 四种形态、冒充域名、中文标点、
+**自检**：`platformChecks()` 38 项（真实分享口令、链接识别含 YouTube 四种形态、冒充域名、中文标点、
 去重、Cookie 四种粘法与体检、Cookie 文件多域名、画质映射、错误文案（YouTube 两类 + TLS 中断 + ffmpeg 合并 +
-B站 567 两种说法）、版本比较、资产名、代理参数），全部是纯函数，不依赖网络与二进制。
+B站 567 两种说法 + 缺登录态提示）、抖音链接不再被识别、版本比较、资产名、代理参数），
+全部是纯函数，不依赖网络与二进制。
 
 ---
 
@@ -687,7 +710,7 @@ B站 567 两种说法）、版本比较、资产名、代理参数），全部�
 | `/stats`、`/help` | 累计统计、命令说明 |
 
 除了 Telegram 消息链接，**把 App 里「复制链接」的整段分享口令直接发过来也会开始下载**（B站 `<>` 包裹、
-抖音长文案、小红书 `xhslink.cn` 都认），一次最多 5 条；全部失败且原因相同时只回一条，避免刷屏。
+小红书长文案与 `xhslink.cn` 都认），一次最多 5 条；全部失败且原因相同时只回一条，避免刷屏。
 
 安全设计：白名单为空时机器人对所有人只回复「你的 ID 是多少」，不执行任何操作；指令仅在私聊生效，被拉进群也不响应。
 
@@ -728,6 +751,9 @@ B站 567 两种说法）、版本比较、资产名、代理参数），全部�
 | DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
 | GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`） |
 | GET | `/api/metadata/sources`、POST、`DELETE /:id` | 手动添加的媒体来源（本地视频文件 / 视频目录） |
+| GET | `/api/metadata/delete/preview?key=&mode=` | 删除预览：会删哪些文件、保留哪些、会连带清掉哪些记录（`mode=purge\|unlink`） |
+| POST | `/api/metadata/delete` | 执行删除（body：`key` + `mode`）；`purge` 连磁盘文件一起删，`unlink` 只移出列表 |
+| GET | `/api/metadata/excluded`、POST `/excluded/restore` | 被「仅从列表移除」隐藏的条目 / 取消隐藏 |
 | GET | `/api/metadata/browse?path=` | 服务端目录浏览（列子目录与视频文件，供「手动添加」对话框用） |
 | GET | `/api/metadata/detail?key=` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
 | POST | `/api/metadata/generate` | 一键生成：按当前目标写单集 NFO + `tvshow.nfo`，缺封面时随机截帧 |
@@ -815,6 +841,8 @@ tgsub/
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）
 │   │   │   ├── legacy.ts       # 历史剧集文件名修正（去掉多余的 -NN 序号）
 │   │   │   ├── mediatree.ts    # 媒体目录树：下载文件 + 手动来源按文件夹聚合
+│   │   │   ├── mediapath.ts    # 媒体路径纯函数：视频后缀、递归找视频、副产物命名（不碰数据库）
+│   │   │   ├── mediamanage.ts  # 删除管理：生成删除计划（视频+NFO+封面）、执行删除并同步数据库
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
 │   │   │   ├── emby.ts         # nfo 生成、三张封面裁剪合成
 │   │   │   ├── nfo.ts          # NFO 解析与就地改写（只替换目标标签）
@@ -852,6 +880,7 @@ npm run dev            # API :6789 + Vite :5173（/api 自动代理）
 npm run build          # 构建 web/dist 与 server/dist
 npm run typecheck      # 前后端类型检查
 npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、路径安全、命名与 Emby）
+npm run test:delete    # 元数据删除集成自检（临时数据目录 + 临时文件系统，不碰真实数据）
 ```
 
 其它脚本（都在 `scripts/`，多数不需要联网）：
@@ -859,6 +888,7 @@ npm run selftest       # 核心逻辑自检（关键词匹配、相册解析、�
 | 脚本 | 用途 |
 | --- | --- |
 | `npx tsx scripts/test-bot.ts` | 机器人命令层自检（临时数据目录，不连 Telegram） |
+| `npx tsx scripts/test-media-delete.ts` | 元数据删除集成自检：删目录 / 删单集 / 只移出列表的副作用 |
 | `npx tsx scripts/test-covers.ts` | 封面缓存与「预览=下载」一致性自检 |
 | `node scripts/e2e-manual.mjs` | 手动下载接口端到端（需已登录、可联网） |
 | `node scripts/e2e-bot.mjs` | 机器人端到端 |

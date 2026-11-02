@@ -332,8 +332,8 @@ export default function Downloads() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-white/[0.06] bg-white/[0.02] p-1">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-1.5 overflow-x-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {TABS.map((tab) => (
             <button
               key={tab.key}
@@ -352,7 +352,7 @@ export default function Downloads() {
           ))}
         </div>
 
-        <div className="flex flex-1 items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-[260px]">
             <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
             <input
@@ -411,7 +411,7 @@ export default function Downloads() {
             {items.map((item) => {
               const meta = statusMeta(item.status);
               return (
-                <div key={item.id} className="flex items-start gap-3 px-4 py-3 transition hover:bg-white/[0.02]">
+                <div key={item.id} className="flex flex-wrap items-start gap-3 px-4 py-3 transition hover:bg-white/[0.02]">
                   <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${meta.className}`}>
                     <KindIcon kind={item.media_kind} />
                   </span>
@@ -467,7 +467,7 @@ export default function Downloads() {
                     )}
                   </div>
 
-                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                  <div className="mt-2 flex w-full flex-wrap items-center justify-end gap-1.5 sm:mt-0 sm:w-auto">
                     {item.status === "done" && (
                       <a
                         className="btn-ghost !px-2.5 !py-1.5 !text-[12px]"

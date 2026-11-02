@@ -32,11 +32,18 @@ import {
   findDownloadByPath,
   isAllowedPath,
   isVideoFile,
+  listExcluded,
   listSources,
   removeSource,
+  restorePath,
   scanVideoFiles,
   type MediaFileEntry,
 } from "../tg/mediatree";
+import {
+  executeDelete,
+  planDelete,
+  type DeleteMode,
+} from "../tg/mediamanage";
 import {
   applyFields,
   buildNfo,
@@ -620,6 +627,75 @@ metadataRouter.delete(
     const removed = removeSource(id);
     assert(removed, 404, "来源不存在");
     res.json({ ok: true });
+  }),
+);
+
+/* ------------------------------ 删除管理 ------------------------------ */
+
+/**
+ * 删除模式：
+ *   purge  = 连磁盘文件一起删（视频 + NFO + 封面图）
+ *   unlink = 只从列表移除，磁盘文件保留
+ */
+function normalizeDeleteMode(value: unknown): DeleteMode {
+  return value === "unlink" ? "unlink" : "purge";
+}
+
+/** 删除预览：把「会删什么、不会删什么、会连带清掉哪些记录」先摊开给用户看 */
+metadataRouter.get(
+  "/delete/preview",
+  asyncHandler(async (req, res) => {
+    const key = String(req.query.key ?? "");
+    assert(key, 400, "缺少路径标识");
+    const target = resolveTarget(key);
+    const mode = normalizeDeleteMode(req.query.mode);
+    res.json(planDelete(target.path, target.kind, mode));
+  }),
+);
+
+/** 执行删除 */
+metadataRouter.post(
+  "/delete",
+  asyncHandler(async (req, res) => {
+    const key = String(req.body?.key ?? "");
+    assert(key, 400, "缺少路径标识");
+    const target = resolveTarget(key);
+    const mode = normalizeDeleteMode(req.body?.mode);
+    const plan = planDelete(target.path, target.kind, mode);
+    const result = await executeDelete(plan);
+
+    // 真的删掉了文件才通知 Emby，让它把这一条从库里摘掉
+    if (mode === "purge" && result.removedVideos > 0) {
+      for (const item of plan.items) {
+        if (item.kind !== "video") continue;
+        queueEmbyUpdate(item.path, "Deleted", false);
+      }
+    }
+
+    logger.info(
+      { path: target.path, mode, removedFiles: result.removedFiles, removedDownloads: result.removedDownloads },
+      "已删除媒体条目",
+    );
+    res.json(result);
+  }),
+);
+
+/** 被「仅从列表移除」隐藏的条目 */
+metadataRouter.get(
+  "/excluded",
+  asyncHandler(async (_req, res) => {
+    res.json({ items: listExcluded().map((row) => ({ path: row.path, created_at: row.created_at })) });
+  }),
+);
+
+/** 取消隐藏，恢复显示 */
+metadataRouter.post(
+  "/excluded/restore",
+  asyncHandler(async (req, res) => {
+    const raw = String(req.body?.path ?? "").trim();
+    assert(raw, 400, "缺少路径");
+    const ok = restorePath(raw);
+    res.json({ ok });
   }),
 );
 

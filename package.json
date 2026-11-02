@@ -1,6 +1,6 @@
 {
   "name": "tgsub",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Telegram 频道关键词订阅下载器",
   "workspaces": [
@@ -14,7 +14,8 @@
     "build": "npm -w web run build && npm -w server run build",
     "start": "node server/dist/index.js",
     "typecheck": "npm -w server run typecheck && npm -w web run typecheck",
-    "selftest": "tsx scripts/selftest.ts"
+    "selftest": "tsx scripts/selftest.ts",
+    "test:delete": "tsx scripts/test-media-delete.ts"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

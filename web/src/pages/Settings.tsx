@@ -1109,7 +1109,7 @@ export default function Settings() {
         </div>
       </CollapsibleCard>
 
-      {/* 第三方平台：B站 / 抖音 / 小红书 / YouTube，引擎 yt-dlp */}
+      {/* 第三方平台：B站 / 小红书 / YouTube，引擎 yt-dlp */}
       <PlatformPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}

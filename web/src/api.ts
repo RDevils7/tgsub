@@ -27,6 +27,10 @@ import type {
   MetadataDetail,
   MetadataFolderItem,
   MetadataSource,
+  MetadataDeletePlan,
+  MetadataDeleteResult,
+  MetadataExcludedItem,
+  DeleteMode,
   BrowseResult,
   FrameCandidate,
   CropRect,
@@ -163,7 +167,6 @@ export const api = {
       bot_token?: string;
       emby_api_key?: string;
       platform_cookie_bilibili?: string;
-      platform_cookie_douyin?: string;
       platform_cookie_xiaohongshu?: string;
       platform_cookie_youtube?: string;
     },
@@ -311,6 +314,25 @@ export const api = {
     ),
   removeMetadataSource: (id: number) =>
     request<{ ok: boolean }>(`/metadata/sources/${id}`, { method: "DELETE" }),
+  /** 删除预览：把会删哪些文件摊开给用户看 */
+  previewMetadataDelete: (key: string, mode: DeleteMode) =>
+    request<MetadataDeletePlan>(
+      `/metadata/delete/preview?key=${encodeURIComponent(key)}&mode=${mode}`,
+    ),
+  /** 执行删除：purge = 连磁盘文件一起删，unlink = 只从列表移除 */
+  deleteMetadata: (key: string, mode: DeleteMode) =>
+    request<MetadataDeleteResult>("/metadata/delete", {
+      method: "POST",
+      body: JSON.stringify({ key, mode }),
+    }),
+  /** 被隐藏的条目（仅从列表移除） */
+  metadataExcluded: () => request<{ items: MetadataExcludedItem[] }>("/metadata/excluded"),
+  /** 取消隐藏，恢复显示 */
+  restoreMetadataExcluded: (path: string) =>
+    request<{ ok: boolean }>("/metadata/excluded/restore", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
   /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录 */
   metadataBrowse: (path?: string) =>
     request<BrowseResult>(`/metadata/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),

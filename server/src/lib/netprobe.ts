@@ -446,6 +446,10 @@ export interface HttpOptions {
   /** 为 true 时校验证书；探测连通性时用 false，免得自签/中间人代理一律判失败 */
   verifyTls?: boolean;
   maxBody?: number;
+  /** 自定义 User-Agent；有些站点会按 UA 判断「是不是浏览器」 */
+  userAgent?: string;
+  /** 额外的请求头 */
+  headers?: Record<string, string>;
 }
 
 function describeNetError(err: unknown): string {
@@ -502,11 +506,14 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
   const requestLines = [
     `${options.method ?? "GET"} ${path} HTTP/1.1`,
     `Host: ${host}`,
-    `User-Agent: tgsub/${APP_VERSION}`,
+    `User-Agent: ${options.userAgent ?? `tgsub/${APP_VERSION}`}`,
     "Accept: */*",
     "Accept-Encoding: identity",
     "Connection: close",
   ];
+  for (const [key, value] of Object.entries(options.headers ?? {})) {
+    requestLines.push(`${key}: ${value}`);
+  }
   socket.write(`${requestLines.join("\r\n")}\r\n\r\n`);
 
   try {

@@ -62,7 +62,7 @@ const TITLES: Record<PageKey, { title: string; desc: string }> = {
   channels: { title: "频道", desc: "管理需要定时扫描的 Telegram 频道" },
   subscriptions: { title: "订阅关键词", desc: "命中关键词后自动下载整条消息的文件" },
   monitor: { title: "监控历史", desc: "每条被扫描到的消息及其命中结果，可追溯到原消息" },
-  manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接或 B站 / 抖音 / 小红书 / YouTube 链接，直接下载" },
+  manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接或 B站 / 小红书 / YouTube 链接，直接下载" },
   downloads: { title: "下载记录", desc: "查看、重试与导出已抓取的文件" },
   metadata: { title: "元数据", desc: "编辑已下载视频的 NFO 与封面，可从视频截图" },
   emby: { title: "Emby 入库", desc: "媒体信息生成、封面规格与入库通知" },
@@ -142,11 +142,11 @@ function Shell() {
         }`}
       >
         <div className="flex items-center gap-2.5 px-5 py-5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-gradient shadow-glow">
-            <svg viewBox="0 0 24 24" className="h-[18px] w-[18px] text-onbrand" fill="currentColor">
-              <path d="M4 11.6 20.3 5l-2.2 13-5.2-3.7-2.6 2.6-.4-4.2z" />
-            </svg>
-          </div>
+          <img
+            src="/logo.png"
+            alt="tgsub"
+            className="h-9 w-9 rounded-xl object-cover shadow-glow ring-1 ring-white/10"
+          />
           <div className="leading-tight">
             <p className="text-[14px] font-semibold tracking-tight text-white">tgsub</p>
             <p className="text-[10.5px] tracking-wide text-slate-500">频道订阅下载器</p>

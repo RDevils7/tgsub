@@ -1,10 +1,10 @@
 import { PlatformId } from "../types";
 
 /**
- * 第三方链接识别：B站 / 抖音 / 小红书。
+ * 第三方链接识别：B站 / 小红书 / YouTube。
  *
  * 只做「这条链接该交给谁」的判断，不展开短链、不请求网络 —— 短链
- * （b23.tv / v.douyin.com / xhslink.com）交给 yt-dlp 自己重定向，
+ * （b23.tv / xhslink.com）交给 yt-dlp 自己重定向，
  * 我们在这一层保持纯函数，好进自检。
  */
 
@@ -20,7 +20,6 @@ export interface PlatformLink {
 
 const HOSTS: Array<{ platform: PlatformId; host: string[] }> = [
   { platform: "bilibili", host: ["bilibili.com", "b23.tv", "bili2233.cn"] },
-  { platform: "douyin", host: ["douyin.com", "iesdouyin.com"] },
   // 小红书有 .com 与 .cn 两套短链域名，App 现在默认给的是 xhslink.cn
   { platform: "xiaohongshu", host: ["xiaohongshu.com", "xhslink.com", "xhslink.cn"] },
   { platform: "youtube", host: ["youtube.com", "youtu.be", "youtube-nocookie.com"] },
@@ -64,13 +63,6 @@ export function extractPlatformId(platform: PlatformId, url: URL): string | null
     const ep = pathname.match(/\/bangumi\/play\/((?:ep|ss)\d+)/i);
     if (ep) return ep[1];
     return null;
-  }
-  if (platform === "douyin") {
-    const video = pathname.match(/\/(?:video|note|slides)\/(\d{6,})/);
-    if (video) return video[1];
-    // https://www.iesdouyin.com/share/video/7xxxxxxxx/
-    const share = pathname.match(/\/share\/(?:video|note)\/(\d{6,})/);
-    return share ? share[1] : null;
   }
   if (platform === "youtube") {
     // watch?v=ID / shorts/ID / live/ID / embed/ID；youtu.be/ID 走路径
@@ -121,7 +113,6 @@ export function splitPlatformLinks(raw: string): PlatformLink[] {
  * 平台的「分享口令」长这样（都是 App 里点「复制链接」原样出来的）：
  *
  *   小红书：举手大喊：姐姐看我！… <https://xhslink.cn/o/8c7hpV57rvQ> 复制文本后进入【小红书】
- *   抖音：  4.87 复制打开抖音，看看【蓝心说影的作品】…！ https://v.douyin.com/dVS6cveLVCw/ :1pm j@C.UL
  *   B站：   【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】 <https://b23.tv/29inbIp>
  *
  * 共同点：链接被尖括号包着、紧贴中文没有空格、前后一堆无关文字。
@@ -156,7 +147,7 @@ export function extractUrls(text: string): string[] {
   return out;
 }
 
-/** 判断这段文字里有没有三平台链接，用于界面上给提示 */
+/** 判断这段文字里有没有平台链接，用于界面上给提示 */
 export function hasPlatformLink(raw: string): boolean {
   return splitPlatformLinks(raw).length > 0;
 }

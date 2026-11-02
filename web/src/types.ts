@@ -238,7 +238,7 @@ export interface AppSettings {
   ffmpeg_path: string;
   /** 缓存目录（covers + frames）上限，单位 MB；0 = 不限制也不自动清理 */
   cache_limit_mb: number;
-  /** 第三方平台（B站 / 抖音 / 小红书）下载开关 */
+  /** 第三方平台（B站 / 小红书 / YouTube）下载开关 */
   platform_enabled: boolean;
   /** yt-dlp 路径，留空自动查找（镜像内置 → PATH） */
   ytdlp_path: string;
@@ -250,7 +250,7 @@ export interface AppSettings {
   platform_meta: boolean;
   /** 只给 yt-dlp 用的代理；下 YouTube 通常必须填 */
   platform_proxy: string;
-  /** 国内平台（B站 / 抖音 / 小红书）是否也走这条代理，默认关 */
+  /** 国内平台（B站 / 小红书）是否也走这条代理，默认关 */
   platform_proxy_domestic: boolean;
   /** 定时检查 yt-dlp 新版本 */
   ytdlp_auto_update: boolean;
@@ -261,7 +261,7 @@ export interface AppSettings {
 
 /* ------------------------------ 第三方平台 ------------------------------ */
 
-export type PlatformId = "bilibili" | "douyin" | "xiaohongshu" | "youtube";
+export type PlatformId = "bilibili" | "xiaohongshu" | "youtube";
 
 export interface YtdlpInfo {
   available: boolean;
@@ -645,6 +645,57 @@ export interface MetadataSource {
   folderNames: string[];
   /** 覆盖的视频数 */
   fileCount: number;
+}
+
+/**
+ * 删除模式：
+ *   purge  = 连磁盘文件一起删（视频 + NFO + 封面图）
+ *   unlink = 只从列表移除，磁盘文件保留
+ */
+export type DeleteMode = "purge" | "unlink";
+
+export interface MetadataDeleteItem {
+  path: string;
+  name: string;
+  kind: "video" | "nfo" | "image" | "other";
+  size: number;
+}
+
+/** 删除预览：执行前把「会删什么」摊开给用户看 */
+export interface MetadataDeletePlan {
+  target: string;
+  targetKind: "file" | "folder";
+  mode: DeleteMode;
+  /** 会被删除的文件 */
+  items: MetadataDeleteItem[];
+  /** 不会被删除、但列出来让用户知情的其它文件 */
+  kept: MetadataDeleteItem[];
+  totalSize: number;
+  videoCount: number;
+  nfoCount: number;
+  imageCount: number;
+  downloadIds: number[];
+  sourceIds: number[];
+  warnings: string[];
+}
+
+/** 删除结果 */
+export interface MetadataDeleteResult {
+  ok: boolean;
+  mode: DeleteMode;
+  removedFiles: number;
+  removedBytes: number;
+  removedVideos: number;
+  removedDirs: number;
+  removedDownloads: number;
+  removedSources: number;
+  failed: string[];
+}
+
+/** 被「仅从列表移除」隐藏的条目 */
+export interface MetadataExcludedItem {
+  path: string;
+  created_at: number;
 }
 
 /** 服务端目录浏览结果 */

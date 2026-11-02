@@ -9,10 +9,12 @@ import type {
   MetadataDetail,
   MetadataFolderItem,
   MetadataSource,
+  MetadataExcludedItem,
   NfoFields,
 } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { CropDialog } from "../components/CropDialog";
+import { MediaDeleteDialog, type DeleteTarget } from "../components/MediaDeleteDialog";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
 import {
   IconAlert,
@@ -142,9 +144,8 @@ export default function Metadata() {
   const [picker, setPicker] = useState<{ scope: ImageScope; name: ImageName } | null>(null);
   const [imageScope, setImageScope] = useState<ImageScope>("series");
   const [addOpen, setAddOpen] = useState(false);
-  /** 待删除的手动来源（文件夹行上的删除按钮） */
-  const [removeTarget, setRemoveTarget] = useState<{ folder: MetadataFolderItem; ids: number[] } | null>(null);
-  const [removing, setRemoving] = useState(false);
+  /** 待删除的媒体条目（剧集目录 / 单集视频） */
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -285,32 +286,6 @@ export default function Metadata() {
     });
   };
 
-  /**
-   * 移除手动来源。
-   *
-   * 删的是「来源」而不是磁盘文件 —— 手动添加一个上级目录会被拆成多个剧集文件夹，
-   * 它们都指向同一个来源，删掉之后这些条目就不再出现。
-   */
-  const removeSources = async (ids: number[]) => {
-    setRemoving(true);
-    try {
-      for (const id of ids) {
-        try {
-          await api.removeMetadataSource(id);
-        } catch {
-          // 单个失败不影响其余来源的移除
-        }
-      }
-      toast.push("已移除手动来源（磁盘文件未改动）", "success");
-      setRemoveTarget(null);
-      await fetchList(page, true);
-    } catch (err) {
-      toast.push((err as Error).message, "error");
-    } finally {
-      setRemoving(false);
-    }
-  };
-
   const isFolderTarget = detail?.target.kind === "folder";
   /**
    * 图片作用域跟着选中目标走：
@@ -323,7 +298,7 @@ export default function Metadata() {
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
       {/* 左侧：文件夹树（一个文件夹一条记录，展开看里面的每个视频） */}
-      <section className="card flex min-h-0 flex-col overflow-hidden">
+      <section className={`card flex min-h-0 flex-col overflow-hidden ${selected ? "max-lg:hidden" : ""}`}>
         <div className="flex items-center gap-2 border-b border-white/[0.06] p-3">
           <div className="relative flex-1">
             <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
@@ -438,18 +413,23 @@ export default function Metadata() {
                       </span>
                     </button>
 
-                    {/* 手动来源可以移除（只删登记，不动磁盘文件） */}
-                    {folder.sourceIds.length > 0 && (
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        className="mt-0.5 shrink-0 !px-1.5 !py-1"
-                        onClick={() => setRemoveTarget({ folder, ids: folder.sourceIds })}
-                        title="移除手动来源（不删除磁盘文件）"
-                      >
-                        <IconTrash className="h-3 w-3" />
-                      </Button>
-                    )}
+                    {/* 每一项都能删：剧集目录可整目录删除，也可只移出列表 */}
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      className="mt-0.5 shrink-0 !px-1.5 !py-1"
+                      onClick={() =>
+                        setDeleteTarget({
+                          key: folder.key,
+                          kind: "folder",
+                          name: folder.name,
+                          path: folder.dir,
+                        })
+                      }
+                      title="删除这个剧集目录"
+                    >
+                      <IconTrash className="h-3 w-3" />
+                    </Button>
                   </div>
 
                   {/* 子级：文件夹里的每个视频 */}
@@ -462,34 +442,55 @@ export default function Metadata() {
                         const fileActive = selected?.key === file.key;
                         return (
                           <li key={file.key}>
-                            <button
-                              onClick={() => setSelected({ key: file.key, kind: "file" })}
-                              className={`flex w-full items-center gap-2 py-1.5 pl-9 pr-3 text-left transition ${
+                            <div
+                              className={`flex items-center gap-1 py-1.5 pl-9 pr-2 transition ${
                                 fileActive ? "bg-brand-500/[0.14]" : "hover:bg-white/[0.03]"
                               }`}
-                              title={file.path}
                             >
-                              <IconVideo className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                              <span className="min-w-0 flex-1">
-                                <span
-                                  className={`block truncate text-[12px] ${
-                                    fileActive ? "text-white" : "text-slate-300"
-                                  }`}
-                                >
-                                  {file.name}
-                                </span>
-                              </span>
-                              {file.episode !== null && (
-                                <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-[1px] text-[10px] tabular-nums text-slate-400">
-                                  S{String(file.season ?? 1).padStart(2, "0")}E{String(file.episode).padStart(2, "0")}
-                                </span>
-                              )}
-                              <span
-                                className={`shrink-0 text-[10px] ${file.nfoExists ? "text-ok/80" : "text-warn/70"}`}
+                              <button
+                                onClick={() => setSelected({ key: file.key, kind: "file" })}
+                                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                                title={file.path}
                               >
-                                {file.nfoExists ? "NFO" : "无"}
-                              </span>
-                            </button>
+                                <IconVideo className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                                <span className="min-w-0 flex-1">
+                                  <span
+                                    className={`block truncate text-[12px] ${
+                                      fileActive ? "text-white" : "text-slate-300"
+                                    }`}
+                                  >
+                                    {file.name}
+                                  </span>
+                                </span>
+                                {file.episode !== null && (
+                                  <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-[1px] text-[10px] tabular-nums text-slate-400">
+                                    S{String(file.season ?? 1).padStart(2, "0")}E{String(file.episode).padStart(2, "0")}
+                                  </span>
+                                )}
+                                <span
+                                  className={`shrink-0 text-[10px] ${file.nfoExists ? "text-ok/80" : "text-warn/70"}`}
+                                >
+                                  {file.nfoExists ? "NFO" : "无"}
+                                </span>
+                              </button>
+                              {/* 每一集都能删 */}
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                className="shrink-0 !px-1.5 !py-0.5"
+                                onClick={() =>
+                                  setDeleteTarget({
+                                    key: file.key,
+                                    kind: "file",
+                                    name: file.name,
+                                    path: file.path,
+                                  })
+                                }
+                                title="删除这一集"
+                              >
+                                <IconTrash className="h-3 w-3" />
+                              </Button>
+                            </div>
                           </li>
                         );
                       })}
@@ -534,7 +535,15 @@ export default function Metadata() {
       </section>
 
       {/* 右侧：详情 */}
-      <section className="card flex min-h-0 flex-col overflow-hidden">
+      <section className={`card flex min-h-0 flex-col overflow-hidden ${selected ? "" : "max-lg:hidden"}`}>
+        {selected && (
+          <div className="flex items-center border-b border-white/[0.06] p-3 lg:hidden">
+            <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>
+              <IconChevronLeft className="h-4 w-4" />
+              返回列表
+            </Button>
+          </div>
+        )}
         {!selected && (
           <div className="flex flex-1 items-center justify-center py-20 text-[13px] text-slate-500">
             左侧选一个文件夹或视频开始编辑
@@ -620,7 +629,7 @@ export default function Metadata() {
               </div>
             </header>
 
-            <div className="flex shrink-0 items-center gap-1 border-b border-white/[0.06] px-3">
+            <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.06] px-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {[
                 { key: "basic" as const, label: "基本信息", icon: <IconEdit className="h-3.5 w-3.5" /> },
                 { key: "images" as const, label: "图片", icon: <IconImage className="h-3.5 w-3.5" /> },
@@ -724,49 +733,14 @@ export default function Metadata() {
         }}
       />
 
-      {/* 移除手动来源的二次确认 */}
-      <Modal
-        open={Boolean(removeTarget)}
-        onClose={() => setRemoveTarget(null)}
-        title="移除手动来源"
-        width="max-w-md"
-        footer={
-          <>
-            <Button size="sm" onClick={() => setRemoveTarget(null)} disabled={removing}>
-              取消
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              loading={removing}
-              onClick={() => void removeSources(removeTarget?.ids ?? [])}
-            >
-              <IconTrash className="h-3.5 w-3.5" />
-              移除
-            </Button>
-          </>
-        }
-      >
-        {removeTarget && (
-          <div className="space-y-2 text-[12.5px] leading-relaxed text-slate-400">
-            <p>
-              将从元数据页移除「
-              <span className="text-slate-200">{removeTarget.folder.name}</span>
-              」这条记录及其来源。
-            </p>
-            <ul className="space-y-1 rounded-lg border border-white/[0.07] bg-white/[0.02] p-2 font-mono text-[11px] text-slate-500">
-              {removeTarget.folder.sourcePaths.map((p) => (
-                <li key={p} className="truncate" title={p}>
-                  {p}
-                </li>
-              ))}
-            </ul>
-            <p className="text-[11.5px] text-slate-500">
-              只移除登记，磁盘上的视频、NFO 与封面都不会被删除。
-            </p>
-          </div>
-        )}
-      </Modal>
+      {/* 删除媒体条目（可连磁盘文件一起删，也可只移出列表） */}
+      <MediaDeleteDialog
+        target={deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onDone={async () => {
+          await fetchList(page, true);
+        }}
+      />
     </div>
   );
 }
@@ -1173,6 +1147,7 @@ function AddSourceDialog({
   const [browse, setBrowse] = useState<BrowseResult | null>(null);
   const [path, setPath] = useState("");
   const [sources, setSources] = useState<MetadataSource[]>([]);
+  const [excluded, setExcluded] = useState<MetadataExcludedItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -1180,6 +1155,15 @@ function AddSourceDialog({
     try {
       const res = await api.metadataSources();
       setSources(res.items);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    }
+  }, [toast]);
+
+  const loadExcluded = useCallback(async () => {
+    try {
+      const res = await api.metadataExcluded();
+      setExcluded(res.items);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
@@ -1205,7 +1189,8 @@ function AddSourceDialog({
     if (!open) return;
     void browseTo();
     void loadSources();
-  }, [open, browseTo, loadSources]);
+    void loadExcluded();
+  }, [open, browseTo, loadSources, loadExcluded]);
 
   const add = async (target: string, title?: string) => {
     setBusy(true);
@@ -1227,6 +1212,21 @@ function AddSourceDialog({
       await api.removeMetadataSource(id);
       toast.push("已移除来源", "success");
       await loadSources();
+      await onAdded();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 取消隐藏：被「仅从列表移除」的条目重新回到列表里 */
+  const restore = async (target: string) => {
+    setBusy(true);
+    try {
+      await api.restoreMetadataExcluded(target);
+      toast.push("已恢复显示", "success");
+      await loadExcluded();
       await onAdded();
     } catch (err) {
       toast.push((err as Error).message, "error");
@@ -1297,6 +1297,41 @@ function AddSourceDialog({
           {sources.length > 0 && (
             <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
               添加一个上级目录时，会自动按里面的剧集文件夹拆开显示；移除来源不会删除磁盘文件。
+            </p>
+          )}
+        </div>
+
+        {/* 被「仅从列表移除」隐藏的条目：可以恢复显示 */}
+        <div>
+          <p className="label">已隐藏的项目（{excluded.length}）</p>
+          {excluded.length === 0 ? (
+            <p className="text-[11.5px] text-slate-500">没有被隐藏的项目。</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {excluded.map((item) => (
+                <li
+                  key={item.path}
+                  className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5"
+                >
+                  <IconFolder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-slate-300" title={item.path}>
+                    {item.path}
+                  </span>
+                  <Button
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void restore(item.path)}
+                    title="恢复显示"
+                  >
+                    恢复
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {excluded.length > 0 && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+              这些条目只从列表里移除了，磁盘文件仍在。恢复后会重新显示。
             </p>
           )}
         </div>

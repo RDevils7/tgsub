@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS media_sources (
   created_at INTEGER NOT NULL
 );
 
+/* 被「仅从列表移除」隐藏的条目。
+   磁盘文件保留，只是不再出现在元数据页的目录树里；路径是前缀匹配，
+   登记一个目录就会连带隐藏它下面的所有视频。 */
+CREATE TABLE IF NOT EXISTS media_excluded (
+  path       TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scan_runs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   channel_id    INTEGER NOT NULL,
@@ -156,6 +164,9 @@ ensureColumn("downloads", "started_at", "INTEGER");
 ensureColumn("downloads", "source", "TEXT NOT NULL DEFAULT 'telegram'");
 // 第三方任务的原链接（重试、去重、日志定位都靠它）
 ensureColumn("downloads", "source_url", "TEXT");
+// 失败原因。原始建表语句里就有这一列，但极老的库可能没有；
+// 1.2.1 的「作废遗留抖音任务」迁移要写它，缺列会直接抛错中断启动。
+ensureColumn("downloads", "error", "TEXT");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 
@@ -202,6 +213,41 @@ migrateOnce("migration_platform_quality_v106", () => {
   if (!row || row.value !== "1080") return;
   db.prepare("UPDATE settings SET value = 'best' WHERE key = 'platform_quality'").run();
   logger.info("第三方平台默认画质已从 1080 改为「最高」");
+});
+
+/**
+ * 1.2.1：移除抖音下载。
+ *
+ * yt-dlp 的 DouyinIE 生成不出接口要的 a_bogus 签名，Cookie 填得再对也会被风控
+ * 拦下（实测带 Cookie 与不带 Cookie 报错完全一样），留着这个平台只会让人
+ * 以为是自己 Cookie 的问题，反复重填。整块摘掉，抖音链接不再被识别。
+ *
+ * 顺手把用户之前存进去的抖音 Cookie 删掉：那是加密落盘的登录态，
+ * 平台没了还留着既没用也是多余的凭据。
+ */
+migrateOnce("migration_remove_douyin_v121", () => {
+  const res = db
+    .prepare(
+      "DELETE FROM settings WHERE key IN ('platform_cookie_douyin', 'platform_cookie_douyin_at')",
+    )
+    .run();
+  if (res.changes > 0) {
+    logger.info({ count: res.changes }, "已清理抖音 Cookie（抖音下载已移除）");
+  }
+
+  // 队列里遗留的抖音任务：链接不再被识别，跑起来只会一直「原链接无法识别」地重试，
+  // 直接作废，省得把失败记录留在列表里
+  const tasks = db
+    .prepare(
+      "UPDATE downloads SET status = 'skipped', error = '抖音下载已移除' " +
+        "WHERE source = 'platform' " +
+        "AND (source_url LIKE '%douyin.com%' OR source_url LIKE '%iesdouyin.com%') " +
+        "AND status IN ('queued','downloading','paused','stopped','failed')",
+    )
+    .run();
+  if (tasks.changes > 0) {
+    logger.info({ count: tasks.changes }, "已作废队列里遗留的抖音任务");
+  }
 });
 
 /**
@@ -483,7 +529,7 @@ export function getEmbyKeyHint(): { set: boolean; hint: string | null } {
 }
 
 /* ------------------------------------------------------------------ */
-/* 第三方平台 Cookie：B站 / 抖音 / 小红书                                */
+/* 第三方平台 Cookie：B站 / 小红书 / YouTube                             */
 /*                                                                     */
 /* Cookie 等同于登录态，和 session 一个级别：加密落盘、不放进            */
 /* AppSettings、接口只回「有没有配 + 末四位」。                           */
@@ -491,7 +537,6 @@ export function getEmbyKeyHint(): { set: boolean; hint: string | null } {
 
 const PLATFORM_COOKIE_KEY: Record<PlatformId, string> = {
   bilibili: "platform_cookie_bilibili",
-  douyin: "platform_cookie_douyin",
   xiaohongshu: "platform_cookie_xiaohongshu",
   youtube: "platform_cookie_youtube",
 };
@@ -499,7 +544,6 @@ const PLATFORM_COOKIE_KEY: Record<PlatformId, string> = {
 /** Cookie 保存时间单独记，界面上显示「3 天前」，过期时好判断是不是该重填 */
 const PLATFORM_COOKIE_AT_KEY: Record<PlatformId, string> = {
   bilibili: "platform_cookie_bilibili_at",
-  douyin: "platform_cookie_douyin_at",
   xiaohongshu: "platform_cookie_xiaohongshu_at",
   youtube: "platform_cookie_youtube_at",
 };

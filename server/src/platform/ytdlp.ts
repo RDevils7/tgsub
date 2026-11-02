@@ -11,10 +11,10 @@ import { normalizeProxyUrl, parseProxy } from "../lib/netprobe";
 import { parseCookiePairs } from "./cookie";
 
 /**
- * yt-dlp 封装：B站 / 抖音 / 小红书 / YouTube 都交给它。
+ * yt-dlp 封装：B站 / 小红书 / YouTube 都交给它。
  *
  * 为什么用 yt-dlp 而不是自己写接口：
- * 这些平台的播放地址都要签名（B站 w_rid、抖音 a_bogus、小红书 x-s、
+ * 这些平台的播放地址都要签名（B站 w_rid、小红书 x-s、
  * YouTube nsig），签名算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟，
  * 我们只负责把 Cookie 喂给它、把进度读出来。
  *
@@ -85,7 +85,7 @@ function runOnce(file: string, args: string[], timeoutMs: number): Promise<{ cod
 /**
  * yt-dlp 专用代理参数。
  *
- * 和 Telegram 的 `proxy_url` 分开：B站 / 抖音 / 小红书 在墙内直连最快，
+ * 和 Telegram 的 `proxy_url` 分开：B站 / 小红书 在墙内直连最快，
  * 混用一个代理反而绕远路；只有 YouTube 必须挂代理。
  * 地址解析复用 netprobe 的 parseProxy，免得两套规则。
  */
@@ -118,7 +118,7 @@ export function supportsJsRuntime(version: string | null): boolean {
  *
  * 代理默认只给 YouTube：B站 的 upos CDN 会把海外代理 IP 直接判成
  * `HTTP Error 567: Unknown Status`（解析正常、只有传数据失败），
- * 抖音 / 小红书 走代理也只会更慢。人在海外要下国内平台时，
+ * 小红书 走代理也只会更慢。人在海外要下国内平台时，
  * 在设置里打开「国内平台也走代理」。
  */
 function platformArgs(platform: PlatformId, version: string | null): string[] {
@@ -197,8 +197,6 @@ export function clearYtdlpCache(): void {
 
 const COOKIE_DOMAIN: Record<PlatformId, string[]> = {
   bilibili: [".bilibili.com"],
-  // 分享短链会跳到 iesdouyin.com，只写 .douyin.com 的话那一跳拿不到登录态
-  douyin: [".douyin.com", ".iesdouyin.com"],
   xiaohongshu: [".xiaohongshu.com"],
   // SID / SAPISID 实际种在 .google.com 上，只写 .youtube.com 会漏掉一半登录态
   youtube: [".youtube.com", ".google.com"],
@@ -440,12 +438,39 @@ async function dumpJson(
   };
 
   const res = cookie.trim() ? await withCookieFile(cookie, platform, (file) => exec(file)) : await exec();
-  if (res.code !== 0) throw new Error(explainYtdlpError(res.err || res.out, platform));
+  if (res.code !== 0) {
+    const raw = res.err || res.out;
+    // 翻译成人话的同时把 yt-dlp 的原话带上：风控类报错只在原文里才看得出
+    // 到底是 403 / 签名缺失 / 需要验证，光看中文提示会一直在错误的方向上排查
+    throw new Error(withRawDetail(explainYtdlpError(raw, platform), raw));
+  }
   try {
     return JSON.parse(res.out) as YtdlpJson;
   } catch {
     throw new Error("yt-dlp 返回的内容不是有效 JSON，链接可能已失效");
   }
+}
+
+/**
+ * 把 yt-dlp 的原始报错附在中文提示后面。
+ *
+ * 失败原因常常藏在原文里（403 / 风控 / 需要验证 / 编码不兼容），
+ * 只给一句中文容易让人往错的方向排查（比如以为是 Cookie 没填对）。
+ */
+export function withRawDetail(message: string, raw: string): string {
+  const text = String(raw ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return message;
+  // 只取最关键的一行，别把整屏日志糊给用户
+  const line =
+    text
+      .split(" | ")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .find((part) => /error|failed|forbidden|blocked|required|not found/i.test(part)) ?? text;
+  const clipped = line.length > 220 ? `${line.slice(0, 220)}…` : line;
+  return `${message}（yt-dlp 原始报错：${clipped}）`;
 }
 
 /**
@@ -626,7 +651,10 @@ export async function downloadPlatform(
           return;
         }
         if (code === 0) resolve();
-        else reject(new Error(explainYtdlpError(tail.join("") || stderr, opts.platform)));
+        else {
+          const raw = tail.join("") || stderr;
+          reject(new Error(withRawDetail(explainYtdlpError(raw, opts.platform), raw)));
+        }
       });
     });
   };
@@ -699,7 +727,15 @@ export function explainYtdlpError(raw: string, platform: PlatformId): string {
   ) {
     return "该视频在当前地区不可用：把「第三方平台代理」换到其他地区节点再试";
   }
-  if (/Fresh cookies|login required|Sign in|需要登录|cookies are needed|account/i.test(text)) {
+  // yt-dlp 的「Fresh cookies (not necessarily logged in) are needed」是它的
+  // 统一话术：B站 / 小红书 / YouTube 遇到需要登录态时都会说这句。
+  if (/Fresh cookies/i.test(text)) {
+    return `${label}要求登录：请在设置 → 第三方平台里填入新鲜 Cookie（浏览器登录后复制整串）`;
+  }
+  if (/HTTP Error 403|Forbidden|ArgusSecurityPlugin|Uifid Not Found|Signature Not Found/i.test(text)) {
+    return `${label}被拒绝（403）：多半是风控或 Cookie 过期，稍后再试或换一份新 Cookie`;
+  }
+  if (/login required|Sign in|需要登录|cookies are needed/i.test(text)) {
     return `${label}要求登录：请在设置 → 第三方平台里填入新鲜 Cookie（浏览器登录后复制整串）`;
   }
   if (/HTTP Error 412|Precondition Failed|风控|risk/i.test(text)) {

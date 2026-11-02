@@ -11,8 +11,6 @@ import { PlatformId } from "../types";
 /** 每个平台至少要有其中一项；数组里的多个元素是「任一命中即可」 */
 export const COOKIE_REQUIRED: Record<PlatformId, string[][]> = {
   bilibili: [["SESSDATA"], ["bili_jct"]],
-  // msToken 是 JS 生成、不一定写进 Cookie，不能当硬指标；ttwid 或任一登录态键就算够用
-  douyin: [["ttwid", "sessionid", "sessionid_ss", "sid_guard", "odin_tt"]],
   xiaohongshu: [["web_session"], ["a1"]],
   youtube: [["SID", "SAPISID", "__Secure-3PAPISID", "__Secure-3PSID", "LOGIN_INFO", "SIDCC"]],
 };

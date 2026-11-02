@@ -136,7 +136,7 @@ settingsRouter.put(
         .join("\n");
     }
 
-    /* 第三方平台（B站 / 抖音 / 小红书 / YouTube） */
+    /* 第三方平台（B站 / 小红书 / YouTube） */
     if (body.platform_enabled !== undefined) patch.platform_enabled = Boolean(body.platform_enabled);
     if (typeof body.platform_proxy === "string") patch.platform_proxy = normalizeProxyUrl(body.platform_proxy);
     if (body.platform_proxy_domestic !== undefined) {

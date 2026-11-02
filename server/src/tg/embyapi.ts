@@ -33,7 +33,14 @@ export interface EmbyConfig {
   rules: EmbyPathRule[];
 }
 
-export type EmbyUpdateType = "Created" | "Modified";
+/**
+ * Emby 的入库通知类型。
+ *
+ * Created  新增（下载完成）
+ * Modified 重新生成 NFO / 封面后让 Emby 重新认一遍
+ * Deleted  文件被删了，让 Emby 把这条从库里摘掉
+ */
+export type EmbyUpdateType = "Created" | "Modified" | "Deleted";
 
 export interface EmbyNotifyRecord {
   at: number;

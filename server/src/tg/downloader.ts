@@ -372,7 +372,7 @@ class DownloadQueue {
   private async run(id: number): Promise<void> {
     const row = stmtGet.get(id);
     if (!row || row.status !== "queued") return;
-    // 第三方链接（B站/抖音/小红书）走 yt-dlp，其余逻辑（暂停/停止/重试/收尾）照旧
+    // 第三方链接（B站/小红书/YouTube）走 yt-dlp，其余逻辑（暂停/停止/重试/收尾）照旧
     if (row.source === "platform") {
       await this.runPlatform(id, row);
       return;
@@ -700,7 +700,7 @@ class DownloadQueue {
 /**
  * 清掉 yt-dlp 中断后留下的残片。
  *
- * `.part` 是它自己的断点文件；`.part-Frag*` 是分片下载（抖音/小红书常见）。
+ * `.part` 是它自己的断点文件；`.part-Frag*` 是分片下载（小红书常见）。
  * 保留这些文件没有意义 —— 我们的「继续」是重新 probe 再下，不是 yt-dlp 的续传。
  */
 async function removePartialFiles(dir: string): Promise<void> {

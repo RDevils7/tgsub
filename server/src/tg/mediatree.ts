@@ -3,6 +3,7 @@ import path from "node:path";
 import { db } from "../db";
 import { env } from "../env";
 import { Download } from "../types";
+import { isVideoFile, VIDEO_EXT_RE } from "./mediapath";
 
 /**
  * 媒体库目录树。
@@ -19,16 +20,12 @@ import { Download } from "../types";
  * 剧集信息（简介、标签、频道等）。
  */
 
-const VIDEO_EXT_RE = /\.(mp4|mkv|avi|mov|flv|wmv|ts|m4v|webm|mpeg|mpg|rmvb|rm|vob|m2ts|ogv|3gp)$/i;
-
 /** 递归扫描视频文件的最大层级，防止误选到整块磁盘 */
 const MAX_SCAN_DEPTH = 3;
 /** 单个文件夹最多列出的文件数 */
 const MAX_FILES_PER_FOLDER = 500;
 
-export function isVideoFile(name: string): boolean {
-  return VIDEO_EXT_RE.test(name);
-}
+export { isVideoFile };
 
 export interface MediaFileEntry {
   /** 绝对路径 */
@@ -111,6 +108,53 @@ export function addSource(filePath: string, kind: "dir" | "file", title: string 
 
 export function removeSource(id: number): boolean {
   return stmtDeleteSource.run(id).changes > 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 隐藏条目（仅从列表移除，磁盘文件保留）                              */
+/* ------------------------------------------------------------------ */
+
+export interface MediaExcludeRow {
+  path: string;
+  created_at: number;
+}
+
+const stmtExcluded = db.prepare<[], MediaExcludeRow>("SELECT * FROM media_excluded ORDER BY created_at DESC");
+const stmtExcludedByPath = db.prepare<[string], MediaExcludeRow>(
+  "SELECT * FROM media_excluded WHERE path = ? LIMIT 1",
+);
+const stmtInsertExcluded = db.prepare(
+  "INSERT INTO media_excluded (path, created_at) VALUES (?, ?) ON CONFLICT(path) DO NOTHING",
+);
+const stmtDeleteExcluded = db.prepare<[string]>("DELETE FROM media_excluded WHERE path = ?");
+
+/** 已登记的隐藏路径 */
+export function listExcluded(): MediaExcludeRow[] {
+  return stmtExcluded.all();
+}
+
+/** 登记一个隐藏路径（目录会连带隐藏其下的视频） */
+export function excludePath(target: string): void {
+  stmtInsertExcluded.run(path.resolve(target), Date.now());
+}
+
+/** 取消隐藏，恢复显示 */
+export function restorePath(target: string): boolean {
+  return stmtDeleteExcluded.run(path.resolve(target)).changes > 0;
+}
+
+/**
+ * 路径是否被隐藏。
+ *
+ * 命中条件：与隐藏路径完全相同，或位于隐藏目录之下。
+ */
+export function isExcluded(target: string): boolean {
+  const abs = path.resolve(target);
+  for (const row of stmtExcluded.all()) {
+    const root = path.resolve(row.path);
+    if (abs === root || abs.startsWith(root + path.sep)) return true;
+  }
+  return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -347,7 +391,9 @@ export function collectFolders(): MediaFolderEntry[] {
   // 1) 项目下载的文件
   for (const row of stmtDoneVideos.all()) {
     if (!row.file_path) continue;
-    const dir = path.dirname(path.resolve(row.file_path));
+    const abs = path.resolve(row.file_path);
+    if (isExcluded(abs)) continue;
+    const dir = path.dirname(abs);
     const folder = ensureFolder(dir);
     if (folder.source === "manual") folder.source = "download";
     addFile(folder, row.file_path, row);
@@ -358,9 +404,11 @@ export function collectFolders(): MediaFolderEntry[] {
     const abs = path.resolve(source.path);
     if (source.kind === "dir") {
       // 上级目录 → 拆成里面每一剧（剧集文件夹）
-      const seriesDirs = collectSeriesDirs(abs);
-      if (seriesDirs.length === 0) {
+      const allSeries = collectSeriesDirs(abs);
+      const seriesDirs = allSeries.filter((item) => !isExcluded(item.dir));
+      if (allSeries.length === 0) {
         // 一层都没拆出来（目录里没有视频），仍然登记一条，方便用户看到来源
+        if (isExcluded(abs)) continue;
         const folder = ensureFolder(abs);
         linkSource(folder, source);
         continue;
@@ -368,9 +416,15 @@ export function collectFolders(): MediaFolderEntry[] {
       for (const item of seriesDirs) {
         const folder = ensureFolder(item.dir);
         linkSource(folder, source);
-        for (const file of item.files) addFile(folder, file);
+        for (const file of item.files) {
+          if (isExcluded(file)) continue;
+          addFile(folder, file);
+        }
+        // 一集都不剩（被隐藏的）→ 不留空壳目录
+        if (folder.files.length === 0) folders.delete(path.resolve(item.dir));
       }
     } else {
+      if (isExcluded(abs)) continue;
       const dir = path.dirname(abs);
       const folder = ensureFolder(dir);
       linkSource(folder, source);

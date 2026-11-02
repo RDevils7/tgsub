@@ -267,6 +267,7 @@ export async function enqueuePlatformLink(link: PlatformLink, mode?: PlaylistMod
     throw new Error("第三方平台下载未启用：请到设置 → 第三方平台打开开关");
   }
 
+  // 链接直接交给 yt-dlp：短链由它自己重定向，本层保持纯函数
   const cookie = getPlatformCookie(link.platform);
   const probe = await probePlatform(link.url, link.platform, cookie);
 
@@ -306,10 +307,10 @@ export async function enqueuePlatformLink(link: PlatformLink, mode?: PlaylistMod
   }
 
   // mode === "one"：合集只取第一条
-  const target = probe.playlist ? probe.playlist.entries[0] : null;
+  const first = probe.playlist ? probe.playlist.entries[0] : null;
   const task = enqueueProbe(
     link.platform,
-    target?.url ?? link.url,
+    first?.url ?? link.url,
     probe.playlist ? { ...probe, playlist: null } : probe,
   );
   return {

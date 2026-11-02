@@ -61,7 +61,7 @@ export interface Download {
   save_name: string | null;
   /** Emby 元信息（剧名/季/集/简介/标签等），下载完成后据此生成 nfo 与封面 */
   emby_json: string | null;
-  /** 任务来源：telegram = 频道媒体，platform = B站/抖音/小红书（yt-dlp） */
+  /** 任务来源：telegram = 频道媒体，platform = B站/小红书/YouTube（yt-dlp） */
   source: string;
   /** 第三方任务的原链接 */
   source_url: string | null;
@@ -159,7 +159,7 @@ export interface AppSettings {
    * 超过后按最后写入时间从旧到新自动清理；0 = 不限制，也不自动清理。
    */
   cache_limit_mb: number;
-  /** 启用第三方平台下载（B站 / 抖音 / 小红书），引擎是 yt-dlp */
+  /** 启用第三方平台下载（B站 / 小红书 / YouTube），引擎是 yt-dlp */
   platform_enabled: boolean;
   /** yt-dlp 可执行文件路径；留空则自动查找（镜像内置 → PATH） */
   ytdlp_path: string;
@@ -171,11 +171,11 @@ export interface AppSettings {
   platform_meta: boolean;
   /**
    * 只给 yt-dlp 用的代理（Telegram 那条 proxy_url 不动）。
-   * 下 B站 / 抖音 / 小红书一般留空；下 YouTube 通常必须填。
+   * 下 B站 / 小红书一般留空；下 YouTube 通常必须填。
    */
   platform_proxy: string;
   /**
-   * 国内平台（B站 / 抖音 / 小红书）是否也走上面那条代理。
+   * 国内平台（B站 / 小红书）是否也走上面那条代理。
    * 默认关闭：B站 CDN 会把海外代理 IP 判成 567，直连最快也最稳；
    * 只有服务器在海外、又要下国内平台时才需要打开。
    */
@@ -186,18 +186,22 @@ export interface AppSettings {
   ytdlp_check_hours: number;
 }
 
-/** 支持的第三方平台 */
-export type PlatformId = "bilibili" | "douyin" | "xiaohongshu" | "youtube";
+/**
+ * 支持的第三方平台
+ *
+ * 抖音曾经在这里，但 yt-dlp 的 DouyinIE 生成不出接口要的 a_bogus 签名，
+ * 无论 Cookie 填得多对都会被风控拦下（1.2.1 实测），所以整块摘掉了。
+ */
+export type PlatformId = "bilibili" | "xiaohongshu" | "youtube";
 
 export const PLATFORM_LABEL: Record<PlatformId, string> = {
   bilibili: "B站",
-  douyin: "抖音",
   xiaohongshu: "小红书",
   youtube: "YouTube",
 };
 
 /** 界面与日志里的统一顺序 */
-export const PLATFORM_IDS: PlatformId[] = ["bilibili", "douyin", "xiaohongshu", "youtube"];
+export const PLATFORM_IDS: PlatformId[] = ["bilibili", "xiaohongshu", "youtube"];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   credential_mode: "builtin",

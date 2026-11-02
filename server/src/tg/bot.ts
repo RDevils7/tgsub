@@ -509,7 +509,7 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 
 <b>直接发链接就能下载</b>
 · Telegram 消息链接：https://t.me/频道名/123
-· B站 / 抖音 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
+· B站 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
   原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条。
 点消息下方的按钮也能直接操作。`;
 
@@ -626,7 +626,7 @@ function directText(r: DirectResult): string {
   return lines.join("\n");
 }
 
-/** 第三方平台（B站 / 抖音 / 小红书 / YouTube）入队回执 */
+/** 第三方平台（B站 / 小红书 / YouTube）入队回执 */
 function platformQueuedText(r: PlatformQueued): string {
   const label = PLATFORM_LABEL[r.platform] ?? r.platform;
   if (!r.ok) return `❌ <b>${esc(label)}</b>\n${esc(r.error ?? "解析失败")}`;
@@ -861,7 +861,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         return {
           text:
             "用法：<code>/dl https://t.me/频道名/123</code>\n" +
-            "也可以直接发链接：Telegram 消息链接、B站 / 抖音 / 小红书 / YouTube 的分享口令都认。",
+            "也可以直接发链接：Telegram 消息链接、B站 / 小红书 / YouTube 的分享口令都认。",
         };
       }
       // 平台链接（含分享口令）走 yt-dlp；其余仍按 Telegram 消息链接处理
@@ -1019,7 +1019,7 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       }
 
       // 第三方平台的分享口令：整段文字丢过来就能认（B站 <https://b23.tv/…>、
-      // 小红书 xhslink.cn、抖音「复制打开抖音…」那一长串都算）
+      // 小红书 xhslink.cn、「复制打开…」那一长串都算）
       const platformLinks = splitPlatformLinks(text);
       if (platformLinks.length) {
         await sendText(currentBot, peer, `🔗 识别到 ${platformLinks.length} 个平台链接，正在解析…`);
@@ -1045,7 +1045,7 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
         peer,
         "发 /help 查看可用命令，或直接发链接给我：\n" +
           "· Telegram 消息链接（https://t.me/频道/123）\n" +
-          "· B站 / 抖音 / 小红书 / YouTube 分享口令（原样粘贴即可）",
+          "· B站 / 小红书 / YouTube 分享口令（原样粘贴即可）",
         mainButtons(),
       );
       return;

@@ -124,7 +124,7 @@ function clock(seconds: number): string {
 /**
  * 简介。
  *
- * 抖音 / 小红书 的分享页很多时候没有正文，这时至少把标题和作者填进去，
+ * 小红书 的分享页很多时候没有正文，这时至少把标题和作者填进去，
  * 免得 Emby 详情页是一片空白。
  */
 function plotOf(meta: EmbyMeta): string {

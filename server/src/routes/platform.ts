@@ -9,7 +9,7 @@ import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
 import { engineState, updateYtdlp } from "../platform/updater";
 
 /**
- * 第三方平台（B站 / 抖音 / 小红书 / YouTube）
+ * 第三方平台（B站 / 小红书 / YouTube）
  *
  *   GET  /status   引擎版本、更新状态、Cookie 状态；设置页与下载页都用
  *   POST /probe    只解析，不下载（用户可能只想看看是什么视频）
@@ -59,7 +59,7 @@ platformRouter.post(
     // 允许直接把 App 的分享口令整段丢进来（界面上是拆好后逐条发的，这里兼容 curl / 脚本）
     const link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
     if (!link) {
-      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
+      res.status(400).json({ error: "这不是 B站 / 小红书 / YouTube 链接" });
       return;
     }
     const probe = await probePlatform(link.url, link.platform, getPlatformCookie(link.platform));
@@ -87,7 +87,7 @@ platformRouter.post(
       link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
     }
     if (!link) {
-      res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
+      res.status(400).json({ error: "这不是 B站 / 小红书 / YouTube 链接" });
       return;
     }
 
