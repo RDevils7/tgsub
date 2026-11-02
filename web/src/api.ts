@@ -336,9 +336,15 @@ export const api = {
   /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录 */
   metadataBrowse: (path?: string) =>
     request<BrowseResult>(`/metadata/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
-  /** 一键生成元数据：单集 NFO + tvshow.nfo + 缺封面时随机截帧 */
-  generateMetadata: (key: string) =>
-    request<{ ok: boolean; nfoCount: number; coverCount: number; files: number }>("/metadata/generate", {
+  /** 一键生成 NFO：单集 NFO + tvshow.nfo（优先用下载记录里的信息补全） */
+  generateNfo: (key: string) =>
+    request<{ ok: boolean; nfoCount: number; files: number }>("/metadata/generate/nfo", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+  /** 一键生成图片：缺封面时用 ffmpeg 随机截帧生成横版/竖版封面 */
+  generateImages: (key: string) =>
+    request<{ ok: boolean; coverCount: number; files: number }>("/metadata/generate/images", {
       method: "POST",
       body: JSON.stringify({ key }),
     }),

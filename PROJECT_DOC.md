@@ -762,7 +762,8 @@ B站 567 两种说法 + 缺登录态提示）、抖音链接不再被识别、�
 | GET | `/api/metadata/excluded`、POST `/excluded/restore` | 被「仅从列表移除」隐藏的条目 / 取消隐藏 |
 | GET | `/api/metadata/browse?path=` | 服务端目录浏览（列子目录与视频文件，供「手动添加」对话框用） |
 | GET | `/api/metadata/detail?key=` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
-| POST | `/api/metadata/generate` | 一键生成：按当前目标写单集 NFO + `tvshow.nfo`，缺封面时随机截帧 |
+| POST | `/api/metadata/generate/nfo` | 一键生成 NFO：按当前目标写单集 NFO + `tvshow.nfo`（tgsub 下载的记录复用 `emby_json` 补全，尽量不空着） |
+| POST | `/api/metadata/generate/images` | 一键生成图片：缺封面时用 ffmpeg 随机截帧生成横版/竖版封面 |
 | PUT | `/api/metadata/meta` | 按表单保存单集 / 剧集 NFO（只替换目标标签） |
 | GET / PUT | `/api/metadata/nfo` | 读取 / 覆盖 NFO 原文（`key` + `kind=episode\|show`） |
 | POST | `/api/metadata/frame` | 用 ffmpeg 截取 `at` 秒那一帧写成指定图片（可带 `crop` 归一化框选） |

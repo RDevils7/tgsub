@@ -139,7 +139,8 @@ export default function Metadata() {
   const [fields, setFields] = useState<NfoFields>(EMPTY_FIELDS);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [generating, setGenerating] = useState(false);
+  const [genNfo, setGenNfo] = useState(false);
+  const [genImages, setGenImages] = useState(false);
 
   const [picker, setPicker] = useState<{ scope: ImageScope; name: ImageName } | null>(null);
   const [imageScope, setImageScope] = useState<ImageScope>("series");
@@ -242,23 +243,40 @@ export default function Metadata() {
   };
 
   /**
-   * 一键生成：整部剧的单集 NFO + tvshow.nfo，缺封面时随机截帧。
-   *
-   * 无论选中的是剧集目录还是某一集，后端都会覆盖整个剧集 ——
-   * 剧集封面只能有一份，单集缩略图则每集都要有。
+   * 一键生成 NFO：整部剧的单集 NFO + tvshow.nfo。
+   * 若是 tgsub 下载的（监控/下载列表里有记录），后端会复用下载时的信息补全，尽量不空着。
    */
-  const generate = async () => {
+  const generateNfo = async () => {
     if (!selected) return;
-    setGenerating(true);
+    setGenNfo(true);
     try {
-      const res = await api.generateMetadata(selected.key);
-      toast.push(`已生成 ${res.nfoCount} 份 NFO、${res.coverCount} 张封面（${res.files} 个视频）`, "success");
+      const res = await api.generateNfo(selected.key);
+      toast.push(`已生成 ${res.nfoCount} 份 NFO（${res.files} 个视频）`, "success");
       await loadDetail(selected.key, true);
       await fetchList(page, true);
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
-      setGenerating(false);
+      setGenNfo(false);
+    }
+  };
+
+  /**
+   * 一键生成图片：缺封面时用 ffmpeg 随机截帧生成横版/竖版封面。
+   * 无论选中的是剧集目录还是某一集，后端都会覆盖整个剧集 —— 单集缩略图每集都要有。
+   */
+  const generateImages = async () => {
+    if (!selected) return;
+    setGenImages(true);
+    try {
+      const res = await api.generateImages(selected.key);
+      toast.push(`已生成 ${res.coverCount} 张封面（${res.files} 个视频）`, "success");
+      await loadDetail(selected.key, true);
+      await fetchList(page, true);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setGenImages(false);
     }
   };
 
@@ -609,12 +627,21 @@ export default function Metadata() {
                 </Button>
                 <Button
                   size="sm"
-                  onClick={() => void generate()}
-                  loading={generating}
-                  title="为整个剧集批量生成 NFO 与封面"
+                  onClick={() => void generateNfo()}
+                  loading={genNfo}
+                  title="为整个剧集批量生成单集 NFO 与 tvshow.nfo（tgsub 下载的会复用下载信息补全）"
                 >
                   <IconSpark className="h-3.5 w-3.5" />
-                  一键生成
+                  生成 NFO
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void generateImages()}
+                  loading={genImages}
+                  title="为整个剧集批量生成封面（缺图时随机截帧）"
+                >
+                  <IconImage className="h-3.5 w-3.5" />
+                  生成图片
                 </Button>
                 {detail.download && (
                   <a

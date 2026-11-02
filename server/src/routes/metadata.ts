@@ -8,7 +8,7 @@ import { env } from "../env";
 import { logger } from "../logger";
 import { Download } from "../types";
 import { sanitizeSegment } from "../utils";
-import { decodeMeta, encodeMeta, EmbyMeta } from "../tg/emby";
+import { decodeMeta, encodeMeta, EmbyMeta, buildEpisodeNfo, buildShowNfo } from "../tg/emby";
 import { queueEmbyUpdate } from "../tg/embyapi";
 import { listCovers } from "../tg/covers";
 import { requestCacheTrim } from "../cache";
@@ -965,97 +965,178 @@ metadataRouter.put(
   }),
 );
 
-/* ------------------------------ 一键生成 ------------------------------ */
+/* ------------------------------ 一键生成（拆成 NFO 与图片） ------------------------------ */
 
 /**
- * 一键为选中的文件 / 目录生成元数据：
- *  - 每个视频写一份单集 NFO（剧名、季、集从文件名解析）
- *  - 目录里补一份 tvshow.nfo
- *  - 没有封面时用 ffmpeg 随机截帧生成横版/竖版封面
+ * 把目标（文件夹或单个视频）解析成「它所在的整个剧集」的有序视频列表。
  *
- * 选中单个视频时同样覆盖它所在的整个剧集 —— 一键生成是「整部剧」级别的操作，
- * 不该只处理当前这一集，否则剧集封面永远只有一集有。
+ * 一键生成是「整部剧」级别的操作，不该只处理当前这一集 —— 否则剧集封面永远
+ * 只有一集有。第一集（按集号排序后）负责产出剧集目录的三张封面。
+ */
+function resolveSeriesFiles(target: Target): MediaFileEntry[] {
+  const folder = collectFolders().find((f) => f.dir === target.dir);
+  const base: MediaFileEntry[] =
+    target.kind === "file"
+      ? folder?.files ?? [
+          {
+            path: target.path,
+            name: path.basename(target.path),
+            dir: target.dir,
+            base: target.base ?? path.basename(target.path, path.extname(target.path)),
+            size: 0,
+            series: "",
+            season: null,
+            episode: null,
+            downloadId: target.download?.id ?? null,
+            channelTitle: target.download?.channel_title ?? null,
+            messageId: target.download?.message_id ?? null,
+            source: target.download ? "download" : "manual",
+          },
+        ]
+      : folder?.files ?? [];
+  return [...base].sort((a, b) => {
+    const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
+    const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
+    if (ea !== eb) return ea - eb;
+    return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
+  });
+}
+
+/**
+ * 挑一条最「全」的 emby 元信息给 tvshow.nfo 用：优先简介最长的，再按集号靠前的。
+ * 短剧每一集的简介往往是同一段剧集介绍，取最长的能尽量填满 tvshow 的 plot。
+ */
+function pickShowMeta(metas: EmbyMeta[]): EmbyMeta | null {
+  if (metas.length === 0) return null;
+  return [...metas].sort((a, b) => {
+    const pa = (a.plot || "").length;
+    const pb = (b.plot || "").length;
+    if (pa !== pb) return pb - pa;
+    const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
+    const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
+    return ea - eb;
+  })[0];
+}
+
+/**
+ * 一键生成 NFO：
+ *  - 每个视频写一份单集 NFO
+ *  - 目录里补一份 tvshow.nfo（仅当不存在，保护手工编辑）
+ *
+ * 关键：如果是 tgsub 下载的（监控列表 / 下载列表里有它的记录，带 emby_json），
+ * 直接复用下载时同款的 buildEpisodeNfo / buildShowNfo 从下载记录重建 ——
+ * 这样简介、播放/点赞/时长、分区（genre）、制片厂、原链接等都会带进 NFO，
+ * 尽量不空着，且与下载时生成的 NFO 完全一致。
+ * 表单/原文编辑会回写 emby_json，所以重建不会丢掉用户改过的内容。
+ * 没有下载记录（手动来源）时，回退到从文件名推导。
  */
 metadataRouter.post(
-  "/generate",
+  "/generate/nfo",
   asyncHandler(async (req, res) => {
     const key = String(req.body?.key ?? "");
     assert(key, 400, "缺少路径标识");
     const target = resolveTarget(key);
 
-    // 目标所在剧集目录下的全部视频
-    const folder = collectFolders().find((f) => f.dir === target.dir);
-    const files: MediaFileEntry[] =
-      target.kind === "file"
-        ? folder?.files ?? [
-            {
-              path: target.path,
-              name: path.basename(target.path),
-              dir: target.dir,
-              base: target.base ?? path.basename(target.path, path.extname(target.path)),
-              size: 0,
-              series: "",
-              season: null,
-              episode: null,
-              downloadId: target.download?.id ?? null,
-              channelTitle: target.download?.channel_title ?? null,
-              messageId: target.download?.message_id ?? null,
-              source: target.download ? "download" : "manual",
-            },
-          ]
-        : folder?.files ?? [];
-
+    const files = resolveSeriesFiles(target);
     assert(files.length > 0, 404, "这个目录里没有找到视频文件");
-
-    // 按集号排序，第一集 = 剧集封面的来源
-    const ordered = [...files].sort((a, b) => {
-      const ea = a.episode ?? Number.MAX_SAFE_INTEGER;
-      const eb = b.episode ?? Number.MAX_SAFE_INTEGER;
-      if (ea !== eb) return ea - eb;
-      return a.name.localeCompare(b.name, "zh-CN", { numeric: true });
-    });
-    const firstPath = ordered[0].path;
 
     const dirName = path.basename(target.dir);
     let nfoCount = 0;
-    let coverCount = 0;
 
-    for (const file of ordered) {
+    for (const file of files) {
       // 项目下载的文件才有下载记录，手动添加的文件没有
       const row = file.downloadId ? stmtGet.get(file.downloadId) : undefined;
-      const info = deriveEpisodeInfo(file.name, dirName);
-      const fields = fieldsFromFile({
-        kind: "file",
-        path: file.path,
-        dir: file.dir,
-        base: file.base,
-        video: file.path,
-        download: row ?? null,
-      });
-      fields.showtitle = info.series;
-      fields.originaltitle = info.series;
-      fields.title =
-        info.episode !== null
-          ? `${info.series} ${info.season !== null ? `S${String(info.season).padStart(2, "0")}` : ""}E${String(info.episode).padStart(2, "0")}`.trim()
-          : info.series;
-      fields.season = info.season !== null ? String(info.season) : "";
-      fields.episode = info.episode !== null ? String(info.episode) : "";
-      if (!fields.plot) fields.plot = fields.outline = "";
-
       const nfoFile = path.join(file.dir, `${sanitizeSegment(file.base, 120)}.nfo`);
-      const existing = await readText(nfoFile);
-      const parsed = existing ? parseNfo(existing) : null;
-      const next = parsed ? applyFields(parsed, fields) : buildNfo("episode", fields);
+
+      const meta = row ? decodeMeta(row.emby_json) : null;
+      let next: string;
+      if (meta) {
+        // 下载记录里的富信息直接重建（含 stats / categories / link / uniqueid）
+        next = buildEpisodeNfo(meta);
+      } else {
+        // 手动来源：从文件名推导，并尽量回写 emby_json 以便日后重建
+        const info = deriveEpisodeInfo(file.name, dirName);
+        const fields = fieldsFromFile({
+          kind: "file",
+          path: file.path,
+          dir: file.dir,
+          base: file.base,
+          video: file.path,
+          download: row ?? null,
+        });
+        fields.showtitle = info.series;
+        fields.originaltitle = info.series;
+        fields.title =
+          info.episode !== null
+            ? `${info.series} ${info.season !== null ? `S${String(info.season).padStart(2, "0")}` : ""}E${String(info.episode).padStart(2, "0")}`.trim()
+            : info.series;
+        fields.season = info.season !== null ? String(info.season) : "";
+        fields.episode = info.episode !== null ? String(info.episode) : "";
+        if (!fields.plot) fields.plot = fields.outline = "";
+
+        const existing = await readText(nfoFile);
+        const parsed = existing ? parseNfo(existing) : null;
+        next = parsed ? applyFields(parsed, fields) : buildNfo("episode", fields);
+        if (row) syncEmbyJson(row, fields);
+      }
+
       const problem = validateNfo(next, "episode");
       if (!problem) {
         await writeTextAtomic(nfoFile, next);
         nfoCount += 1;
       }
+    }
 
-      if (row) syncEmbyJson(row, fields);
+    // 剧集信息（tvshow.nfo）：仅当不存在时生成，避免覆盖手工编辑
+    const showFile = path.join(target.dir, "tvshow.nfo");
+    if (!fs.existsSync(showFile)) {
+      const metas = files
+        .map((f) => (f.downloadId ? stmtGet.get(f.downloadId) : undefined))
+        .filter((r): r is Download => Boolean(r))
+        .map((r) => decodeMeta(r.emby_json))
+        .filter((m): m is EmbyMeta => Boolean(m));
+      const showMeta = pickShowMeta(metas);
+      const next = showMeta
+        ? buildShowNfo(showMeta)
+        : buildNfo("show", {
+            ...fieldsFromNfo(null),
+            title: dirName,
+            originaltitle: dirName,
+            showtitle: dirName,
+            year: String(new Date().getFullYear()),
+            premiered: isoDate(Date.now()),
+          });
+      if (!validateNfo(next, "show")) await writeTextAtomic(showFile, next);
+    }
 
-      // 每集都要有自己的缩略图；剧集目录的三张封面只由第一集生成，
-      // 其余集跳过，避免多集互相覆盖导致 poster 一直在变
+    logger.info({ path: target.path, nfoCount, files: files.length }, "已生成 NFO");
+    // 刚重写了 nfo，让 Emby 重新认一遍这个剧集目录
+    queueEmbyUpdate(target.dir, "Modified", false);
+    res.json({ ok: true, nfoCount, files: files.length });
+  }),
+);
+
+/**
+ * 一键生成图片：没有封面时用 ffmpeg 随机截帧生成横版/竖版封面。
+ *
+ * 每集都要有自己的缩略图；剧集目录的三张封面（poster / landscape / fanart）
+ * 只由第一集生成，其余集跳过，避免多集互相覆盖导致 poster 一直在变。
+ */
+metadataRouter.post(
+  "/generate/images",
+  asyncHandler(async (req, res) => {
+    const key = String(req.body?.key ?? "");
+    assert(key, 400, "缺少路径标识");
+    const target = resolveTarget(key);
+
+    const files = resolveSeriesFiles(target);
+    assert(files.length > 0, 404, "这个目录里没有找到视频文件");
+
+    const folder = collectFolders().find((f) => f.dir === target.dir);
+    const firstPath = files[0].path;
+    let coverCount = 0;
+
+    for (const file of files) {
       const made = await autoCoversFromVideo(file.path, file.dir, {
         base: file.base,
         series: file.path === firstPath ? "force" : "skip",
@@ -1065,27 +1146,9 @@ metadataRouter.post(
       coverCount += made.length;
     }
 
-    // 剧集信息（tvshow.nfo）：没有就按目录名生成一份
-    const showFile = path.join(target.dir, "tvshow.nfo");
-    if (!fs.existsSync(showFile)) {
-      const first = files[0];
-      const info = deriveEpisodeInfo(first.name, dirName);
-      const fields = {
-        ...fieldsFromNfo(null),
-        title: info.series,
-        originaltitle: info.series,
-        showtitle: info.series,
-        year: String(new Date().getFullYear()),
-        premiered: isoDate(Date.now()),
-      };
-      const next = buildNfo("show", fields);
-      if (!validateNfo(next, "show")) await writeTextAtomic(showFile, next);
-    }
-
-    logger.info({ path: target.path, nfoCount, coverCount }, "已生成元数据");
-    // 刚重写了 nfo 与封面，让 Emby 重新认一遍这个剧集目录
+    logger.info({ path: target.path, coverCount, files: files.length }, "已生成封面图");
     queueEmbyUpdate(target.dir, "Modified", false);
-    res.json({ ok: true, nfoCount, coverCount, files: files.length });
+    res.json({ ok: true, coverCount, files: files.length });
   }),
 );
 
