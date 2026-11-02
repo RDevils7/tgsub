@@ -365,3 +365,11 @@ export const IconEyeOff = (p: Props) => (
     <path d="M10 10a2.8 2.8 0 0 0 3.9 3.9" />
   </Svg>
 );
+
+export const IconHelp = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M9.4 9.3a2.7 2.7 0 1 1 3.6 2.5c-.7.3-1 .9-1 1.6v.4" />
+    <path d="M12 17.1v.1" />
+  </Svg>
+);

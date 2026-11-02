@@ -26,17 +26,35 @@ const PLATFORM_LABEL: Record<string, string> = {
 
 const EXAMPLES = [
   "https://t.me/频道用户名/12345",
-  "https://www.bilibili.com/video/BV1xx411c7mD",
-  "https://v.douyin.com/xxxxxxx/",
-  "https://www.xiaohongshu.com/explore/64f0c2…",
+  "https://b23.tv/29inbIp",
+  "https://v.douyin.com/dVS6cveLVCw/",
+  "https://xhslink.cn/o/8c7hpV57rvQ",
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
 ];
 
 /** 只认这几个平台的域名，避免把任意链接都当第三方任务提交 */
 const PLATFORM_HOST_RE =
-  /(?:^|\.)(?:bilibili\.com|b23\.tv|douyin\.com|iesdouyin\.com|xiaohongshu\.com|xhslink\.com|youtube\.com|youtu\.be|youtube-nocookie\.com)$/i;
+  /(?:^|\.)(?:bilibili\.com|b23\.tv|bili2233\.cn|douyin\.com|iesdouyin\.com|xiaohongshu\.com|xhslink\.com|xhslink\.cn|youtube\.com|youtu\.be|youtube-nocookie\.com)$/i;
 
-/** 从粘贴的内容里拆出所有链接：一行一个、空格分隔、混合文字都能认 */
+/**
+ * 从分享口令里捞链接。
+ *
+ * App 里「复制链接」出来的是整段文字，链接被尖括号包着、紧贴中文，
+ * 例如「【标题-哔哩哔哩】 <https://b23.tv/29inbIp>」，按空白切词会把
+ * 尖括号一起带进来。这里改成按字符集扫，规则和后端 detect.ts 保持一致。
+ */
+const URL_RE =
+  /(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:\/[^\s<>"'“”‘’（）【】《》，。；：、！？…]*)?/gi;
+
+function cleanUrl(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^[<（(“"‘【《]+/, "")
+    .replace(/[>）)】》”"’》。，,；;、！!？?…]+$/g, "")
+    .replace(/[.:]+$/, "");
+}
+
+/** 从粘贴的内容里拆出所有链接：整段分享口令、一行一个、混合文字都能认 */
 function splitLinks(raw: string): Array<{ link: string; kind: LinkKind }> {
   const out: Array<{ link: string; kind: LinkKind }> = [];
   const seen = new Set<string>();
@@ -46,21 +64,18 @@ function splitLinks(raw: string): Array<{ link: string; kind: LinkKind }> {
     out.push({ link, kind });
   };
 
-  // Telegram：允许不带协议
-  const tgMatches = raw.match(/(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\/\S+/gi) ?? [];
-  for (const hit of tgMatches) push(hit.replace(/[，,。；;、）)】]+$/, ""), "telegram");
-
-  // 第三方平台：按空白切词，再看域名
-  for (const token of raw.split(/[\s\r\n]+/)) {
-    const cleaned = token.trim().replace(/[，,。；;、）)】》"']+$/g, "");
-    if (!cleaned || /(?:^|\/\/)(?:www\.)?(?:t|telegram)\.me\//i.test(cleaned)) continue;
+  for (const hit of raw.match(URL_RE) ?? []) {
+    const cleaned = cleanUrl(hit);
+    if (!cleaned) continue;
     const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+    let url: URL;
     try {
-      const url = new URL(withScheme);
-      if (PLATFORM_HOST_RE.test(url.hostname)) push(url.toString(), "platform");
+      url = new URL(withScheme);
     } catch {
-      /* 不是链接，忽略 */
+      continue; // 不是链接，忽略
     }
+    if (/^(?:www\.)?(?:t|telegram)\.me$/i.test(url.hostname)) push(withScheme, "telegram");
+    else if (PLATFORM_HOST_RE.test(url.hostname)) push(url.toString(), "platform");
   }
   return out;
 }
@@ -141,14 +156,14 @@ export default function Manual() {
             </div>
           </div>
           <Badge className="!bg-white/[0.04] !text-slate-400 !border-white/[0.08]">
-            <IconVideo className="h-3 w-3" /> 支持相册整组 · 三平台链接
+            <IconVideo className="h-3 w-3" /> 相册整组 · 四平台分享口令
           </Badge>
         </div>
 
         <div className="mt-3">
           <textarea
             className="field min-h-[104px] resize-y font-mono text-[12px] leading-relaxed"
-            placeholder={"每行一个链接，例如：\nhttps://t.me/asc2256/10500"}
+            placeholder={"每行一个链接，或直接粘整段分享口令，例如：\n【标题-哔哩哔哩】 <https://b23.tv/29inbIp>"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -199,8 +214,9 @@ export default function Manual() {
             <ul className="space-y-0.5 break-words text-[10.5px] leading-relaxed text-slate-400">
               <li>· 公开频道用 https://t.me/用户名/消息ID</li>
               <li>· 私有频道用 https://t.me/c/频道ID/消息ID（手机端「复制链接」就是这个格式）</li>
-              <li>· B站 / 抖音 / 小红书 / YouTube 直接粘视频链接，短链（b23.tv、v.douyin.com、xhslink.com、youtu.be）也能识别</li>
-              <li>· 三个平台的 Cookie 在设置 → 第三方平台里填，缺了会影响清晰度和成功率</li>
+              <li>· B站 / 抖音 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、v.douyin.com、xhslink.cn、youtu.be）</li>
+              <li>· 也可以把 App 里「复制链接」的整段分享口令原样粘进来，说明文字会自动忽略</li>
+              <li>· 各平台的 Cookie 在设置 → 第三方平台里填，缺了会影响清晰度和成功率</li>
             </ul>
           </div>
         </div>

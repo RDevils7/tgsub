@@ -554,7 +554,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | 代理地址 | 空 | `socks5://host:port`（也可 socks4 / socks5h / http / https），留空直连；Telegram 只支持 SOCKS |
 | ffmpeg 路径 | 空 | 截帧用；留空自动查找内置二进制或系统 PATH。下方实时显示实际生效的路径、来源与版本 |
 | 机器人 | 关 | Bot Token、允许用户、扫描通知 |
-| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存 |
+| 第三方平台 | 关 | B站 / 抖音 / 小红书 / YouTube 下载开关；清晰度（默认「最高（原画）」）、存放子目录、是否写 nfo；四个平台的 Cookie 加密保存（平台名后的 `?` 悬停看分步取法） |
 | 第三方平台代理 | 空 | 只给 yt-dlp 用（`--proxy`），与上面 Telegram 的代理互相独立；YouTube 与检查更新必须填 |
 | yt-dlp 自动更新 | 开 | 到点去 GitHub 看新版，有就下到 `data/bin` 并切过去（先 `--version` 校验，失败回滚） |
 | yt-dlp 检查间隔 | 24 | 单位小时，1–720 |
@@ -575,7 +575,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 
 | 文件 | 职责 |
 | --- | --- |
-| `server/src/platform/detect.ts` | 纯函数：域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore、YouTube `v`/`shorts`/`embed`/`youtu.be`）、批量拆链接、去重键 |
+| `server/src/platform/detect.ts` | 纯函数：`extractUrls`（从 App 分享口令里捞链接，兼容 `<https://…>`、紧贴中文、裸域名）→ 域名识别、ID 提取（BV / av / ep、抖音 video/note、小红书 explore、YouTube `v`/`shorts`/`embed`/`youtu.be`）、批量拆链接、去重键 |
 | `server/src/platform/ytdlp.ts` | 定位二进制（手填 → `data/bin` → 镜像内置 → PATH）、`--version` 探测、Cookie → Netscape、`probePlatform`（`--dump-single-json`）、`downloadPlatform`（spawn + 进度模板 + `--print-to-file after_move:filepath`）、代理参数、YouTube JS runtime 判断、错误中文化 |
 | `server/src/platform/cookie.ts` | 纯函数：`parseCookiePairs` / `summarizeCookie` / `describeCookie` / `humanAge`，给「状态可见」用 |
 | `server/src/platform/updater.ts` | GitHub Release 查询、按平台选资产、流式下载、`--version` 校验后原子替换、`data/bin` 优先、定时检查 |
@@ -595,6 +595,13 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
   接口只回「N 项，首项 <name>」。传空字符串 = 清除，传掩码 = 不变。
 - **扩展名**：由 yt-dlp 决定（mkv/webm 都可能），下载完成后回填 `save_name` / `file_name`。
 - **目录**：`<platform_dir>/<平台>/<作者>/<标题> [ID]/`，每条视频一个目录，避免 `tvshow.nfo` 互相覆盖。
+- **分享口令**：不能用「按空白切词」——App 复制出来的是整段文案，链接常被 `<>` 包着、紧贴中文。
+  `URL_RE` 按「域名 + 路径允许字符集」扫，中文天然成为边界，末尾标点由 `cleanUrlText` 剥掉；
+  小红书短链同时支持 `xhslink.com` 与 `xhslink.cn`（App 现在默认给后者）。
+- **入口一致**：手动下载页（前端 `splitLinks`，同一套正则）、`POST /api/platform/task|probe`、
+  机器人私聊（`splitPlatformLinks` + `enqueuePlatformLinks`，一次最多 5 条）三条路都吃整段口令。
+- **默认画质**：`platform_quality` 默认 `best`（`bv*+ba/b`，视频音频分离后合并）。
+  老库里若存过旧默认值 `1080`，启动时由 `migration_platform_quality_v106` 迁成 `best`，用户自选的 720/480 不动。
 - **代理分离**：`platform_proxy` 只传给 yt-dlp 子进程（`--proxy`），不动 Telegram 的 `proxy_url`。
   国内平台直连最快，YouTube 与「检查更新」必须走它；`parseProxy` 解析失败时**不加参数**，避免脏值把下载搞挂。
 - **YouTube 的 JS 运行时**：`--js-runtimes node` 是 yt-dlp 2025.10.22 才有的参数，老版本传了会直接报未知参数，
@@ -617,8 +624,9 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 用 node 的 fetch 下载（不额外装 curl），失败即构建失败；`--build-arg INSTALL_YTDLP=0` 可跳过。
 镜像里的那份是「兜底」，实际生效的可能是 `data/bin` 里自动更新下来的那份。
 
-**自检**：`platformChecks()` 20 项（链接识别含 YouTube 四种形态、冒充域名、中文标点、去重、Cookie 格式与体检、
-画质映射、错误文案含 YouTube 专属两类、版本比较、资产名、代理参数），全部是纯函数，不依赖网络与二进制。
+**自检**：`platformChecks()` 21 项（三平台真实分享口令、链接识别含 YouTube 四种形态、冒充域名、中文标点、
+去重、Cookie 格式与体检、画质映射、错误文案含 YouTube 专属两类、版本比较、资产名、代理参数），
+全部是纯函数，不依赖网络与二进制。
 
 ---
 
@@ -637,10 +645,13 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | `/scan`、`/scan 美人局` | 扫描全部频道，或只扫指定频道（也可跟频道 ID） |
 | `/channels`、`/addch @xxx`、`/rmch 3` | 查看、添加、删除频道 |
 | `/subs`、`/sub 关键词1,关键词2`、`/rmsub 4` | 查看、新建、删除订阅 |
-| `/dl https://t.me/频道名/123` | 按链接直接下载这条消息（直接发链接也可以） |
+| `/dl https://t.me/频道名/123` | 按链接直接下载这条消息（直接发链接也可以；`/dl` 同样接受平台口令） |
 | `/tasks`、`/queue`、`/retry [all]` | 最近任务、下载队列、重试失败任务 |
 | `/pause`、`/resume` | 暂停 / 恢复自动扫描 |
 | `/stats`、`/help` | 累计统计、命令说明 |
+
+除了 Telegram 消息链接，**把 App 里「复制链接」的整段分享口令直接发过来也会开始下载**（B站 `<>` 包裹、
+抖音长文案、小红书 `xhslink.cn` 都认），一次最多 5 条；全部失败且原因相同时只回一条，避免刷屏。
 
 安全设计：白名单为空时机器人对所有人只回复「你的 ID 是多少」，不执行任何操作；指令仅在私聊生效，被拉进群也不响应。
 

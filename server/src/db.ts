@@ -189,6 +189,22 @@ migrateOnce("migration_builtin_tdl_v101", () => {
 });
 
 /**
+ * 1.0.6：第三方平台默认画质从 1080 改成「最高」。
+ *
+ * 只改 DEFAULT_SETTINGS 对老库没用 —— 那台机器上只要点过一次「保存」，
+ * `platform_quality` 就被写成了当时的默认值 "1080"，升级后仍然拿不到原画。
+ * 所以这里把「等于旧默认值」的存量改成 best；用户主动选过 720/480 的不动。
+ */
+migrateOnce("migration_platform_quality_v106", () => {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'platform_quality'").get() as
+    | { value: string }
+    | undefined;
+  if (!row || row.value !== "1080") return;
+  db.prepare("UPDATE settings SET value = 'best' WHERE key = 'platform_quality'").run();
+  logger.info("第三方平台默认画质已从 1080 改为「最高」");
+});
+
+/**
  * 1.0.2：封面与每集缩略图改为「下载完成后从视频随机截帧」，不再下载消息里的图片。
  *
  * 老库里可能还躺着 .art-* 的封面图任务（排队中/失败重试中等），升级后要一并作废，

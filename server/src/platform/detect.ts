@@ -19,9 +19,10 @@ export interface PlatformLink {
 }
 
 const HOSTS: Array<{ platform: PlatformId; host: string[] }> = [
-  { platform: "bilibili", host: ["bilibili.com", "b23.tv"] },
+  { platform: "bilibili", host: ["bilibili.com", "b23.tv", "bili2233.cn"] },
   { platform: "douyin", host: ["douyin.com", "iesdouyin.com"] },
-  { platform: "xiaohongshu", host: ["xiaohongshu.com", "xhslink.com"] },
+  // 小红书有 .com 与 .cn 两套短链域名，App 现在默认给的是 xhslink.cn
+  { platform: "xiaohongshu", host: ["xiaohongshu.com", "xhslink.com", "xhslink.cn"] },
   { platform: "youtube", host: ["youtube.com", "youtu.be", "youtube-nocookie.com"] },
 ];
 
@@ -85,12 +86,12 @@ export function extractPlatformId(platform: PlatformId, url: URL): string | null
 }
 
 /**
- * 解析一条链接。不是这三个平台就返回 null。
+ * 解析一条链接。不是这几个平台就返回 null。
  *
- * 顺带去掉末尾的中文标点：从微信/聊天记录里复制常常带着「，」「）」。
+ * 顺带剥掉分享口令带上的包装：`<https://…>`、末尾的「，」「）」等。
  */
 export function parsePlatformLink(raw: string): PlatformLink | null {
-  const cleaned = raw.trim().replace(/[，,。；;、）)】》"']+$/g, "");
+  const cleaned = cleanUrlText(raw);
   const url = toUrl(cleaned);
   if (!url) return null;
   const platform = detectPlatform(cleaned);
@@ -101,16 +102,56 @@ export function parsePlatformLink(raw: string): PlatformLink | null {
   return { platform, url: url.toString(), id, key };
 }
 
-/** 从一大段文字里挑出所有三平台链接（一行一个、空格分隔、混着说明文字都能认） */
+/** 从一大段文字里挑出所有平台链接（分享口令、一行一个、混着说明文字都能认） */
 export function splitPlatformLinks(raw: string): PlatformLink[] {
-  const tokens = raw.split(/[\s\r\n]+/).filter(Boolean);
   const seen = new Set<string>();
   const out: PlatformLink[] = [];
-  for (const token of tokens) {
-    const parsed = parsePlatformLink(token);
+  for (const candidate of extractUrls(raw)) {
+    const parsed = parsePlatformLink(candidate);
     if (!parsed || seen.has(parsed.key)) continue;
     seen.add(parsed.key);
     out.push(parsed);
+  }
+  return out;
+}
+
+/**
+ * 从任意文字里捞链接用的正则。
+ *
+ * 平台的「分享口令」长这样（都是 App 里点「复制链接」原样出来的）：
+ *
+ *   小红书：举手大喊：姐姐看我！… <https://xhslink.cn/o/8c7hpV57rvQ> 复制文本后进入【小红书】
+ *   抖音：  4.87 复制打开抖音，看看【蓝心说影的作品】…！ https://v.douyin.com/dVS6cveLVCw/ :1pm j@C.UL
+ *   B站：   【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】 <https://b23.tv/29inbIp>
+ *
+ * 共同点：链接被尖括号包着、紧贴中文没有空格、前后一堆无关文字。
+ * 所以不能按空白切词 —— 按「域名 + 路径允许的字符集」扫，中文天然成为边界。
+ */
+const URL_RE =
+  /(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:\/[^\s<>"'“”‘’（）【】《》，。；：、！!？?…]*)?/gi;
+
+/** 去掉分享口令里包在链接外面/粘在尾部的东西：尖括号、中文标点、句末英文标点 */
+export function cleanUrlText(raw: string): string {
+  return String(raw ?? "")
+    .trim()
+    .replace(/^[<（(“"‘【《]+/, "")
+    .replace(/[>）)”"’】》。，,；;、！!？?…]+$/g, "")
+    .replace(/[.:]+$/, "");
+}
+
+/**
+ * 从一段文字里取出所有链接（含没有 http:// 前缀的裸域名）。
+ *
+ * 顺序按出现顺序、去重；不做平台判断 —— 那是 parsePlatformLink 的事。
+ */
+export function extractUrls(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const hit of String(text ?? "").match(URL_RE) ?? []) {
+    const cleaned = cleanUrlText(hit);
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    out.push(cleaned);
   }
   return out;
 }

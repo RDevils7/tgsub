@@ -163,7 +163,7 @@ export interface AppSettings {
   platform_enabled: boolean;
   /** yt-dlp 可执行文件路径；留空则自动查找（镜像内置 → PATH） */
   ytdlp_path: string;
-  /** 清晰度上限：best / 1080 / 720 / 480 */
+  /** 清晰度上限：best=最高（默认）/ 1080 / 720 / 480 */
   platform_quality: string;
   /** 第三方视频存到下载目录下的哪个子目录，留空表示直接放根目录 */
   platform_dir: string;
@@ -221,7 +221,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cache_limit_mb: 512,
   platform_enabled: false,
   ytdlp_path: "",
-  platform_quality: "1080",
+  platform_quality: "best",
   platform_dir: "第三方",
   platform_meta: true,
   platform_proxy: "",

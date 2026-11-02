@@ -3,7 +3,7 @@ import { getPlatformCookieHint, getPlatformCookie, getSettings } from "../db";
 import { asyncHandler } from "../lib/http";
 import { logger } from "../logger";
 import { PLATFORM_IDS, PLATFORM_LABEL } from "../types";
-import { parsePlatformLink } from "../platform/detect";
+import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
 import { enqueuePlatformLink, platformRootDir } from "../platform/jobs";
 import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
 import { engineState, updateYtdlp } from "../platform/updater";
@@ -55,7 +55,8 @@ platformRouter.post(
   "/probe",
   asyncHandler(async (req, res) => {
     const url = String((req.body ?? {}).url ?? "").trim();
-    const link = parsePlatformLink(url);
+    // 允许直接把 App 的分享口令整段丢进来（界面上是拆好后逐条发的，这里兼容 curl / 脚本）
+    const link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
     if (!link) {
       res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
       return;
@@ -69,7 +70,7 @@ platformRouter.post(
   "/task",
   asyncHandler(async (req, res) => {
     const url = String((req.body ?? {}).url ?? "").trim();
-    const link = parsePlatformLink(url);
+    const link = parsePlatformLink(url) ?? splitPlatformLinks(url)[0] ?? null;
     if (!link) {
       res.status(400).json({ error: "这不是 B站 / 抖音 / 小红书 / YouTube 链接" });
       return;

@@ -79,6 +79,17 @@ async function main(): Promise<void> {
   const unknown = await run("nope");
   check("未知命令回到帮助", unknown.text.includes("未知命令"));
 
+  // /dl 也吃平台分享口令：未启用时应直接说明「去设置里打开开关」，而不是
+  // 报「认不出链接」或者去连 Telegram（这条不会触网，可以安全地放进自检）
+  const share = await run("dl", [
+    "【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】",
+    "<https://b23.tv/29inbIp>",
+  ]);
+  check("/dl 识别平台分享口令", share.text.includes("第三方平台下载未启用"), share.text);
+
+  const dlNoArg = await run("dl");
+  check("/dl 无参数给出用法", dlNoArg.text.includes("用法"));
+
   console.log(`\n通过 ${passed} 项，失败 ${failed} 项\n`);
 
   // 先关掉数据库句柄，否则 Windows 上删不掉临时目录

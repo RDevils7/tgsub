@@ -1219,6 +1219,41 @@ async function platformChecks(): Promise<void> {
     assert.equal(list.length, 1);
   });
 
+  check("App 分享口令整段粘贴也能认出链接", () => {
+    // 小红书：链接被尖括号包着，前后都是文案；短链域名现在是 xhslink.cn
+    const xhs =
+      "举手大喊：姐姐看我！ 颜值祸国殃民就算了，身材还这... <https://xhslink.cn/o/8c7hpV57rvQ> 复制文本后进入【小红书】，直接查看笔记。";
+    const a = splitPlatformLinks(xhs);
+    assert.equal(a.length, 1);
+    assert.equal(a[0].platform, "xiaohongshu");
+    assert.equal(a[0].url, "https://xhslink.cn/o/8c7hpV57rvQ", "尖括号不能带进 URL");
+
+    // 抖音：口令中间夹着「复制打开抖音…」和一串噪声字符
+    const douyin =
+      "4.87 复制打开抖音，看看【蓝心说影的作品】博物馆双子星联手暴打娇滴滴的马太太！ # 剪映 #... https://v.douyin.com/dVS6cveLVCw/ :1pm j@C.UL KWM:/ 09/14";
+    const b = splitPlatformLinks(douyin);
+    assert.equal(b.length, 1);
+    assert.equal(b[0].platform, "douyin");
+    assert.equal(b[0].url, "https://v.douyin.com/dVS6cveLVCw/");
+
+    // B站：【标题-哔哩哔哩】后面跟 <短链>
+    const bili = "【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】 <https://b23.tv/29inbIp>";
+    const c = splitPlatformLinks(bili);
+    assert.equal(c.length, 1);
+    assert.equal(c[0].platform, "bilibili");
+    assert.equal(c[0].url, "https://b23.tv/29inbIp");
+
+    // 三条口令一起粘：一次全认出来
+    const all = splitPlatformLinks([xhs, douyin, bili].join("\n"));
+    assert.deepEqual(
+      all.map((item) => item.platform),
+      ["xiaohongshu", "douyin", "bilibili"],
+    );
+
+    // 版本号、普通中文不该被当成链接
+    assert.equal(splitPlatformLinks("版本 1.0.6 已发布，看看说明").length, 0);
+  });
+
   check("Cookie 转 Netscape 格式", () => {
     const text = cookieToNetscape("SESSDATA=abc%2C123; bili_jct=xyz; 空项; =bad", "bilibili");
     const lines = text.split("\n").filter((line) => line && !line.startsWith("#"));

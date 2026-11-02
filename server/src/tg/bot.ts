@@ -8,7 +8,7 @@ import type { EntityLike } from "telegram/define";
 
 import { db, getBotToken, getSetting, getSettings, setSetting, updateSettings } from "../db";
 import { logger } from "../logger";
-import { Channel, Subscription } from "../types";
+import { Channel, PLATFORM_LABEL, Subscription } from "../types";
 import { deriveName } from "../utils";
 import { currentProxy, getAppCredentials, getAuthState, resolveChannel } from "./client";
 import { getSchedulerState, isScanning, scanAll, scanChannel, type ScanResult } from "./scanner";
@@ -16,6 +16,8 @@ import { downloadFromLink, extractTelegramLinks, type DirectResult } from "./dir
 import { downloader } from "./downloader";
 import { setNotifySender } from "./notify";
 import { invalidateMatcherCache } from "../match";
+import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
+import { enqueuePlatformLinks, type PlatformQueued } from "../platform/jobs";
 
 /* ------------------------------------------------------------------ */
 /* 生命周期                                                            */
@@ -505,7 +507,10 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 /retry 重试全部失败 · /retry 123 重试单条
 /pause · /resume 暂停或恢复自动扫描
 
-直接把 Telegram 消息链接发给我，会自动开始下载。
+<b>直接发链接就能下载</b>
+· Telegram 消息链接：https://t.me/频道名/123
+· B站 / 抖音 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
+  原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条。
 点消息下方的按钮也能直接操作。`;
 
 function mainButtons(): Api.TypeKeyboardButton[][] {
@@ -619,6 +624,28 @@ function directText(r: DirectResult): string {
   if (r.queued === 0 && r.existing === 0 && r.skipped > 0) lines.push("可在设置里调整最小/最大文件大小");
   if (r.autoAdded) lines.push("ℹ️ 该频道已加入频道列表但保持停用，不参与定时扫描");
   return lines.join("\n");
+}
+
+/** 第三方平台（B站 / 抖音 / 小红书 / YouTube）入队回执 */
+function platformQueuedText(r: PlatformQueued): string {
+  const label = PLATFORM_LABEL[r.platform] ?? r.platform;
+  if (!r.ok) return `❌ <b>${esc(label)}</b>\n${esc(r.error ?? "解析失败")}`;
+  const lines = [`🎬 <b>${esc(label)}</b>${r.title ? ` · ${esc(r.title)}` : ""}`];
+  if (r.uploader) lines.push(`👤 ${esc(r.uploader)}`);
+  lines.push(
+    r.existing ? "⏭ 之前已在队列或已下载过，这次跳过" : "⬇️ 已加入下载队列，稍后用 /tasks 看进度",
+  );
+  return lines.join("\n");
+}
+
+/** 一批链接全失败且原因是同一个（比如平台没启用）时，只回一条，别刷屏 */
+function platformBatchReplies(results: PlatformQueued[]): string[] {
+  const failures = results.filter((r) => !r.ok);
+  const reasons = new Set(failures.map((r) => r.error ?? ""));
+  if (failures.length === results.length && reasons.size === 1) {
+    return [`❌ ${esc(failures[0].error ?? "解析失败")}`];
+  }
+  return results.map(platformQueuedText);
 }
 
 async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotReply> {
@@ -803,7 +830,17 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
     case "dl": {
       const link = args.join(" ").trim();
       if (!link) {
-        return { text: "用法：<code>/dl https://t.me/频道名/123</code>\n也可以直接把链接发给我。" };
+        return {
+          text:
+            "用法：<code>/dl https://t.me/频道名/123</code>\n" +
+            "也可以直接发链接：Telegram 消息链接、B站 / 抖音 / 小红书 / YouTube 的分享口令都认。",
+        };
+      }
+      // 平台链接（含分享口令）走 yt-dlp；其余仍按 Telegram 消息链接处理
+      const platformLinks = splitPlatformLinks(link);
+      if (platformLinks.length && !extractTelegramLinks(link).length) {
+        const results = await enqueuePlatformLinks(platformLinks.slice(0, 5));
+        return { text: platformBatchReplies(results).join("\n\n") };
       }
       try {
         return { text: directText(await downloadFromLink(link)), buttons: mainButtons() };
@@ -920,7 +957,27 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
         }
         return;
       }
-      await sendText(currentBot, peer, "发 /help 查看可用命令，或直接把 Telegram 消息链接发给我", mainButtons());
+
+      // 第三方平台的分享口令：整段文字丢过来就能认（B站 <https://b23.tv/…>、
+      // 小红书 xhslink.cn、抖音「复制打开抖音…」那一长串都算）
+      const platformLinks = splitPlatformLinks(text);
+      if (platformLinks.length) {
+        await sendText(currentBot, peer, `🔗 识别到 ${platformLinks.length} 个平台链接，正在解析…`);
+        const results = await enqueuePlatformLinks(platformLinks.slice(0, 5));
+        for (const line of platformBatchReplies(results)) {
+          await sendText(currentBot, peer, line);
+        }
+        return;
+      }
+
+      await sendText(
+        currentBot,
+        peer,
+        "发 /help 查看可用命令，或直接发链接给我：\n" +
+          "· Telegram 消息链接（https://t.me/频道/123）\n" +
+          "· B站 / 抖音 / 小红书 / YouTube 分享口令（原样粘贴即可）",
+        mainButtons(),
+      );
       return;
     }
 

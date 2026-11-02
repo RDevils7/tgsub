@@ -174,3 +174,71 @@ export async function enqueuePlatformLink(link: PlatformLink): Promise<PlatformT
 export function platformRootDir(): string {
   return path.join(env.downloadDir, getSettings().platform_dir || "第三方");
 }
+
+/* ------------------------------------------------------------------ */
+/* 批量入队（手动下载页 / 机器人共用）                                  */
+/* ------------------------------------------------------------------ */
+
+export interface PlatformQueued {
+  platform: PlatformId;
+  url: string;
+  ok: boolean;
+  title: string | null;
+  uploader: string | null;
+  /** 之前已经在队列里或下过了 */
+  existing: boolean;
+  taskId: number | null;
+  error: string | null;
+}
+
+/**
+ * 一串链接逐个解析入队；单条失败不影响其余。
+ *
+ * 给「机器人收到分享口令」「手动下载页一次粘一堆」用：那边只需要结果摘要，
+ * 不想为了单条失败把整批都抛出去。
+ */
+export async function enqueuePlatformLinks(links: PlatformLink[]): Promise<PlatformQueued[]> {
+  const settings = getSettings();
+  const out: PlatformQueued[] = [];
+  for (const link of links) {
+    if (!settings.platform_enabled) {
+      out.push({
+        platform: link.platform,
+        url: link.url,
+        ok: false,
+        title: null,
+        uploader: null,
+        existing: false,
+        taskId: null,
+        error: "第三方平台下载未启用：请到设置 → 第三方平台打开开关",
+      });
+      continue;
+    }
+    try {
+      const task = await enqueuePlatformLink(link);
+      out.push({
+        platform: link.platform,
+        url: link.url,
+        ok: true,
+        title: task.title,
+        uploader: task.uploader || null,
+        existing: task.existing,
+        taskId: task.taskId,
+        error: null,
+      });
+    } catch (err) {
+      out.push({
+        platform: link.platform,
+        url: link.url,
+        ok: false,
+        title: null,
+        uploader: null,
+        existing: false,
+        taskId: null,
+        error: (err as Error).message,
+      });
+    }
+  }
+  return out;
+}
+

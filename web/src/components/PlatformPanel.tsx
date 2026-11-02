@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { PlatformId, PlatformInfo, PlatformStatus } from "../types";
 import { Badge, Button, StatusDot, Toggle, useToast } from "../components/ui";
-import { IconAlert, IconCheck, IconLink, IconRefresh } from "../components/icons";
+import { IconAlert, IconCheck, IconHelp, IconLink, IconRefresh } from "../components/icons";
 
 /**
  * 设置页的「第三方平台」卡片。
@@ -17,6 +17,8 @@ interface PlatformMeta {
   /** 占位示例 */
   placeholder: string;
   cookieHint: string;
+  /** 悬停展开的详细步骤：每种浏览器的面板名字略有差异，按「菜单层级」写 */
+  cookieSteps: string[];
   /** 至少命中其中一项才算登录态；多个元素之间是「且」 */
   required: string[][];
   /** 下这个平台必须配代理 */
@@ -29,6 +31,13 @@ const PLATFORMS: PlatformMeta[] = [
     label: "B站",
     placeholder: "SESSDATA=xxx; bili_jct=yyy; …",
     cookieHint: "浏览器登录后复制整串 Cookie，至少要有 SESSDATA（大会员画质还需要它对应账号）",
+    cookieSteps: [
+      "浏览器打开 bilibili.com 并登录（要下 4K 就用大会员账号）",
+      "按 F12 打开开发者工具，切到 Network / 网络 面板，然后刷新页面",
+      "在请求列表里点任意一条发往 bilibili.com 的请求",
+      "右侧 Headers → Request Headers，复制 Cookie: 后面那一整串",
+      "至少要包含 SESSDATA、bili_jct、DedeUserID；一般一个月左右过期",
+    ],
     required: [["SESSDATA"], ["bili_jct"]],
   },
   {
@@ -36,6 +45,13 @@ const PLATFORMS: PlatformMeta[] = [
     label: "抖音",
     placeholder: "ttwid=xxx; msToken=yyy; …",
     cookieHint: "需要 ttwid、msToken 等；不填往往只能拿到带水印的低清版本，且容易被风控",
+    cookieSteps: [
+      "浏览器打开 douyin.com，用手机抖音扫码登录",
+      "F12 → Network / 网络 → 在筛选框输入 douyin.com，然后刷新",
+      "点任意一条请求，复制 Request Headers 里的 Cookie 整串",
+      "关键字段：ttwid、msToken、odin_tt、passport_csrf_token",
+      "有效期最短，通常几天到几周；失效时会报 412 或只能拿到带水印版本",
+    ],
     required: [["ttwid", "msToken", "odin_tt"]],
   },
   {
@@ -43,6 +59,13 @@ const PLATFORMS: PlatformMeta[] = [
     label: "小红书",
     placeholder: "web_session=xxx; a1=yyy; …",
     cookieHint: "需要 web_session、a1；只支持视频笔记，图文笔记没有视频流",
+    cookieSteps: [
+      "浏览器打开 xiaohongshu.com 并登录（扫码即可）",
+      "F12 → Network / 网络 → 刷新页面",
+      "点一条发往 edith.xiaohongshu.com 的请求（没有就随便点一条 xiaohongshu.com 的）",
+      "复制 Request Headers 里的 Cookie 整串，关键字段：web_session、a1、webId",
+      "只支持视频笔记；图文笔记没有视频流，会提示认不出这个链接",
+    ],
     required: [["web_session"], ["a1"]],
   },
   {
@@ -50,6 +73,13 @@ const PLATFORMS: PlatformMeta[] = [
     label: "YouTube",
     placeholder: "SID=xxx; SAPISID=yyy; …",
     cookieHint: "大陆网络必须先在下面配代理；会看会员/年龄限制的视频才需要 Cookie（SID、SAPISID）",
+    cookieSteps: [
+      "建议用无痕窗口登录一个专用小号（Cookie 等同账号凭据，别用主账号）",
+      "登录后 F12 → Network / 网络 → 刷新，点任意一条 www.youtube.com 的请求",
+      "复制 Cookie 整串，至少包含 SID、HSID、SSID、SAPISID、__Secure-3PSID",
+      "大陆网络必须先填下面的「第三方平台代理」，否则解析阶段就会失败",
+      "公开视频不用 Cookie；会员专享、年龄限制的视频才需要",
+    ],
     required: [["SID", "SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"]],
     needsProxy: true,
   },
@@ -112,11 +142,50 @@ const SOURCE_LABEL: Record<string, string> = {
   path: "系统 PATH",
 };
 
+/**
+ * 平台名旁边的「?」：鼠标悬停 / 键盘聚焦时展开 Cookie 获取步骤。
+ *
+ * 用纯 CSS 的 group-hover，不引入弹层组件 —— 这段内容只是说明，
+ * 不需要点开、也不需要挡住下面的输入框（pointer-events-none）。
+ */
+function CookieHelp({ item }: { item: PlatformMeta }) {
+  return (
+    <div className="group relative inline-flex">
+      <button
+        type="button"
+        aria-label={`${item.label} Cookie 获取方法`}
+        className="flex h-4 w-4 items-center justify-center rounded-full text-slate-500 transition hover:text-slate-200 focus:outline-none focus-visible:text-slate-200"
+      >
+        <IconHelp className="h-3.5 w-3.5" />
+      </button>
+      <div
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-5 z-40 w-[326px] max-w-[calc(100vw-3.5rem)] rounded-xl border border-white/10 bg-[#11131f] p-3 text-left opacity-0 shadow-2xl transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        <p className="mb-1.5 text-[11.5px] font-medium text-slate-200">
+          {item.label} · Cookie 获取步骤
+        </p>
+        <ol className="space-y-1">
+          {item.cookieSteps.map((step, index) => (
+            <li key={step} className="flex gap-1.5 text-[10.5px] leading-relaxed text-slate-400">
+              <span className="shrink-0 text-slate-500">{index + 1}.</span>
+              <span>{step}</span>
+            </li>
+          ))}
+        </ol>
+        <p className="mt-2 border-t border-white/[0.06] pt-1.5 text-[10px] leading-relaxed text-slate-500">
+          也可以用「Get cookies.txt」类扩展导出，但这里只需要 Cookie 串本身，不用导出的文件。
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function PlatformPanel() {
   const toast = useToast();
   const [status, setStatus] = useState<PlatformStatus | null>(null);
   const [enabled, setEnabled] = useState(false);
-  const [quality, setQuality] = useState("1080");
+  const [quality, setQuality] = useState("best");
   const [dir, setDir] = useState("第三方");
   const [meta, setMeta] = useState(true);
   const [proxy, setProxy] = useState("");
@@ -139,7 +208,7 @@ export default function PlatformPanel() {
   const load = useCallback(async () => {
     const res = await refreshStatus();
     setEnabled(res.enabled);
-    setQuality(res.quality || "1080");
+    setQuality(res.quality || "best");
     setDir(res.dir || "第三方");
     setMeta(res.meta);
     setProxy(res.proxy ?? "");
@@ -419,6 +488,10 @@ export default function PlatformPanel() {
           </label>
         </div>
       </div>
+      <p className="mt-1.5 text-[10.5px] leading-relaxed text-slate-500">
+        清晰度默认「最高（原画）」：按平台实际能给的码率取最好的一档，B站大会员 / 小红书登录态才会出现 1080P 以上；
+        想省空间再挑固定档位。
+      </p>
 
       {/* yt-dlp 专用代理 */}
       <div className="mt-3">
@@ -468,6 +541,7 @@ export default function PlatformPanel() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[12px] font-medium text-slate-200">{item.label}</span>
+                    <CookieHelp item={item} />
                     <Badge
                       className={
                         saved
