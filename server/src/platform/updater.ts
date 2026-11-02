@@ -209,9 +209,12 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       // 两类常见失败：连不上 GitHub（没配代理），和 data/bin 不可写（属主不对）
       let hint = message;
       if (/EACCES|EPERM|permission denied/i.test(message)) {
-        hint = `${message}（data/bin 不可写：容器内运行用户的 uid 需与 data 目录属主一致，见 README 的 PUID/PGID）`;
+        hint = `${message} · data/bin 不可写，容器运行用户的 uid 需与 data 目录属主一致`;
+      } else if (/代理/.test(message)) {
+        // 代理层已经说清是谁不通了，这里只补一句「为什么需要它」
+        hint = `${message} · 检查更新要访问 GitHub，请换一个可用代理`;
       } else if (/连接|超时|解析|TLS|拒绝|不可达|ETIMEDOUT|ENOTFOUND/i.test(message)) {
-        hint = `${message}（检查更新需要访问 GitHub，可在「第三方平台代理」里填代理后重试）`;
+        hint = `${message} · 检查更新要访问 GitHub，可在「第三方平台代理」里填代理后重试`;
       }
       setSetting(K_ERROR, hint);
       setSetting(K_RETRY_AT, String(Date.now() + RETRY_DELAY_MS));

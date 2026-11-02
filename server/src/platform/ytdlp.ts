@@ -10,15 +10,16 @@ import { ffmpegInfo } from "../tg/ffmpeg";
 import { normalizeProxyUrl, parseProxy } from "../lib/netprobe";
 
 /**
- * yt-dlp 封装：B站 / 抖音 / 小红书都交给它。
+ * yt-dlp 封装：B站 / 抖音 / 小红书 / YouTube 都交给它。
  *
  * 为什么用 yt-dlp 而不是自己写接口：
- * 这三个平台的播放地址都要签名（B站 w_rid、抖音 a_bogus、小红书 x-s），
- * 签名算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟，
+ * 这些平台的播放地址都要签名（B站 w_rid、抖音 a_bogus、小红书 x-s、
+ * YouTube nsig），签名算法是逆向出来的，平台一改就失效。yt-dlp 有社区持续跟，
  * 我们只负责把 Cookie 喂给它、把进度读出来。
  *
- * 二进制来源优先级：设置里手填的路径 → 镜像内置 /usr/local/bin/yt-dlp → PATH。
- * Windows 本地开发一般没装，界面会显示「未安装」，不影响 Telegram 下载。
+ * 二进制来源优先级：设置里手填 → data/bin（自动更新下来的）→ 镜像内置
+ * /usr/local/bin/yt-dlp → PATH。Windows 本地开发一般没装，界面会显示
+ * 「不可用」，不影响 Telegram 下载（可在设置页点「检查更新」自动下载）。
  */
 
 export interface YtdlpInfo {
