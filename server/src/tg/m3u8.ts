@@ -100,11 +100,45 @@ export function sanitizeName(s: string): string {
   return cleaned.slice(0, 80) || "video";
 }
 
+/** URL 末段是这类通用词时不能拿来当标题（如 /m3u8/proxy、/hls/index） */
+const GENERIC_SEGMENTS = new Set([
+  "proxy",
+  "index",
+  "playlist",
+  "master",
+  "m3u8",
+  "hls",
+  "play",
+  "player",
+  "video",
+  "stream",
+  "live",
+  "watch",
+  "api",
+]);
+
+/** 通用词判定：命中通用词表，或形如 v1 / v2 的接口版本号 */
+function isGenericSegment(text: string): boolean {
+  const lower = text.trim().toLowerCase();
+  return GENERIC_SEGMENTS.has(lower) || /^v\d+$/.test(lower);
+}
+
 export function titleFromUrl(url: string): string {
   try {
     const u = new URL(url);
-    const last = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "video");
+    const segments = u.pathname.split("/").filter(Boolean);
+    const last = decodeURIComponent(segments.pop() ?? "video");
     const base = last.replace(/\.m3u8.*$/i, "").replace(/\.[^.]+$/, "") || "video";
+    // 末段是通用词就再往前找一段；都通用就用默认名，别让目录叫 "proxy"
+    if (isGenericSegment(base)) {
+      for (let i = segments.length - 1; i >= 0; i -= 1) {
+        const candidate = decodeURIComponent(segments[i]).replace(/\.[^.]+$/, "");
+        if (candidate && !isGenericSegment(candidate)) {
+          return sanitizeName(candidate);
+        }
+      }
+      return "video";
+    }
     return sanitizeName(base);
   } catch {
     return "video";
