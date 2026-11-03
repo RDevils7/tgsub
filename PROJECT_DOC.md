@@ -402,14 +402,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.2.4` | 打 `v1.2.4` 标签时产生的固定版本（建议生产环境锁定） |
-| `v1.3.0-test` | 1.3.0 测试构建（含网页 / m3u8 视频下载），分支 `feat/m3u8-download`，未正式发版 |
+| `v1.3.0` | 打 `v1.3.0` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.2.4
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.3.0
 docker compose up -d
 ```
 

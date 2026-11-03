@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.0test-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.0-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
@@ -18,7 +18,7 @@
 
 ---
 
-## 本版更新（1.3.0test）
+## 本版更新（1.3.0）
 
 **一句话：新增网页 / m3u8 视频下载（机器人 + Web 都能触发），并且「能不用代理的地方尽量直连」—— 下载列表每条任务都会标出走的是直连还是代理。**
 
@@ -30,7 +30,6 @@
 
 > 1.2.4 的机器人下载列表全量显示、平台下载与 Telegram 并行、元数据封面圆角全部保留。完整历史与全部配置项见 PROJECT_DOC.md。
 > 第三方平台仍为 **B站 / 小红书 / YouTube** 三个，引擎是镜像内置的 yt-dlp。
-> 本版为分支测试版（`1.3.0test`），尚未合并主分支与正式发版。
 
 ---
 
@@ -219,7 +218,7 @@ downloads/m3u8/剧集名/剧集名.nfo
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.2.4` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.0` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push `main` 只跑构建与冒烟测试、不发布镜像。
 
