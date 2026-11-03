@@ -1,7 +1,19 @@
 import type { Browser, Page, Response } from "playwright";
 import { chromium } from "playwright";
 import { logger } from "../logger";
-import { refererOf, originOf, titleFromUrl, type M3u8Target } from "./m3u8";
+import {
+  refererOf,
+  originOf,
+  sanitizeName,
+  titleFromUrl,
+  pickProxy,
+  type M3u8Target,
+} from "./m3u8";
+
+/**
+ * 无头浏览器渲染页面、截获真实 m3u8 请求。详见文件顶部说明。
+ * 浏览器启动所需的 chromium 单例复用；若未安装则降级为 null，不影响服务。
+ */
 
 /**
  * 用无头浏览器渲染页面、截获真实 m3u8 请求。
@@ -21,6 +33,9 @@ const UA =
 
 let browserPromise: Promise<Browser> | null = null;
 let browserDisabled = false;
+/** 空闲多久后关闭浏览器（chromium 常驻约 150MB 内存，NAS 上不该一直占着） */
+const IDLE_CLOSE_MS = 3 * 60 * 1000;
+let idleTimer: NodeJS.Timeout | null = null;
 
 async function getBrowser(): Promise<Browser> {
   if (browserDisabled) throw new Error("headless browser 已禁用（上次启动失败）");
@@ -44,6 +59,26 @@ async function getBrowser(): Promise<Browser> {
       });
   }
   return browserPromise;
+}
+
+/** 每次解析结束后重置空闲计时；超时无新任务就关掉浏览器释放内存 */
+function scheduleIdleClose(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    idleTimer = null;
+    const p = browserPromise;
+    browserPromise = null;
+    if (!p) return;
+    p.then((b) =>
+      b.close().catch(() => {
+        /* ignore */
+      }),
+    ).catch(() => {
+      /* ignore */
+    });
+    logger.info("无头浏览器空闲超过 %d 分钟，已关闭", IDLE_CLOSE_MS / 60000);
+  }, IDLE_CLOSE_MS);
+  idleTimer.unref?.();
 }
 
 function isM3u8Response(url: string, contentType: string): boolean {
@@ -98,12 +133,9 @@ async function tryTriggerPlay(page: Page): Promise<void> {
 }
 
 /**
- * 渲染页面并截获 m3u8 请求。返回 M3u8Target；拿不到返回 null。
+ * 渲染页面并截获 m3u8 请求（单次尝试）。
  */
-export async function resolveM3u8ViaBrowser(
-  pageUrl: string,
-  timeoutMs = 20000,
-): Promise<M3u8Target | null> {
+async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Target | null> {
   let browser: Browser;
   try {
     browser = await getBrowser();
@@ -111,11 +143,13 @@ export async function resolveM3u8ViaBrowser(
     return null;
   }
 
+  const proxy = pickProxy();
   const context = await browser.newContext({
     userAgent: UA,
     acceptDownloads: false,
     // 让 navigator.webdriver 为 false，降低被站点识别为爬虫的概率
     viewport: { width: 1280, height: 720 },
+    ...(proxy ? { proxy: { server: proxy } } : {}),
   });
   await context.addInitScript((): void => {
     const nav: any = (globalThis as any).navigator;
@@ -146,7 +180,6 @@ export async function resolveM3u8ViaBrowser(
   let pageTitle = "";
   try {
     await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    pageTitle = await page.title().catch(() => "");
   } catch (e) {
     logger.warn("无头浏览器打开页面失败: %s", String(e));
   }
@@ -166,6 +199,10 @@ export async function resolveM3u8ViaBrowser(
     }
   }
 
+  // 在等待截获之后才取标题：SPA 往往等数据回来后才把真实标题写进 <title>，
+  // 太早取会拿到空壳的初始 <title>。
+  pageTitle = await page.title().catch(() => "");
+
   await context.close().catch(() => {
     /* ignore */
   });
@@ -177,8 +214,31 @@ export async function resolveM3u8ViaBrowser(
 
   return {
     m3u8Url: chosen,
-    title: titleFromUrl(pageTitle || pageUrl),
+    title: pageTitle ? sanitizeName(pageTitle) : titleFromUrl(pageUrl),
     referer: refererOf(pageUrl),
     origin: originOf(pageUrl),
   };
+}
+
+/**
+ * 用无头浏览器解析出 m3u8 地址。返回 M3u8Target；拿不到返回 null。
+ *
+ * 外层包了重试：走代理时偶发 ERR_CONNECTION_CLOSED / ERR_TIMED_OUT 很常见
+ * （代理抖动、站点限流），单次失败就报错体验很差，故失败后换新 context 再试一次。
+ */
+export async function resolveM3u8ViaBrowser(
+  pageUrl: string,
+  timeoutMs = 20000,
+): Promise<M3u8Target | null> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const r = await resolveOnce(pageUrl, timeoutMs);
+      if (r) return r;
+      logger.warn("无头浏览器未捕获到 m3u8（第 %d 次尝试）", attempt);
+    } catch (e) {
+      logger.warn("无头浏览器解析异常（第 %d 次尝试）: %s", attempt, String(e));
+    }
+    scheduleIdleClose();
+  }
+  return null;
 }

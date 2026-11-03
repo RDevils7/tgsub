@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { ffmpegInfo } from "./ffmpeg";
 import { logger } from "../logger";
@@ -245,6 +246,33 @@ export interface M3u8DownloadOpts {
 }
 
 /**
+ * 解析出 m3u8 下载链路要用的代理地址（无头浏览器与 ffmpeg 共用）。
+ * 优先 M3U8_BROWSER_PROXY；未设时回落 HTTPS_PROXY / HTTP_PROXY（大小写都看）。
+ * 自动跳过 127.0.0.1 / localhost / ::1 —— 这类是 WorkBuddy 等工具的内部代理，
+ * 指向它们会让外网视频站访问失败，必须排除。返回 undefined 表示直连。
+ */
+export function pickProxy(): string | undefined {
+  const candidates = [
+    process.env.M3U8_BROWSER_PROXY,
+    process.env.HTTPS_PROXY,
+    process.env.https_proxy,
+    process.env.HTTP_PROXY,
+    process.env.http_proxy,
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      const h = new URL(c).hostname.toLowerCase();
+      if (h === "127.0.0.1" || h === "localhost" || h === "::1") continue;
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/**
  * 用 ffmpeg 把 m3u8 下载并封装为 mp4。先写 `<outFile>.part`，成功再 rename。
  * 返回下载完成后的最终路径（outFile）。
  */
@@ -261,8 +289,15 @@ export async function downloadM3u8To(
   }
   const ffmpegPath = info.ffmpeg;
 
-  const part = `${outFile}.part`;
+  // ffmpeg 的 Windows 静态版无法打开含非 ASCII（中文）字符的输出路径，会报
+  // “Invalid argument”。所以让 ffmpeg 先写到系统临时目录下的 ASCII 文件名，
+  // 下载完成后再 rename 到最终（可能含中文）路径；node 的 rename 处理 Unicode 没问题。
+  // 跨卷 rename 会失败，故失败时回退为 copy + 删源。
   await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
+  const tmpPart = path.join(
+    os.tmpdir(),
+    `tgsub-m3u8-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`,
+  );
 
   const headers = [`User-Agent: ${UA}`, `Referer: ${opts.referer ?? refererOf(m3u8Url)}`];
   if (opts.origin) headers.push(`Origin: ${opts.origin}`);
@@ -276,12 +311,29 @@ export async function downloadM3u8To(
     "copy",
     "-bsf:a",
     "aac_adtstoasc",
+    "-f",
+    "mp4",
     "-y",
-    part,
+    tmpPart,
   ];
 
+  const cleanupTmp = (): void => {
+    fs.promises.unlink(tmpPart).catch(() => {
+      /* ignore */
+    });
+  };
+
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    const proxy = pickProxy();
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (proxy) {
+      // ffmpeg 的 http/https 协议会读这些环境变量，让切片/密钥也走代理
+      env.HTTP_PROXY = proxy;
+      env.HTTPS_PROXY = proxy;
+      env.http_proxy = proxy;
+      env.https_proxy = proxy;
+    }
+    const child = spawn(ffmpegPath, args, { windowsHide: true, env });
     let total = 0;
     let stderr = "";
 
@@ -310,7 +362,7 @@ export async function downloadM3u8To(
         const pct = total > 0 ? Math.min(99, Math.round((cur / total) * 100)) : 0;
         let bytes = 0;
         try {
-          bytes = fs.statSync(part).size;
+          bytes = fs.statSync(tmpPart).size;
         } catch {
           /* ignore */
         }
@@ -326,7 +378,18 @@ export async function downloadM3u8To(
     });
   });
 
-  await fs.promises.rename(part, outFile);
+  // ffmpeg 成功：把临时文件挪到最终路径（跨卷回退 copy）
+  try {
+    await fs.promises.rename(tmpPart, outFile);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EXDEV") {
+      await fs.promises.copyFile(tmpPart, outFile);
+      cleanupTmp();
+    } else {
+      cleanupTmp();
+      throw e;
+    }
+  }
   return outFile;
 }
 

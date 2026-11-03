@@ -130,6 +130,7 @@ docker compose up -d && docker compose logs -f --tail=200
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置即启用 HTTP Basic 认证，暴露公网时建议开 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `TZ` | `Asia/Shanghai` | 时区，影响日志与按天分目录 |
+| `M3U8_BROWSER_PROXY` | 空 | 网页 / m3u8 下载走代理的地址，如 `http://192.168.5.2:7890`。未设时回落到 `HTTPS_PROXY` / `HTTP_PROXY`（`127.0.0.1` 会被忽略）。无头浏览器解析与 ffmpeg 下载共用 |
 
 界面设置项（扫描间隔、路径模板、画质、Cookie、机器人开关等）存数据库，「设置」页改完即生效，不用重启。
 
@@ -171,6 +172,31 @@ downloads/第三方/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 ```
 
 > Emby 媒体库要勾选「优先使用本地元数据 / 启用 NFO」，否则它会先联网刮削再读 nfo，把上面这些字段盖掉。
+
+---
+
+## 网页 / m3u8 视频
+
+「手动下载」页可以直接粘**普通网页链接**或 **`.m3u8` 直链**；把链接直接发给机器人也一样会开始下载。
+
+**解析顺序**（逐级兜底）：
+
+1. 静态抓页面 HTML，找 `<video>` / `<source>` / JS 变量里的 m3u8；
+2. 试常见播放器路径（`playlist.m3u8`、`index.m3u8`、`live.m3u8`、`hls.m3u8`）；
+3. 都不行就**用无头浏览器真正渲染页面**，监听网络请求截获播放器实际发出的 m3u8 —— 这一步能覆盖 SPA / 签名接口 / 加密接口的站点（短视频站、短剧站大多属于这类）。
+
+**下载**：ffmpeg 合并成 mp4，AES-128 加密的切片会自动取 key 解密；防盗链自动带 `User-Agent` + `Referer` + `Origin`（不支持自定义 Cookie）。
+
+**代理**：网页解析与 ffmpeg 下载共用 `M3U8_BROWSER_PROXY`（或 `HTTPS_PROXY`）。Docker 内置 Chromium，镜像会比之前大一些（+约 170MB）。
+
+**落盘结构**（下载完自动生成 nfo 与封面，Emby 可直接识别）：
+
+```
+downloads/m3u8/剧集名/剧集名.mp4
+downloads/m3u8/剧集名/剧集名.nfo
+```
+
+> 解析失败时按提示用浏览器 F12 → Network → 过滤 `.m3u8` → 复制那条请求地址，直接粘成 m3u8 直链下载。
 
 ---
 

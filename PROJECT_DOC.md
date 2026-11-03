@@ -61,6 +61,11 @@
 - **按链接直接下载**：`手动下载`页粘贴 `t.me` 链接即可抓取（公开/私有频道、相册整组均可），私有频道的 `t.me/c/<内部ID>/<消息ID>` 链接同样支持；监控历史每条记录也有「下载」按钮，机器人收到链接同样立即开始。
 - **网页 / m3u8 视频下载**：除了 Telegram 与平台分享口令，还能直接发**普通网页链接或 .m3u8 直链**——自动解析页面里的 `<video>`/`<source>`/JS 变量，挑不出再试 `playlist/index/live/hls.m3u8` 等常见播放器路径兜底，解析出 m3u8 后用 ffmpeg 合并下载（AES-128 加密会自动取 key）。防盗链靠自动带 `User-Agent` + `Referer` + `Origin`（Referer/Origin 取源站根 URL）过大多数裸防盗链；不支持自定义 Cookie。机器人发链接、Web 手动下载页粘贴链接都支持，落库为 `source=m3u8` 的独立任务，下载完同样生成 NFO 与封面。
   - **SPA / 签名接口站点（无头浏览器兜底）**：很多视频站是单页应用，m3u8 由页面 JS 向带签名的 API 请求得来，静态抓 HTML 根本看不到。此时自动用**无头 Chromium**把页面真正渲染出来、监听网络请求截获真实的 `.m3u8`（含 hls.js 经 fetch 喂给 MSE 的情况，按 `content-type` 识别），再交给 ffmpeg 下载。触发播放按钮、隐藏 `navigator.webdriver` 以降低被识别概率。`Chromium` 由镜像构建阶段 `playwright install chromium` 装好（默认路径 `/opt/playwright`，运行时靠 `PLAYWRIGHT_BROWSERS_PATH` 定位）；**本地开发若想测这条链路，需先 `npx playwright install chromium`**（约 170MB，受限网络可能很慢或下不下来，可只在能联网的部署上验证）。若 Chromium 没装，解析器会优雅降级为原来的报错文案，不会让服务崩溃。
+    - **标题取渲染后的**：SPA 常常等数据回来才把真实剧名写进 `<title>`，所以标题在**截获 m3u8 之后**才取；过早取会拿到空壳的初始标题（如站点通用名），导致文件名和 NFO 剧名都不对。
+    - **失败重试一次**：走代理时 `ERR_CONNECTION_CLOSED` / 超时很常见，单次失败就报错体验太差，故解析失败会换新 context 再试一次。
+    - **空闲自动关浏览器**：Chromium 常驻约 150MB 内存，NAS 上不该一直占着，故空闲 3 分钟后自动关闭，下次用时再拉起。
+  - **代理（`M3U8_BROWSER_PROXY`）**：网页解析与 ffmpeg 下载共用一个代理。`pickProxy()` 优先读 `M3U8_BROWSER_PROXY`，未设时回落到 `HTTPS_PROXY` / `HTTP_PROXY`（大小写都看），并**自动跳过 `127.0.0.1` / `localhost`** —— 这类是开发工具的内部代理，指向它们会让外网视频站访问失败。ffmpeg 的 http/https 协议读 `http_proxy` / `https_proxy` 环境变量，所以切片与 AES 密钥也一起走代理。
+  - **ffmpeg 输出的坑（务必记住）**：ffmpeg 靠**输出文件扩展名**推断封装格式，写成 `xxx.mp4.part` 会直接报 `Invalid argument`（真实信息是 "Unable to find a suitable output format"）。因此 ffmpeg 先写到 `os.tmpdir()` 下**带 `.mp4` 扩展名**的临时文件（并显式 `-f mp4`），下载完成再 rename 到最终路径（node 的 rename 处理中文没问题；跨卷时回退 copy + 删源）。
 - **分页与清空**：监控历史、下载记录都可切换每页条数（20 / 50 / 100 / 200，或手动输入 5–500，按页面记住上次选择），底部是「首页 / 上一页 / 页码跳转 / 下一页 / 末页」的翻页条（不是无限加载）；「清空」按钮带范围选择——监控历史可只清未命中、下载记录可只清已结束，还能顺带删除磁盘上的原文件。
 
 ### 下载与队列
@@ -537,6 +542,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置后启用 HTTP Basic 认证 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `TZ` | `Asia/Shanghai` | 时区，影响日志与按天分目录 |
+| `M3U8_BROWSER_PROXY` | 空 | 网页 / m3u8 下载链路的代理，如 `http://192.168.5.2:7890`；未设时回落到 `HTTPS_PROXY` / `HTTP_PROXY`（`127.0.0.1` / `localhost` 会被自动忽略，避免误用工具内部代理）。**无头浏览器解析与 ffmpeg 下载共用**，只作用于 m3u8 链路，不影响 Telegram |
 
 > **compose 不读 `.env`** —— 仓库里的两份 compose 全部使用真实值，不做变量插值。
 > 要改镜像版本、宿主机端口、两个持久化目录、认证信息，直接编辑 compose 对应的那一行。
@@ -850,6 +856,8 @@ tgsub/
 │   │   │   ├── enqueue.ts      # 命中后按组入队（命名、去重、Emby 元信息）
 │   │   │   ├── downloader.ts   # 串行下载队列、实时进度、重试、暂停/停止/插队
 │   │   │   ├── direct.ts       # 按链接 / 频道+消息 ID 直接下载
+│   │   │   ├── m3u8.ts         # 网页 / m3u8 解析（静态 + 兜底）与 ffmpeg 合并下载
+│   │   │   ├── m3u8Browser.ts  # 无头 Chromium 渲染页面截获真实 m3u8（SPA / 签名接口兜底）
 │   │   │   ├── media.ts        # 媒体信息解析、路径生成
 │   │   │   ├── entity.ts       # 频道实体标识（-100 标记形式）与消息链接
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）
