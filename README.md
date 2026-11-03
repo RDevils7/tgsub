@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.4-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.0test-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
