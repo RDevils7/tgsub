@@ -254,6 +254,25 @@ migrateOnce("migration_remove_douyin_v121", () => {
 });
 
 /**
+ * 1.3.1：yt-dlp 检查更新的默认间隔 24 小时 → 15 天。
+ *
+ * 旧版有个缺陷：只要检查失败过一次，`dueForCheck()` 就会被「有 retryAt」短路成
+ * 每次都查，于是 24 小时的设置彻底失效，变成每小时撞一次 GitHub 匿名 API。
+ * 撞满配额就是 403，再按 30 分钟重试仍然在限流窗口里，日志里能刷一整页「检查更新失败」。
+ *
+ * 只改「等于旧默认值 24」的存量（和 platform_quality 那次一个思路），
+ * 用户在界面上主动设过别的间隔就不动。
+ */
+migrateOnce("migration_ytdlp_check_hours_v131", () => {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'ytdlp_check_hours'").get() as
+    | { value: string }
+    | undefined;
+  if (!row || Number(row.value) !== 24) return;
+  db.prepare("UPDATE settings SET value = '360' WHERE key = 'ytdlp_check_hours'").run();
+  logger.info("yt-dlp 检查更新间隔已从 24 小时改为 15 天");
+});
+
+/**
  * 1.0.2：封面与每集缩略图改为「下载完成后从视频随机截帧」，不再下载消息里的图片。
  *
  * 老库里可能还躺着 .art-* 的封面图任务（排队中/失败重试中等），升级后要一并作废，

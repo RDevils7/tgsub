@@ -4,6 +4,7 @@ import path from "node:path";
 import { getSetting, getSettings, setSetting } from "../db";
 import { logger } from "../logger";
 import { downloadFile, httpRequest, parseProxy } from "../lib/netprobe";
+import { retryDelayMs, shouldRunCheck } from "./updateplan";
 import { clearYtdlpCache, localBinaryPath, versionRank, ytdlpInfo } from "./ytdlp";
 
 /**
@@ -25,10 +26,10 @@ const K_CHECK_AT = "ytdlp_check_at";
 const K_LATEST = "ytdlp_latest";
 const K_UPDATED_AT = "ytdlp_updated_at";
 const K_ERROR = "ytdlp_check_error";
-/** 上次失败后的重试时间：失败不该把整个检查周期等满 24 小时 */
+/** 上次失败后的重试时间：失败不该把整个检查周期等满（默认 15 天） */
 const K_RETRY_AT = "ytdlp_retry_at";
-
-const RETRY_DELAY_MS = 30 * 60_000;
+/** 连续失败次数：用来做指数退避，避免被 GitHub 限流时每小时刷一次日志 */
+const K_FAIL_COUNT = "ytdlp_fail_count";
 
 export interface EngineUpdateState {
   /** 当前生效的版本 */
@@ -166,6 +167,7 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       setSetting(K_LATEST, latest);
       setSetting(K_ERROR, "");
       setSetting(K_RETRY_AT, "");
+      setSetting(K_FAIL_COUNT, "0");
 
       const currentRank = versionRank(from);
       const latestRank = versionRank(latest);
@@ -217,8 +219,14 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
         hint = `${message} · 检查更新要访问 GitHub，可在「第三方平台代理」里填代理后重试`;
       }
       setSetting(K_ERROR, hint);
-      setSetting(K_RETRY_AT, String(Date.now() + RETRY_DELAY_MS));
-      logger.warn({ err: message }, "yt-dlp 检查更新失败");
+      // 连续失败就拉长重试间隔。GitHub 的匿名配额是每小时 60 次，
+      // 403 之后固定 30 分钟再撞一次只会一直撞墙（同一个出口 IP 还在限流窗口里），
+      // 退避到最长 24 小时才能真正等到窗口恢复。
+      const fails = (readNumber(K_FAIL_COUNT) || 0) + 1;
+      const delay = retryDelayMs(fails);
+      setSetting(K_FAIL_COUNT, String(fails));
+      setSetting(K_RETRY_AT, String(Date.now() + delay));
+      logger.warn({ err: message, fails, retryInMin: Math.round(delay / 60_000) }, "yt-dlp 检查更新失败");
       return { ok: false, updated: false, from, to: null, error: hint };
     } finally {
       busy = false;
@@ -261,15 +269,13 @@ const TICK_MS = 60 * 60 * 1000; // 每小时醒一次，实际间隔看设置
 
 function dueForCheck(): boolean {
   const settings = getSettings();
-  if (!settings.ytdlp_auto_update) return false;
-  // 上次失败了：等重试时间到了就再试，不用把整个周期等满
-  const retryAt = readNumber(K_RETRY_AT);
-  if (retryAt && Date.now() < retryAt) return false;
-  const at = readNumber(K_CHECK_AT);
-  if (!at) return true;
-  if (retryAt) return true;
-  const hours = Math.max(1, settings.ytdlp_check_hours || 24);
-  return Date.now() - at >= hours * 3600_000;
+  return shouldRunCheck({
+    autoUpdate: settings.ytdlp_auto_update,
+    checkHours: settings.ytdlp_check_hours,
+    checkAt: readNumber(K_CHECK_AT),
+    retryAt: readNumber(K_RETRY_AT),
+    now: Date.now(),
+  });
 }
 
 /**

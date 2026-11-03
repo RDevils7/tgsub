@@ -39,6 +39,13 @@ import {
   parseProxy,
   telegramProxyUnsupported,
 } from "../server/src/lib/netprobe";
+import {
+  DEFAULT_CHECK_HOURS,
+  MAX_RETRY_DELAY_MS,
+  daysToHours,
+  retryDelayMs,
+  shouldRunCheck,
+} from "../server/src/platform/updateplan";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -1745,6 +1752,138 @@ function netRouteChecks(): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* yt-dlp 自动检查更新的排期                                          */
+/* ------------------------------------------------------------------ */
+
+function updatePlanChecks(): void {
+  const HOUR = 3600_000;
+  const DAY = 24 * HOUR;
+
+  check("默认检查间隔是 15 天", () => {
+    assert.equal(DEFAULT_CHECK_HOURS, 15 * 24);
+    assert.equal(daysToHours(15), 360);
+    assert.equal(daysToHours(1), 24);
+    assert.equal(daysToHours(0), 24, "非法天数按 1 天兜底");
+    assert.equal(daysToHours(-3), 24);
+  });
+
+  check("没查过就直接查", () => {
+    assert.equal(shouldRunCheck({ autoUpdate: true, checkHours: 360, now: 1000 }), true);
+  });
+
+  check("关掉自动更新就不查", () => {
+    assert.equal(
+      shouldRunCheck({ autoUpdate: false, checkHours: 360, checkAt: 0, now: 1000 }),
+      false,
+    );
+  });
+
+  check("周期没到不查、到了才查", () => {
+    const now = 1000 * DAY;
+    // 15 天的周期：第 14 天不查，第 15 天查
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 360, checkAt: now - 14 * DAY, now }),
+      false,
+    );
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 360, checkAt: now - 15 * DAY, now }),
+      true,
+    );
+  });
+
+  check("失败重试：没到点不查，到了就重试一次", () => {
+    const now = 1000 * DAY;
+    assert.equal(
+      shouldRunCheck({
+        autoUpdate: true,
+        checkHours: 360,
+        checkAt: now - 15 * DAY,
+        retryAt: now + 10 * 60_000,
+        now,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldRunCheck({
+        autoUpdate: true,
+        checkHours: 360,
+        checkAt: now - 15 * DAY,
+        retryAt: now - 1,
+        now,
+      }),
+      true,
+    );
+  });
+
+  // 这一条是 1.3.0 的真 bug：只要失败过（retryAt 存在且早已过期），
+  // 旧实现 `if (retryAt) return true` 会让每次 tick 都查，周期设置彻底失效
+  check("失败重试到点后不再无脑每次都查（周期仍然生效）", () => {
+    const now = 1000 * DAY;
+    // 重试时间早已过去，但周期还没到 → 应该只重试这一次，之后回到周期判断
+    assert.equal(
+      shouldRunCheck({
+        autoUpdate: true,
+        checkHours: 360,
+        checkAt: now - 1 * DAY,
+        retryAt: now - 5 * DAY,
+        now,
+      }),
+      true,
+      "重试时间已过：允许重试一次",
+    );
+    // 重试完成后 retryAt 被清空，此时周期没到就不该再查
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 360, checkAt: now - 1 * DAY, now }),
+      false,
+      "retryAt 已清空：回到 15 天周期，第 1 天不应检查",
+    );
+    // 每小时醒一次，连醒 10 次也只会在第一天那次判定为 true 之后不再触发
+    let fired = 0;
+    for (let i = 0; i < 10; i++) {
+      const t = now + i * HOUR;
+      if (shouldRunCheck({ autoUpdate: true, checkHours: 360, checkAt: now - 1 * DAY, now: t })) {
+        fired += 1;
+      }
+    }
+    assert.equal(fired, 0, "周期未到，tick 再多也不该检查");
+  });
+
+  check("检查周期按设置生效，非法值退回默认", () => {
+    const now = 10 * DAY;
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 24, checkAt: now - 25 * HOUR, now }),
+      true,
+    );
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 24, checkAt: now - 23 * HOUR, now }),
+      false,
+    );
+    // 0 / 负数兜底成默认 15 天
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 0, checkAt: now - 1 * DAY, now }),
+      false,
+    );
+    assert.equal(
+      shouldRunCheck({ autoUpdate: true, checkHours: 0, checkAt: now - 16 * DAY, now }),
+      true,
+    );
+  });
+
+  check("失败退避：30 分钟起翻倍，封顶 24 小时", () => {
+    assert.equal(retryDelayMs(1), 30 * 60_000);
+    assert.equal(retryDelayMs(2), 60 * 60_000);
+    assert.equal(retryDelayMs(3), 120 * 60_000);
+    assert.equal(retryDelayMs(4), 240 * 60_000);
+    // 一路翻到封顶
+    assert.equal(retryDelayMs(10), MAX_RETRY_DELAY_MS);
+    assert.equal(retryDelayMs(99), MAX_RETRY_DELAY_MS);
+    // 非法输入按第一次算
+    assert.equal(retryDelayMs(0), 30 * 60_000);
+    assert.equal(retryDelayMs(-5), 30 * 60_000);
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 媒体删除相关的路径规则                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1811,6 +1950,7 @@ async function main(): Promise<void> {
     ["网络代理用例", () => proxyChecks()],
     ["网络线路用例", () => netRouteChecks()],
     ["第三方平台用例", () => platformChecks()],
+    ["yt-dlp 更新排期用例", () => updatePlanChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
   ];

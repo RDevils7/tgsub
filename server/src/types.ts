@@ -187,7 +187,12 @@ export interface AppSettings {
   platform_proxy_domestic: boolean;
   /** 定时检查 yt-dlp 新版本，有就自动下载到 data/bin */
   ytdlp_auto_update: boolean;
-  /** 多久检查一次（小时），默认 24 */
+  /**
+   * 多久检查一次（小时），默认 360 = 15 天。
+   *
+   * 别调太短：检查走的是 GitHub 匿名 API（每小时 60 次/IP 的配额），
+   * 撞上限就是 403，反倒一直拿不到版本号。yt-dlp 发版频率也不值当天查。
+   */
   ytdlp_check_hours: number;
   /**
    * 网页 / m3u8 下载用的代理（无头浏览器与 ffmpeg 共用）。
@@ -254,7 +259,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   platform_proxy: "",
   platform_proxy_domestic: false,
   ytdlp_auto_update: true,
-  ytdlp_check_hours: 24,
+  ytdlp_check_hours: 360, // 15 天
   m3u8_proxy: "",
   m3u8_proxy_mode: "auto",
 };

@@ -12,6 +12,14 @@ import CollapsibleCard from "./CollapsibleCard";
  * 空字符串表示清除），放在这里比塞进页面的大 draft 更清楚。
  */
 
+/**
+ * yt-dlp 检查更新的默认间隔（小时）：15 天。
+ *
+ * 检查走 GitHub 匿名 API，每 IP 每小时只有 60 次配额，查得勤就是 403 撞墙；
+ * yt-dlp 发版频率也完全不值得每天去问一次。
+ */
+const DEFAULT_CHECK_HOURS = 15 * 24;
+
 interface PlatformMeta {
   id: PlatformId;
   label: string;
@@ -230,7 +238,9 @@ export default function PlatformPanel() {
   const [proxy, setProxy] = useState("");
   const [proxyDomestic, setProxyDomestic] = useState(false);
   const [autoUpdate, setAutoUpdate] = useState(true);
-  const [checkHours, setCheckHours] = useState(24);
+  const [checkHours, setCheckHours] = useState(DEFAULT_CHECK_HOURS);
+  /** 界面上按「天」输入，存储仍用小时（保持与后端字段一致，老配置无缝读出来） */
+  const checkDays = Math.max(1, Math.round(checkHours / 24));
   const [ytdlpPath, setYtdlpPath] = useState("");
   const [cookies, setCookies] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -254,7 +264,7 @@ export default function PlatformPanel() {
     setProxy(res.proxy ?? "");
     setProxyDomestic(Boolean(res.proxyDomestic));
     setAutoUpdate(res.update?.autoUpdate ?? true);
-    setCheckHours(res.update?.checkHours ?? 24);
+    setCheckHours(res.update?.checkHours ?? DEFAULT_CHECK_HOURS);
     return res;
   }, [refreshStatus]);
 
@@ -471,14 +481,17 @@ export default function PlatformPanel() {
             <input
               type="number"
               min={1}
-              max={720}
+              max={30}
               className="field !w-16 py-1 text-center text-[11.5px]"
-              value={checkHours}
-              onChange={(e) => setCheckHours(Math.max(1, Number(e.target.value) || 24))}
+              value={checkDays}
+              onChange={(e) => {
+                const days = Math.min(30, Math.max(1, Math.floor(Number(e.target.value) || 1)));
+                setCheckHours(days * 24);
+              }}
             />
-            <span className="text-[11px] text-slate-500">小时</span>
+            <span className="text-[11px] text-slate-500">天</span>
           </label>
-          <span className="text-[10.5px] text-slate-600">下载到 data/bin，容器重建也保留</span>
+          <span className="text-[10.5px] text-slate-600">下载到 data/bin，容器重建也保留；GitHub 接口有配额，别调太短</span>
         </div>
 
         <input
