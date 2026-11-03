@@ -3,7 +3,7 @@
 #   docker compose up -d
 #
 # 镜像地址：rdevils7/tgsub:latest
-# 需要固定版本时，把下面 image 改成 rdevils7/tgsub:v1.3.1
+# 需要固定版本时，把下面 image 改成 rdevils7/tgsub:v1.3.2
 #
 # 备用仓库（GHCR，国内拉取可能较慢，拉不动时再换）：
 #   image: ghcr.io/rdevils7/tgsub:latest
@@ -77,6 +77,9 @@ services:
       # 可选的基础认证，暴露到公网时建议开启
       BASIC_AUTH_USER: ""
       BASIC_AUTH_PASS: ""
+      # 管理界面登录是应用自带的（首次打开网页时强制设置账号密码），正常情况下不用管这里。
+      # 忘记密码时才临时加下面一行（关闭登录）→ 重启 → 在设置页重设 → 删掉再重启：
+      # AUTH_DISABLED: "1"
     volumes:
       # ① 数据持久化目录：数据库 tgsub.db、加密 session、封面缓存、临时截图
       #    换容器、重装镜像都不丢；备份这个目录即可恢复全部配置与记录

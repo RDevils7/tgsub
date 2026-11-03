@@ -40,6 +40,7 @@
 - [剧集改名与合并](#剧集改名与合并131)
 - [手动下载提交记录](#手动下载提交记录131)
 - [分来源下载目录](#分来源下载目录132)
+- [管理界面登录](#管理界面登录132)
 - [Telegram 机器人](#telegram-机器人)
 - [HTTP 接口](#http-接口)
 - [数据、备份与迁移](#数据备份与迁移)
@@ -231,6 +232,9 @@
 概览统计、频道列表、订阅关键词、监控历史、手动下载、下载记录、**日志**、设置（含在线登录 Telegram）。
 React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双主题，桌面与移动端均可用。
 
+1.3.2 起界面本身也要登录：首次访问强制设置管理员账号，之后凭账号密码进入（见[管理界面登录](#管理界面登录132)）。
+登录页是独立的一套固定浅色视觉（深蓝插画 + 白卡），**不跟随应用主题**。
+
 ### 日志页面
 
 服务运行日志内置在 Web 界面的「日志」页，排障时不必 SSH 进容器：
@@ -241,7 +245,7 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
 - **三路输出**：`stdout`（`docker compose logs`）、磁盘 `data/logs/app.log`（10MB 轮转）、内存环形缓冲（最近 2000 条，重启后从文件尾部回灌）。
 - 后端实现见 `server/src/lib/logstore.ts`（环形缓冲 + 落盘 + 查询）与 `server/src/routes/logs.ts`（查询 / 统计 / 下载 / 清空 / 回灌）。
 
-### Telegram 机器人
+## Telegram 机器人
 
 配一个自己的 bot，手机上发消息就能扫描、加频道、改订阅、看队列、按链接下载；定时扫描发现新内容还会主动推送摘要。
 机器人用独立 bot token 授权，与账号 session 互不影响。
@@ -413,13 +417,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.3.1` | 打 `v1.3.1` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.3.2` | 打 `v1.3.2` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.3.1
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.3.2
 docker compose up -d
 ```
 
@@ -800,7 +804,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
 直连失败记忆、网络类错误判定、host 与文案；`m3u8ParseChecks()` 8 项覆盖 HTML 实体还原、
-地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 202 项，全部不依赖网络。
+地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 211 项，全部不依赖网络。
 
 ---
 
@@ -859,7 +863,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `renamePlanChecks()` 13 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 202 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 211 项。
 
 ---
 
@@ -916,7 +920,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `manualNoteChecks()` 8 项：状态优先级（入队 > 之前下过 > 没入队）、`t.me` 与网页的归类、
-两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 202 项。
+两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 211 项。
 
 ---
 
@@ -979,7 +983,116 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `mediaDirChecks()` 11 项：默认值、平台 id 映射、拼接规则（空段 / 反斜杠 / 重复斜杠）、
-逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 202 项。
+逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 211 项。
+
+---
+
+## 管理界面登录（1.3.2）
+
+管理界面从「打开就能用」变成「先登录」。这是单账号系统：一台机器、一个下载器、一个主人，
+不做用户表、不做角色、不做注册 —— 只存一组账号密码。
+
+#### 流程
+
+```
+第一次打开 ──▶ GET /api/session/state
+                 ├─ configured=false ──▶ 初始化页（强制设置用户名 + 密码，无跳过入口）
+                 ├─ configured=true  ──▶ 登录页
+                 └─ 已带有效 cookie  ──▶ 主界面
+```
+
+初始化成功后服务端直接下发 cookie，用户不用再输一遍。`setup` 接口**只认第一次**，
+之后任何人不带 cookie 调它都是 409。
+
+#### 数据模型
+
+| 位置 | 内容 |
+| --- | --- |
+| `settings` 表 `login_user` / `login_hash` / `login_since` | 用户名、`scrypt$N$r$p$salt$hash`、设置时间 |
+| `login_sessions` 表 | `token_hash`（主键）、`username`、`created_at`、`expires_at`、`last_seen`、`ip`、`ua` |
+
+三个安全决定：
+
+1. **cookie 只存随机串，库里存它的 sha256**。库文件被拿走也换不出可用凭据。
+2. **会话落库而非内存**。升级镜像等于容器重建，内存会话会让所有人重登一次，
+   而「升级就要重新登录」正是最招人烦的那种小摩擦。
+3. **哈希用 Node 自带 scrypt**（RFC 7914，`N=16384, r=8, p=1`，单次约 60ms）。
+   不引 bcrypt / argon2：镜像已经背着 better-sqlite3 与 playwright，为存一个密码再加原生依赖不划算。
+   参数随哈希一起落盘，将来调高强度时老密码仍能校验。
+
+#### Cookie 与有效期
+
+| 场景 | cookie |
+| --- | --- |
+| 勾「保持登录（30 天）」 | `Max-Age=2592000`，库里有效期 30 天 |
+| 不勾 | 浏览器会话 cookie（关浏览器即失效），库里有效期 12 小时 |
+| 请求走 HTTPS（含 `X-Forwarded-Proto: https`） | 自动加 `Secure` |
+
+统一 `HttpOnly` + `SameSite=Lax` + `Path=/`。库里的 `expires_at` 是真正的门槛 ——
+就算有人手工改 cookie 的 `Max-Age`，过期行也查不出来。
+
+#### 防爆破
+
+同一 IP 连续失败 5 次锁 5 分钟（`TOO_MANY_ATTEMPTS`），提示里带剩余次数。
+计数放内存 Map，进程重启即清空 —— 这个场景够用，不值得为它建表。
+用户名错与密码错返回**同一句话**（「用户名或密码不正确」），免得免费告诉爆破者哪一半猜对了。
+
+#### 忘记密码（唯一出口）
+
+单账号系统没有「发邮件重置」。所以必须留一把备用钥匙：
+
+```yaml
+environment:
+  AUTH_DISABLED: "1"     # 临时关闭登录，用完立刻删掉
+```
+
+- 打开后 `requireLogin` 直接放行，前端也跳过登录页（**但账号未设置时仍会走初始化**，
+  否则逃生模式下永远没机会创建账号）。
+- 此时 `PUT /api/session/account` **不校验当前密码** —— 忘了密码的人当然不知道旧密码。
+  反正登录已经关了，跳过校验不会多开一道口子。
+- 完整步骤：加开关 → 重启 → 设置页重设密码 → 删开关 → 再重启。
+
+#### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `server/src/auth/password.ts` | 纯逻辑：scrypt 哈希 / 校验、用户名与密码规则、二次确认 |
+| `server/src/auth/cookie.ts` | 纯逻辑：手写 cookie 解析（同名子串、引号、URL 编码） |
+| `server/src/auth/service.ts` | 账号读写、会话增删查、失败限流、`requireLogin` 中间件 |
+| `server/src/routes/login.ts` | `/api/session/*` 接口 |
+| `web/src/pages/Login.tsx` | 登录页 / 初始化页（深蓝插画 + 白卡，配色写死不跟随主题） |
+| `web/src/components/AccountPanel.tsx` | 设置页「账号与安全」：改名字、改密码、下线其它设备 |
+
+挂载顺序在 `index.ts` 里是有讲究的：
+
+```ts
+app.use("/api/session", sessionRouter);  // 先挂自己的接口
+app.use("/api", requireLogin);           // 再把后面所有 /api 拦在登录之后
+app.use("/api/auth", authRouter);        // ...
+```
+
+`/api/auth/*` 是**登录 Telegram 账号**，`/api/session/*` 是**登录 tgsub 自己**，两条链路互不相干：
+前者未登录只影响能不能下载，后者未登录连界面都看不到。
+
+#### 前端门禁
+
+`App.tsx` 的三分支 + 一个全局事件：
+
+```tsx
+if (!state.configured || (!state.authDisabled && !state.authenticated)) return <Login … />;
+```
+
+`api.ts` 收到 401 且 code 为 `LOGIN_REQUIRED` / `SETUP_REQUIRED` 时派发 `tgsub:unauthorized`，
+外层重新拉状态 → 自然回到登录页。**不用每个页面各写一遍错误处理**。
+
+> 登录页刻意不用项目的主题变量：`tailwind.config.js` 把 `white` / `slate-*` 重映射成了
+> 「浅色主题=深色值」的反转色，用 `bg-white` 做白卡在浅色主题下会变成一块黑板。
+> 这页的颜色一律写字面色值。
+
+#### 自检
+
+`loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 211 项。
 
 ---
 
@@ -1020,7 +1133,8 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 ## HTTP 接口
 
-前端与机器人共用同一套 REST 接口，默认无鉴权（公网部署请开 Basic Auth 或放在反向代理之后）。
+前端与机器人共用同一套 REST 接口。1.3.2 起除 `/api/health` 与 `/api/session/*` 外
+**全部需要登录**（未带有效 cookie 返回 401 + `LOGIN_REQUIRED`）；公网部署仍建议再套反代 + HTTPS。
 
 > 元数据接口用 `key` 定位目标，而不是数据库 ID —— `key` 是绝对路径的 base64url 编码。
 > 这样「项目下载的文件」与「手动添加的本地文件 / 目录」可以共用同一套编辑逻辑。
@@ -1028,7 +1142,13 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查（容器健康探针用） |
+| GET | `/api/health` | 健康检查（容器健康探针用，**免登录**） |
+| GET | `/api/session/state` | 界面登录状态：`configured` / `authenticated` / `authDisabled` / 用户名 / 会话数 |
+| POST | `/api/session/setup` | 首次初始化（只能调一次，已设置则 409），成功后直接下发 cookie |
+| POST | `/api/session/login` | 用户名 + 密码 + `remember`；连错 5 次 429 |
+| POST | `/api/session/logout` | 退出当前设备（清库里的会话 + 清 cookie） |
+| PUT | `/api/session/account` | 改用户名 / 密码（需当前密码；改完其它会话全部失效） |
+| POST | `/api/session/logout-others` | 下线除当前设备外的所有会话 |
 | GET | `/api/auth/state` | 登录状态 / 账号信息 |
 | POST | `/api/auth/qr/start`、`/api/auth/qr/password`、`/api/auth/qr/cancel` | 扫码登录：开始、两步验证密码、取消 |
 | GET | `/api/auth/qr/state` | 轮询扫码状态（二维码、已扫描、成功） |
