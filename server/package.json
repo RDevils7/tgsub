@@ -15,6 +15,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "pino": "^9.5.0",
+    "playwright": "^1.49.0",
     "qrcode": "^1.5.4",
     "telegram": "^2.26.8"
   },

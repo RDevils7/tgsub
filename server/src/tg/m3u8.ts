@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ffmpegInfo } from "./ffmpeg";
 import { logger } from "../logger";
+import { resolveM3u8ViaBrowser } from "./m3u8Browser";
 
 /**
  * 网页 / m3u8 视频下载。
@@ -49,7 +50,7 @@ function hostOf(url: string): string {
   }
 }
 
-function refererOf(url: string): string {
+export function refererOf(url: string): string {
   try {
     const u = new URL(url);
     return `${u.protocol}//${u.host}/`;
@@ -58,7 +59,7 @@ function refererOf(url: string): string {
   }
 }
 
-function originOf(url: string): string {
+export function originOf(url: string): string {
   try {
     const u = new URL(url);
     return `${u.protocol}//${u.host}`;
@@ -77,7 +78,7 @@ export function sanitizeName(s: string): string {
   return cleaned.slice(0, 80) || "video";
 }
 
-function titleFromUrl(url: string): string {
+export function titleFromUrl(url: string): string {
   try {
     const u = new URL(url);
     const last = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "video");
@@ -205,8 +206,26 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
     }
   }
   if (!found) {
+    // 静态解析失败：这类站很可能是 SPA / JS 动态加载 / 签名接口，
+    // 用无头浏览器把页面跑起来、截获真实 m3u8 请求再试一次。
+    try {
+      const viaBrowser = await resolveM3u8ViaBrowser(url);
+      if (viaBrowser) {
+        return {
+          m3u8Url: viaBrowser.m3u8Url,
+          title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(url),
+          referer: viaBrowser.referer,
+          origin: viaBrowser.origin,
+        };
+      }
+    } catch (e) {
+      logger.warn("无头浏览器解析 m3u8 失败: %s", String(e));
+    }
+  }
+  if (!found) {
     throw new Error(
-      "没能从网页里解析出 m3u8 视频地址（这个站可能用了加密、非常规播放器，或需要登录才能看）",
+      "没能从网页里解析出 m3u8 视频地址（已尝试无头浏览器渲染页面，仍未能捕获播放请求；" +
+        "该站可能用了加密、签名接口，或需要登录才能看。可改用浏览器 F12 → Network → 过滤 .m3u8 → 复制直链粘贴）",
     );
   }
   return {
