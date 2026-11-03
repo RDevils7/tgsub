@@ -869,7 +869,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       // 它们后面再补最近的已完成 / 失败记录，整体设上限避免刷屏。
       const active = db
         .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
         )
         .all() as Array<{
         id: number;
@@ -879,10 +879,11 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         progress: number;
         file_size: number;
         created_at: number;
+        net_route: string | null;
       }>;
       const recent = db
         .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
         )
         .all() as Array<{
         id: number;
@@ -892,6 +893,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         progress: number;
         file_size: number;
         created_at: number;
+        net_route: string | null;
       }>;
       const MAX = 60;
       const capRecent = Math.max(0, MAX - active.length);
@@ -900,12 +902,15 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       if (!rows.length) return { text: "还没有下载任务" };
       const icon = (s: string): string =>
         s === "done" ? "✅" : s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "paused" ? "⏸" : s === "failed" ? "❌" : "⏭";
+      // 线路标记：直连 / 代理 / 自动，旧的记录没有这个字段就不显示
+      const routeTag = (r: string | null): string =>
+        r === "direct" ? " · 直连" : r === "proxy" ? " · 代理" : r === "auto" ? " · 自动" : "";
       const body = rows
         .map(
           (r) =>
             `${icon(r.status)} <b>#${r.id}</b> ${esc(r.save_name ?? r.file_name)}${
               r.status === "downloading" ? ` ${r.progress}%` : ""
-            } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}`,
+            } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}${routeTag(r.net_route)}`,
         )
         .join("\n");
       const footer = hidden > 0 ? `\n…还有 ${hidden} 条历史记录未显示，可到网页端查看` : "";

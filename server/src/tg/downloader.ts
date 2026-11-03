@@ -14,7 +14,8 @@ import { canNotifyCard, notifyCard } from "./notify";
 import { requestCacheTrim } from "../cache";
 import { parsePlatformLink } from "../platform/detect";
 import { downloadPlatform, platformName } from "../platform/ytdlp";
-import { downloadM3u8To } from "./m3u8";
+import { downloadM3u8To, hostOf, pickProxy, plannedRoutes } from "./m3u8";
+import { isNetworkError, rememberRoute } from "./netroute";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -65,6 +66,8 @@ const stmtDone = db.prepare<[number, string, number, number, number]>(
 const stmtResetStuck = db.prepare(
   "UPDATE downloads SET status = 'queued', progress = 0 WHERE status = 'downloading'",
 );
+/** 记录这次实际走的网络线路（直连 / 代理），界面上用来告诉用户 */
+const stmtRoute = db.prepare<[string, number]>("UPDATE downloads SET net_route = ? WHERE id = ?");
 const stmtChannel = db.prepare<[number], { username: string | null; tg_id: string | null; title: string }>(
   "SELECT username, tg_id, title FROM channels WHERE id = ?",
 );
@@ -825,23 +828,53 @@ class DownloadQueue {
     try {
       if (!m3u8?.url) throw new Error("找不到 m3u8 地址（解析结果丢失，请重新发链接）");
 
-      await downloadM3u8To(m3u8.url, outFile, {
-        referer: m3u8.referer,
-        origin: m3u8.origin,
-        signal: controller.signal,
-        onProgress: (pct, bytes) => {
-          const now = Date.now();
-          const live = this.live.get(id);
-          if (live) {
-            live.downloaded = bytes;
-            live.lastAt = now;
-            live.lastBytes = bytes;
-          }
-          if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
-          this.lastProgressAt.set(id, now);
-          stmtProgress.run(pct, bytes, id);
-        },
-      });
+      // 线路：默认直连优先（直连不通再回退代理）。解析阶段走通的线路会被记住，
+      // 这次直接沿用，省掉一次失败尝试。
+      const proxy = pickProxy();
+      const routes = plannedRoutes(m3u8.url);
+      let lastError: Error | null = null;
+      let downloaded = false;
+
+      for (let i = 0; i < routes.length; i += 1) {
+        const route = routes[i];
+        // 实时写回线路，界面上能立刻看到「这条在走直连还是代理」
+        stmtRoute.run(route, id);
+        try {
+          await downloadM3u8To(m3u8.url, outFile, {
+            referer: m3u8.referer,
+            origin: m3u8.origin,
+            signal: controller.signal,
+            route,
+            proxy,
+            onProgress: (pct, bytes) => {
+              const now = Date.now();
+              const live = this.live.get(id);
+              if (live) {
+                live.downloaded = bytes;
+                live.lastAt = now;
+                live.lastBytes = bytes;
+              }
+              if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
+              this.lastProgressAt.set(id, now);
+              stmtProgress.run(pct, bytes, id);
+            },
+          });
+          downloaded = true;
+          rememberRoute(hostOf(m3u8.url), route);
+          break;
+        } catch (err) {
+          if (controller.signal.aborted) throw err;
+          lastError = err as Error;
+          const message = lastError?.message ?? String(err);
+          const isLast = i === routes.length - 1;
+          if (isLast || !isNetworkError(message)) break;
+          logger.warn(
+            { id, route, err: message },
+            `按${route === "direct" ? "直连" : "代理"}下载失败，换另一条线路重试`,
+          );
+        }
+      }
+      if (!downloaded) throw lastError ?? new Error("下载失败");
 
       const stat = await fs.promises.stat(outFile);
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");

@@ -6,9 +6,10 @@ import {
   originOf,
   sanitizeName,
   titleFromUrl,
-  pickProxy,
   type M3u8Target,
 } from "./m3u8";
+import { acquireProxyBridge } from "./proxyBridge";
+import type { NetRoute } from "./netroute";
 
 /**
  * 无头浏览器渲染页面、截获真实 m3u8 请求。详见文件顶部说明。
@@ -126,6 +127,35 @@ async function tryTriggerPlay(page: Page): Promise<void> {
         break;
       }
     }
+    // 跳过广告倒计时：短视频站播放前常有 3~5 秒贴片广告，
+    // 第一次点击会打在浮层上，必须在广告结束后再点一次才真的会起播
+    const skipSelectors = ['[class*="skip" i]', '[class*="countdown" i]', '[class*="ad-skip" i]'];
+    for (const sel of skipSelectors) {
+      const el: any = doc?.querySelector(sel);
+      if (el && el.offsetParent !== null) {
+        try {
+          el.click();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    // 按文案找「跳过广告」按钮（CSS 没有按文本选中的写法，只能自己扫）
+    const walk = doc?.querySelectorAll?.("button, a, span, div");
+    if (walk) {
+      for (const node of Array.from(walk as ArrayLike<any>)) {
+        const text = String(node?.textContent ?? "").trim();
+        if (!text || text.length > 12) continue;
+        if (!/^(跳过|关闭广告|跳过广告|skip|skip ad)/i.test(text)) continue;
+        if (node.offsetParent === null) continue;
+        try {
+          node.click();
+          break;
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   };
   await page.evaluate(trigger).catch(() => {
     /* ignore */
@@ -134,8 +164,17 @@ async function tryTriggerPlay(page: Page): Promise<void> {
 
 /**
  * 渲染页面并截获 m3u8 请求（单次尝试）。
+ *
+ * route=direct 时浏览器直连；route=proxy 时经代理。
+ * 代理若是 SOCKS，这里通过本地桥转成 HTTP 代理给 Chromium
+ * （Chromium 不支持 socks4，且 socks5 由浏览器本地解析域名）。
  */
-async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Target | null> {
+async function resolveOnce(
+  pageUrl: string,
+  timeoutMs: number,
+  route: NetRoute,
+  proxy: string | undefined,
+): Promise<M3u8Target | null> {
   let browser: Browser;
   try {
     browser = await getBrowser();
@@ -143,14 +182,33 @@ async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Targ
     return null;
   }
 
-  const proxy = pickProxy();
-  const context = await browser.newContext({
-    userAgent: UA,
-    acceptDownloads: false,
-    // 让 navigator.webdriver 为 false，降低被站点识别为爬虫的概率
-    viewport: { width: 1280, height: 720 },
-    ...(proxy ? { proxy: { server: proxy } } : {}),
-  });
+  let bridgeUrl: string | undefined;
+  let releaseBridge: (() => void) | undefined;
+  if (route === "proxy" && proxy) {
+    try {
+      const bridge = await acquireProxyBridge(proxy);
+      bridgeUrl = bridge.url;
+      releaseBridge = bridge.release;
+    } catch (e) {
+      logger.warn("准备浏览器代理失败: %s", String(e));
+      return null;
+    }
+  }
+
+  let context;
+  try {
+    context = await browser.newContext({
+      userAgent: UA,
+      acceptDownloads: false,
+      // 让 navigator.webdriver 为 false，降低被站点识别为爬虫的概率
+      viewport: { width: 1280, height: 720 },
+      ...(bridgeUrl ? { proxy: { server: bridgeUrl } } : {}),
+    });
+  } catch (e) {
+    releaseBridge?.();
+    logger.warn("无头浏览器创建上下文失败: %s", String(e));
+    return null;
+  }
   await context.addInitScript((): void => {
     const nav: any = (globalThis as any).navigator;
     if (nav) {
@@ -184,13 +242,18 @@ async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Targ
     logger.warn("无头浏览器打开页面失败: %s", String(e));
   }
 
-  await tryTriggerPlay(page);
-
-  // 等待播放器发出 m3u8 请求；master 优先，其次任意 m3u8
+  // 等待播放器发出 m3u8 请求；master 优先，其次任意 m3u8。
+  // 期间反复点播放：短视频站播放前常有贴片广告倒计时，
+  // 只在开头点一次的话，click 会打在浮层上，播放器一直不起播。
   const deadline = Date.now() + timeoutMs;
+  let lastTrigger = 0;
   while (Date.now() < deadline) {
     const hasMaster = candidates.some((u) => rank(u) >= 3);
     if (hasMaster || candidates.length >= 3) break;
+    if (Date.now() - lastTrigger > 1500) {
+      lastTrigger = Date.now();
+      await tryTriggerPlay(page);
+    }
     await page.waitForTimeout(400);
   }
   if (!candidates.some((u) => rank(u) >= 3)) {
@@ -206,6 +269,7 @@ async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Targ
   await context.close().catch(() => {
     /* ignore */
   });
+  releaseBridge?.();
 
   if (!candidates.length) return null;
 
@@ -217,6 +281,7 @@ async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Targ
     title: pageTitle ? sanitizeName(pageTitle) : titleFromUrl(pageUrl),
     referer: refererOf(pageUrl),
     origin: originOf(pageUrl),
+    route,
   };
 }
 
@@ -229,10 +294,12 @@ async function resolveOnce(pageUrl: string, timeoutMs: number): Promise<M3u8Targ
 export async function resolveM3u8ViaBrowser(
   pageUrl: string,
   timeoutMs = 20000,
+  route: NetRoute = "direct",
+  proxy?: string,
 ): Promise<M3u8Target | null> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const r = await resolveOnce(pageUrl, timeoutMs);
+      const r = await resolveOnce(pageUrl, timeoutMs, route, proxy);
       if (r) return r;
       logger.warn("无头浏览器未捕获到 m3u8（第 %d 次尝试）", attempt);
     } catch (e) {

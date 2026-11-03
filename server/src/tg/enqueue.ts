@@ -51,9 +51,9 @@ export interface GroupEnqueueResult {
 const stmtInsertDownload = db.prepare(`
   INSERT OR IGNORE INTO downloads
     (channel_id, channel_title, message_id, grouped_id, file_name, file_size, mime_type,
-     media_kind, status, progress, matched_keyword, subscription_id, created_at, save_dir, save_name, emby_json)
+     media_kind, status, progress, matched_keyword, subscription_id, created_at, save_dir, save_name, emby_json, net_route)
   VALUES (@channel_id, @channel_title, @message_id, @grouped_id, @file_name, @file_size, @mime_type,
-     @media_kind, @status, 0, @matched_keyword, @subscription_id, @created_at, @save_dir, @save_name, @emby_json)
+     @media_kind, @status, 0, @matched_keyword, @subscription_id, @created_at, @save_dir, @save_name, @emby_json, @net_route)
 `);
 const stmtInsertLog = db.prepare(`
   INSERT INTO message_logs
@@ -339,6 +339,8 @@ const runGroup = db.transaction(
         save_dir: named?.dir ?? null,
         save_name: named?.name ?? null,
         emby_json: embyJson,
+        // Telegram 的连接由 proxy_url 决定：填了代理就走代理，没填就直连
+        net_route: String(getSettings().proxy_url ?? "").trim() ? "proxy" : "direct",
       });
 
       if (inserted.changes > 0) {

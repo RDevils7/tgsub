@@ -167,6 +167,9 @@ ensureColumn("downloads", "source_url", "TEXT");
 // 失败原因。原始建表语句里就有这一列，但极老的库可能没有；
 // 1.2.1 的「作废遗留抖音任务」迁移要写它，缺列会直接抛错中断启动。
 ensureColumn("downloads", "error", "TEXT");
+// 实际使用的网络线路：direct=直连 / proxy=代理 / auto=尚未确定。
+// 界面用它告诉用户「这条到底走没走代理」。
+ensureColumn("downloads", "net_route", "TEXT");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 

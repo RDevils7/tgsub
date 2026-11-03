@@ -121,15 +121,27 @@ interface Reader {
   readUntil(delimiter: string): Promise<string>;
   /** 取走缓冲区里剩下的字节（响应头之后很可能已经混进了 body） */
   drain(): Buffer;
+  /**
+   * 一直读到对端关闭连接（或攒够 limit 字节）后返回已读内容。
+   *
+   * 有些服务器既不给 Content-Length、也不声明 chunked，
+   * 这种响应只能读到连接关闭为止 —— 连通性探测要靠它拿到状态行。
+   */
+  readAll(limit: number): Promise<Buffer>;
   /** 拆掉监听：握手用的临时 reader 必须让位，否则后续数据会被它吞掉 */
   detach(): void;
 }
 
 function makeReader(socket: net.Socket): Reader {
+  // 确保 socket 处于 flowing 状态：没有 'data' 监听时，socket 收到的字节会被直接丢掉
+  socket.resume();
   let buf = Buffer.alloc(0);
   let pending: { kind: "n"; n: number } | { kind: "delim"; delim: string } | null = null;
   let waiter: { resolve: (v: Buffer | string) => void; reject: (e: Error) => void } | null = null;
   let failure: Error | null = null;
+  /** readAll 期间单独收集的数据（onData 会同时往 buf 里塞一份） */
+  let collecting: { chunks: Buffer[]; size: number; limit: number } | null = null;
+  let allWaiter: { resolve: (v: Buffer) => void; reject: (e: Error) => void } | null = null;
 
   const settle = () => {
     if (!waiter || !pending) return;
@@ -156,6 +168,12 @@ function makeReader(socket: net.Socket): Reader {
   };
 
   const fail = (err: Error) => {
+    if (allWaiter) {
+      const w = allWaiter;
+      allWaiter = null;
+      collecting = null;
+      w.reject(err);
+    }
     if (!waiter) {
       failure = err;
       return;
@@ -167,16 +185,39 @@ function makeReader(socket: net.Socket): Reader {
   };
 
   const onData = (chunk: Buffer) => {
+    if (collecting && allWaiter) {
+      collecting.chunks.push(chunk);
+      collecting.size += chunk.length;
+      if (collecting.size >= collecting.limit) {
+        const w = allWaiter;
+        allWaiter = null;
+        const out = Buffer.concat(collecting.chunks).subarray(0, collecting.limit);
+        collecting = null;
+        w.resolve(out);
+      }
+    }
     buf = Buffer.concat([buf, chunk]);
     settle();
   };
   const onError = (err: Error) => fail(err);
+  const onEnd = (): void => {
+    // 对端正常关闭：readAll 就算读完了
+    if (collecting && allWaiter) {
+      const w = allWaiter;
+      allWaiter = null;
+      const out = Buffer.concat(collecting.chunks).subarray(0, collecting.limit);
+      collecting = null;
+      w.resolve(out);
+    }
+    fail(new Error("连接被对端关闭"));
+  };
   const onClose = () => fail(new Error("连接被对端关闭"));
   const onTimeout = () => fail(new Error("网络读写超时"));
 
   socket.on("data", onData);
   // 没挂 error 监听时 socket 报错会直接抛出，这里兜住
   socket.on("error", onError);
+  socket.on("end", onEnd);
   socket.on("close", onClose);
   socket.on("timeout", onTimeout);
 
@@ -205,11 +246,26 @@ function makeReader(socket: net.Socket): Reader {
       buf = Buffer.alloc(0);
       return Buffer.from(out);
     },
+    async readAll(limit) {
+      const max = Math.max(1, Math.floor(limit));
+      const initial = buf;
+      buf = Buffer.alloc(0);
+      if (initial.length >= max) return initial.subarray(0, max);
+      if (failure) throw failure;
+      return new Promise<Buffer>((resolve, reject) => {
+        collecting = { chunks: [initial], size: initial.length, limit: max };
+        allWaiter = { resolve, reject };
+      });
+    },
     detach() {
       socket.removeListener("data", onData);
       socket.removeListener("error", onError);
+      socket.removeListener("end", onEnd);
       socket.removeListener("close", onClose);
       socket.removeListener("timeout", onTimeout);
+      // 交出控制权前先暂停：否则 socket 仍在 flowing、却没有任何 data 监听，
+      // 这段时间到达的字节会被白白丢掉（下一步的消费者接手时就读不到了）
+      socket.pause();
     },
   };
 }
@@ -396,8 +452,13 @@ async function httpConnect(
   }
 }
 
-/** 建立到 host:port 的通道；代理为 null 时直连。返回未加密的 socket */
-async function openChannel(
+/**
+ * 建立到 host:port 的通道；代理为 null 时直连。返回未加密的 socket
+ *
+ * 对外导出：m3u8 下载链路要用它搭一个「本地 HTTP 代理 → SOCKS 代理」的桥，
+ * 因为 ffmpeg 只认 http_proxy 环境变量，不支持 socks5。
+ */
+export async function openChannel(
   proxy: ParsedProxy | null,
   host: string,
   port: number,
@@ -505,7 +566,7 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
 
   const requestLines = [
     `${options.method ?? "GET"} ${path} HTTP/1.1`,
-    `Host: ${host}`,
+    `Host: ${url.host}`,
     `User-Agent: ${options.userAgent ?? `tgsub/${APP_VERSION}`}`,
     "Accept: */*",
     "Accept-Encoding: identity",
@@ -539,6 +600,10 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
       } else if (headers["transfer-encoding"]?.includes("chunked")) {
         const raw = await reader.readUntil("\r\n0\r\n\r\n").catch(() => "");
         body = decodeChunked(raw).slice(0, limit);
+      } else {
+        // 既没有 Content-Length 也没有 chunked：读到连接关闭为止
+        const chunk = await reader.readAll(limit);
+        body = chunk.toString("utf8");
       }
     }
     return { status, statusText, headers, body, ms, viaProxy: Boolean(proxy) };

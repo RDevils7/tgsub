@@ -4,7 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import { ffmpegInfo } from "./ffmpeg";
 import { logger } from "../logger";
+import { getSettings } from "../db";
+import { httpRequest, parseProxy } from "../lib/netprobe";
 import { resolveM3u8ViaBrowser } from "./m3u8Browser";
+import { acquireProxyBridge } from "./proxyBridge";
+import {
+  forgetDirectFailure,
+  isNetworkError,
+  orderRoutes,
+  pickProxyFrom,
+  planRoutes,
+  rememberDirectFailure,
+  rememberRoute,
+  type NetRoute,
+  type RouteMode,
+} from "./netroute";
 
 /**
  * 网页 / m3u8 视频下载。
@@ -17,6 +31,11 @@ import { resolveM3u8ViaBrowser } from "./m3u8Browser";
  * 下载统一走 ffmpeg（镜像里自带）：`ffmpeg -i <m3u8> -c copy out.mp4`。
  * AES-128 加密的 m3u8 ffmpeg 会自己拿 key（只要能访问 key URL），无需额外处理。
  * 防盗链：请求时自动带源站 Referer + 浏览器 UA，过大多数裸防盗链。
+ *
+ * 网络线路（1.3.0 起）：
+ *   默认「直连优先」——先直连，直连不通（超时 / DNS 失败 / 连不上）才回退代理，
+ *   并把这次实际走的线路记到 downloads.net_route，界面上能看到。
+ *   代理地址来自设置项 m3u8_proxy，未设则回落 M3U8_BROWSER_PROXY / HTTPS_PROXY / HTTP_PROXY。
  */
 
 const UA =
@@ -31,6 +50,8 @@ export interface M3u8Target {
   referer: string;
   /** 防盗链 Origin */
   origin: string;
+  /** 解析阶段实际走通的线路 */
+  route: NetRoute;
 }
 
 /** 是否看起来就是个 m3u8 链接 */
@@ -43,7 +64,7 @@ export function isHttpUrl(input: string): boolean {
   return /^https?:\/\/[^\s]+$/i.test(input.trim());
 }
 
-function hostOf(url: string): string {
+export function hostOf(url: string): string {
   try {
     return new URL(url).host;
   } catch {
@@ -96,6 +117,58 @@ function titleFromHtml(html: string): string | null {
   const t = m[1].replace(/\s*[-–|·].*$/, "").trim();
   return sanitizeName(t) || null;
 }
+
+/* ------------------------------------------------------------------ */
+/* 线路：代理从哪来、按什么顺序试                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 解析出网页 / m3u8 下载链路要用的代理地址（无头浏览器与 ffmpeg 共用）。
+ *
+ * 优先级：设置项 m3u8_proxy → 环境变量 M3U8_BROWSER_PROXY → HTTPS_PROXY → HTTP_PROXY。
+ * 自动跳过 127.0.0.1 / localhost / ::1 —— 这类是 WorkBuddy 等工具的内部代理，
+ * 指向它们会让外网视频站访问失败，必须排除。返回 undefined 表示没有代理可用。
+ */
+export function pickProxy(): string | undefined {
+  let setting = "";
+  try {
+    setting = getSettings().m3u8_proxy ?? "";
+  } catch {
+    setting = "";
+  }
+  return pickProxyFrom([
+    setting,
+    process.env.M3U8_BROWSER_PROXY,
+    process.env.HTTPS_PROXY,
+    process.env.https_proxy,
+    process.env.HTTP_PROXY,
+    process.env.http_proxy,
+  ]);
+}
+
+/** 当前的线路策略（auto=直连优先 / always=强制代理 / off=只直连） */
+export function routeMode(): RouteMode {
+  try {
+    const mode = getSettings().m3u8_proxy_mode;
+    return mode === "always" || mode === "off" ? mode : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+/**
+ * 按设置排出该按什么顺序试线路。
+ * auto 下就是「直连 → 代理」，即「能不用代理的地方尽量直连」。
+ */
+export function plannedRoutes(url: string): NetRoute[] {
+  const proxy = pickProxy();
+  const routes = planRoutes(routeMode(), Boolean(proxy));
+  return orderRoutes(routes, hostOf(url));
+}
+
+/* ------------------------------------------------------------------ */
+/* 网页抓取                                                             */
+/* ------------------------------------------------------------------ */
 
 /** 从网页 HTML 里挑出 m3u8 地址（已把相对路径解析成绝对地址） */
 function extractM3u8FromHtml(html: string, pageUrl: string): string | null {
@@ -154,53 +227,63 @@ function guessPlaylistUrls(pageUrl: string): string[] {
   }
 }
 
-async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": UA, Accept: "text/html,application/xhtml+xml,application/json,*/*" },
-    redirect: "follow",
-  });
-  if (!res.ok) throw new Error(`抓取网页失败：HTTP ${res.status}`);
-  return await res.text();
+/**
+ * 按指定线路抓一个 URL 的正文（跟随重定向）。
+ * 直连时 proxy 传 null；走代理时传 parseProxy 后的结果。
+ */
+async function requestText(
+  rawUrl: string,
+  opts: { route: NetRoute; proxy?: string; referer?: string; timeoutMs?: number; maxBody?: number },
+): Promise<string> {
+  const parsed = opts.route === "proxy" && opts.proxy ? parseProxy(opts.proxy) : null;
+  let current = rawUrl;
+  for (let hop = 0; hop < 5; hop += 1) {
+    const res = await httpRequest(current, {
+      proxy: parsed,
+      timeoutMs: opts.timeoutMs ?? 15_000,
+      // 抓的是公开视频站，不涉密；关掉证书校验以兼容中间人代理
+      verifyTls: false,
+      maxBody: opts.maxBody ?? 4 * 1024 * 1024,
+      userAgent: UA,
+      headers: opts.referer ? { Referer: opts.referer } : undefined,
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.location) {
+      current = new URL(res.headers.location, current).toString();
+      continue;
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`抓取失败：HTTP ${res.status}`);
+    }
+    return res.body;
+  }
+  throw new Error("重定向次数过多，已放弃");
 }
 
-/** 探测一个地址是不是真的 m3u8（HTTP 200 且内容是 #EXTM3U） */
-async function probeM3u8(url: string): Promise<boolean> {
+/** 探测一个地址是不是真的 m3u8（能拿到正文且含 #EXTM3U） */
+async function probeM3u8(url: string, route: NetRoute, proxy?: string): Promise<boolean> {
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": UA, Referer: refererOf(url) },
-      method: "GET",
-    });
-    if (!res.ok) return false;
-    const text = await res.text();
+    const text = await requestText(url, { route, proxy, referer: refererOf(url), timeoutMs: 10_000, maxBody: 256 * 1024 });
     return /#EXTM3U/i.test(text);
   } catch {
     return false;
   }
 }
 
-/**
- * 把用户输入（直接 m3u8 或网页链接）解析成真正要下载的 m3u8 地址 + 标题 + 防盗链信息。
- */
-export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
-  const url = input.trim();
-  if (looksLikeM3u8(url)) {
-    return {
-      m3u8Url: url,
-      title: titleFromUrl(url),
-      referer: refererOf(url),
-      origin: originOf(url),
-    };
-  }
+/* ------------------------------------------------------------------ */
+/* 解析入口                                                             */
+/* ------------------------------------------------------------------ */
 
-  if (!isHttpUrl(url)) {
-    throw new Error("只支持 m3u8 链接或网页链接（http/https 开头）");
-  }
-
-  const html = await fetchText(url);
-  let found = extractM3u8FromHtml(html, url);
+/** 用指定线路解析一个网页链接 */
+async function resolveViaRoute(
+  pageUrl: string,
+  route: NetRoute,
+  proxy: string | undefined,
+): Promise<M3u8Target> {
+  const html = await requestText(pageUrl, { route, proxy });
+  let found = extractM3u8FromHtml(html, pageUrl);
   if (!found) {
-    for (const guess of guessPlaylistUrls(url)) {
-      if (await probeM3u8(guess)) {
+    for (const guess of guessPlaylistUrls(pageUrl)) {
+      if (await probeM3u8(guess, route, proxy)) {
         found = guess;
         break;
       }
@@ -210,13 +293,15 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
     // 静态解析失败：这类站很可能是 SPA / JS 动态加载 / 签名接口，
     // 用无头浏览器把页面跑起来、截获真实 m3u8 请求再试一次。
     try {
-      const viaBrowser = await resolveM3u8ViaBrowser(url);
+      // 短视频站的播放器要等贴片广告倒计时结束才起播，给足 30 秒
+      const viaBrowser = await resolveM3u8ViaBrowser(pageUrl, 30_000, route, proxy);
       if (viaBrowser) {
         return {
           m3u8Url: viaBrowser.m3u8Url,
-          title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(url),
+          title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(pageUrl),
           referer: viaBrowser.referer,
           origin: viaBrowser.origin,
+          route,
         };
       }
     } catch (e) {
@@ -232,9 +317,53 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
   return {
     m3u8Url: found,
     title: titleFromHtml(html) || titleFromUrl(found),
-    referer: refererOf(url),
-    origin: originOf(url),
+    referer: refererOf(pageUrl),
+    origin: originOf(pageUrl),
+    route,
   };
+}
+
+/**
+ * 把用户输入（直接 m3u8 或网页链接）解析成真正要下载的 m3u8 地址 + 标题 + 防盗链信息。
+ *
+ * 线路：默认直连优先。直连抓不到（网络类错误）才换代理重试；
+ * 403 / 签名失效这类换线路也没用的错误直接抛出，不浪费时间。
+ */
+export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
+  const url = input.trim();
+  if (looksLikeM3u8(url)) {
+    return {
+      m3u8Url: url,
+      title: titleFromUrl(url),
+      referer: refererOf(url),
+      origin: originOf(url),
+      route: "direct",
+    };
+  }
+
+  if (!isHttpUrl(url)) {
+    throw new Error("只支持 m3u8 链接或网页链接（http/https 开头）");
+  }
+
+  const proxy = pickProxy();
+  const routes = orderRoutes(planRoutes(routeMode(), Boolean(proxy)), hostOf(url));
+  let lastError: Error | null = null;
+
+  for (const route of routes) {
+    try {
+      const target = await resolveViaRoute(url, route, proxy);
+      rememberRoute(hostOf(url), route);
+      if (route === "direct") forgetDirectFailure(hostOf(url));
+      return target;
+    } catch (err) {
+      lastError = err as Error;
+      const message = lastError?.message ?? String(err);
+      if (!isNetworkError(message)) throw lastError;
+      logger.warn("按 %s 线路解析失败，尝试换线路: %s", route, message);
+      if (route === "direct") rememberDirectFailure(hostOf(url));
+    }
+  }
+  throw lastError ?? new Error("解析失败");
 }
 
 export interface M3u8DownloadOpts {
@@ -243,38 +372,17 @@ export interface M3u8DownloadOpts {
   signal?: AbortSignal;
   /** 进度回调：pct 0~99（无总时长时为 0），downloadedBytes 为当前输出文件字节数 */
   onProgress?: (pct: number, downloadedBytes: number) => void;
+  /** 本次走哪条线路（默认直连） */
+  route?: NetRoute;
+  /** 代理地址；route=proxy 时必填 */
+  proxy?: string;
 }
 
 /**
- * 解析出 m3u8 下载链路要用的代理地址（无头浏览器与 ffmpeg 共用）。
- * 优先 M3U8_BROWSER_PROXY；未设时回落 HTTPS_PROXY / HTTP_PROXY（大小写都看）。
- * 自动跳过 127.0.0.1 / localhost / ::1 —— 这类是 WorkBuddy 等工具的内部代理，
- * 指向它们会让外网视频站访问失败，必须排除。返回 undefined 表示直连。
- */
-export function pickProxy(): string | undefined {
-  const candidates = [
-    process.env.M3U8_BROWSER_PROXY,
-    process.env.HTTPS_PROXY,
-    process.env.https_proxy,
-    process.env.HTTP_PROXY,
-    process.env.http_proxy,
-  ];
-  for (const c of candidates) {
-    if (!c) continue;
-    try {
-      const h = new URL(c).hostname.toLowerCase();
-      if (h === "127.0.0.1" || h === "localhost" || h === "::1") continue;
-      return c;
-    } catch {
-      continue;
-    }
-  }
-  return undefined;
-}
-
-/**
- * 用 ffmpeg 把 m3u8 下载并封装为 mp4。先写 `<outFile>.part`，成功再 rename。
- * 返回下载完成后的最终路径（outFile）。
+ * 用 ffmpeg 把 m3u8 下载并封装为 mp4。
+ *
+ * 先写系统临时目录下的 ASCII 临时文件，成功再 rename 到最终路径
+ * （ffmpeg 的 Windows 静态版打不开含中文的输出路径）。
  */
 export async function downloadM3u8To(
   m3u8Url: string,
@@ -323,60 +431,77 @@ export async function downloadM3u8To(
     });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    const proxy = pickProxy();
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    if (proxy) {
-      // ffmpeg 的 http/https 协议会读这些环境变量，让切片/密钥也走代理
-      env.HTTP_PROXY = proxy;
-      env.HTTPS_PROXY = proxy;
-      env.http_proxy = proxy;
-      env.https_proxy = proxy;
-    }
-    const child = spawn(ffmpegPath, args, { windowsHide: true, env });
-    let total = 0;
-    let stderr = "";
+  // 线路：直连时必须清掉环境里的代理变量（ffmpeg 会读 http_proxy / https_proxy），
+  // 否则「直连优先」根本直连不了。走代理时，SOCKS 通过本地桥转成 HTTP 代理给 ffmpeg。
+  const route = opts.route ?? "direct";
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]) {
+    delete env[key];
+  }
+  let releaseBridge: (() => void) | undefined;
+  if (route === "proxy" && opts.proxy) {
+    const bridge = await acquireProxyBridge(opts.proxy);
+    releaseBridge = bridge.release;
+    env.http_proxy = bridge.url;
+    env.https_proxy = bridge.url;
+    env.HTTP_PROXY = bridge.url;
+    env.HTTPS_PROXY = bridge.url;
+  }
 
-    const onAbort = (): void => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
-    };
-    if (opts.signal) {
-      if (opts.signal.aborted) onAbort();
-      else opts.signal.addEventListener("abort", onAbort);
-    }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(ffmpegPath, args, { windowsHide: true, env });
+      let total = 0;
+      let stderr = "";
 
-    child.stderr?.on("data", (buf: Buffer) => {
-      const line = buf.toString();
-      stderr += line;
-      const dur = /Duration:\s*(\d+):(\d+):(\d+)(?:\.(\d+))?/.exec(line);
-      if (dur && !total) {
-        total = +dur[1] * 3600 + +dur[2] * 60 + +dur[3] + (+(dur[4] ?? 0)) / 100;
-      }
-      const tm = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
-      if (tm && opts.onProgress) {
-        const cur = +tm[1] * 3600 + +tm[2] * 60 + +tm[3];
-        const pct = total > 0 ? Math.min(99, Math.round((cur / total) * 100)) : 0;
-        let bytes = 0;
+      const onAbort = (): void => {
         try {
-          bytes = fs.statSync(tmpPart).size;
+          child.kill("SIGKILL");
         } catch {
           /* ignore */
         }
-        opts.onProgress(pct, bytes);
+      };
+      if (opts.signal) {
+        if (opts.signal.aborted) onAbort();
+        else opts.signal.addEventListener("abort", onAbort);
       }
-    });
 
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => {
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-      if (code === 0) resolve();
-      else reject(new Error(parseFfmpegError(stderr)));
+      child.stderr?.on("data", (buf: Buffer) => {
+        const line = buf.toString();
+        stderr += line;
+        const dur = /Duration:\s*(\d+):(\d+):(\d+)(?:\.(\d+))?/.exec(line);
+        if (dur && !total) {
+          total = +dur[1] * 3600 + +dur[2] * 60 + +dur[3] + (+(dur[4] ?? 0)) / 100;
+        }
+        const tm = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
+        if (tm && opts.onProgress) {
+          const cur = +tm[1] * 3600 + +tm[2] * 60 + +tm[3];
+          const pct = total > 0 ? Math.min(99, Math.round((cur / total) * 100)) : 0;
+          let bytes = 0;
+          try {
+            bytes = fs.statSync(tmpPart).size;
+          } catch {
+            /* ignore */
+          }
+          opts.onProgress(pct, bytes);
+        }
+      });
+
+      child.on("error", (err) => reject(err));
+      child.on("close", (code) => {
+        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+        if (code === 0) resolve();
+        // 被用户停掉时 stderr 里只有一堆进度行，别拿它当错误原因
+        else if (opts.signal?.aborted) reject(new Error("下载已取消"));
+        else reject(new Error(parseFfmpegError(stderr)));
+      });
     });
-  });
+  } catch (err) {
+    cleanupTmp();
+    throw err;
+  } finally {
+    releaseBridge?.();
+  }
 
   // ffmpeg 成功：把临时文件挪到最终路径（跨卷回退 copy）
   try {
@@ -396,10 +521,21 @@ export async function downloadM3u8To(
 function parseFfmpegError(stderr: string): string {
   if (/403|Forbidden/i.test(stderr)) return "下载被拒绝（403），可能是防盗链/签名失效，试试带 Cookie 或换源";
   if (/404|Not Found/i.test(stderr)) return "视频地址已失效（404），源站可能已删除，或这是过期的临时链接";
-  if (/Connection|timed out|ECONN|resolve/i.test(stderr)) return "网络拉取失败，确认服务器能访问该地址（必要时配置代理）";
+  if (/Connection|timed out|ECONN|resolve|No route to host/i.test(stderr))
+    return "网络拉取失败，确认服务器能访问该地址（必要时配置代理）";
   if (/Invalid data found|moov atom|Server returned 4|Server returned 5/i.test(stderr))
     return "无法解析该 m3u8（可能是加密 / 非常规格式 / 源站返回错误）";
-  const lines = stderr.split("\n").filter(Boolean);
-  const last = lines[lines.length - 1] ?? "";
-  return last.slice(0, 300) || "ffmpeg 退出异常";
+  // ffmpeg 的日志里大量是「Opening '...' for reading」这类分片信息，
+  // 直接取最后一行会得到一句看不懂的话；优先挑真正像报错的行。
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const errorLine = lines.find(
+    (line) =>
+      /error|failed|invalid|refused|denied|forbidden|not found|timed out|unable/i.test(line) &&
+      !/Opening .* for reading/i.test(line),
+  );
+  if (errorLine) return errorLine.slice(0, 300);
+  return (lines[lines.length - 1] ?? "").slice(0, 300) || "ffmpeg 退出异常";
 }

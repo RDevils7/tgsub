@@ -7,7 +7,7 @@ import { encodeMeta, EmbyMeta } from "../tg/emby";
 import { PlatformId } from "../types";
 import { sanitizeSegment } from "../utils";
 import { PlatformLink } from "./detect";
-import { platformName, probePlatform, PlatformProbe, PlaylistEntry } from "./ytdlp";
+import { platformName, platformUsesProxy, probePlatform, PlatformProbe, PlaylistEntry } from "./ytdlp";
 import { downloader } from "../tg/downloader";
 
 /**
@@ -197,8 +197,8 @@ function enqueueProbe(platform: PlatformId, url: string, probe: PlatformProbe): 
     .prepare(
       `INSERT INTO downloads
          (channel_id, channel_title, message_id, file_name, file_size, mime_type, media_kind,
-          status, progress, downloaded_bytes, created_at, save_dir, save_name, emby_json, source, source_url)
-       VALUES (?, ?, 0, ?, ?, 'video/mp4', 'video', 'queued', 0, 0, ?, ?, ?, ?, 'platform', ?)`,
+          status, progress, downloaded_bytes, created_at, save_dir, save_name, emby_json, source, source_url, net_route)
+       VALUES (?, ?, 0, ?, ?, 'video/mp4', 'video', 'queued', 0, 0, ?, ?, ?, ?, 'platform', ?, ?)`,
     )
     .run(
       channelId,
@@ -211,6 +211,8 @@ function enqueueProbe(platform: PlatformId, url: string, probe: PlatformProbe): 
       `${sanitizeSegment(probe.title, 120)}.mp4`,
       encodeMeta(meta),
       url,
+      // yt-dlp 这次到底走不走代理：YouTube 恒走，国内平台看 platform_proxy_domestic
+      platformUsesProxy(platform) ? "proxy" : "direct",
     );
 
   const taskId = Number(info.lastInsertRowid);

@@ -137,8 +137,8 @@ function insertChannel(
 /** m3u8 / 网页视频下载任务落库：source='m3u8'，channel 相关字段留 0（不属于任何 Telegram 频道） */
 const stmtInsertM3u8 = db.prepare<[string, string, string, string, string, number]>(
   `INSERT INTO downloads
-   (channel_id, channel_title, message_id, file_name, source, source_url, save_dir, save_name, media_kind, emby_json, status, progress, downloaded_bytes, file_size, created_at)
-   VALUES (0, 'm3u8', 0, ?, 'm3u8', ?, ?, ?, 'video', ?, 'queued', 0, 0, 0, ?)`,
+   (channel_id, channel_title, message_id, file_name, source, source_url, save_dir, save_name, media_kind, emby_json, status, progress, downloaded_bytes, file_size, created_at, net_route)
+   VALUES (0, 'm3u8', 0, ?, 'm3u8', ?, ?, ?, 'video', ?, 'queued', 0, 0, 0, ?, 'auto')`,
 );
 
 async function enqueueFromTarget(
