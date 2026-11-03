@@ -50,6 +50,7 @@ import type {
   SettingsResponse,
   Stats,
   Subscription,
+  SessionState,
 } from "./types";
 
 export class ApiError extends Error {
@@ -71,6 +72,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!res.ok) {
     const payload = (data ?? {}) as { error?: string; code?: string };
+    // 会话过期或被清掉时，任何一次接口调用都会拿到 401。
+    // 抛个全局事件让外层切回登录页，好过每个页面各写一遍错误处理。
+    if (res.status === 401 && (payload.code === "LOGIN_REQUIRED" || payload.code === "SETUP_REQUIRED")) {
+      window.dispatchEvent(new CustomEvent("tgsub:unauthorized"));
+    }
     throw new ApiError(res.status, payload.error || `请求失败 (${res.status})`, payload.code);
   }
   return data as T;
@@ -78,6 +84,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ ok: boolean; uptime: number }>("/health"),
+
+  /* ------------------------------ 管理界面登录 ------------------------------ */
+  /** 一次问清三种状态：未初始化 / 未登录 / 已登录 */
+  sessionState: () => request<SessionState>("/session/state"),
+  /** 首次初始化账号，成功后服务端直接下发 cookie */
+  sessionSetup: (payload: { username: string; password: string; confirm: string }) =>
+    request<{ ok: boolean; username: string }>("/session/setup", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  sessionLogin: (payload: { username: string; password: string; remember: boolean }) =>
+    request<{ ok: boolean; username: string }>("/session/login", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  sessionLogout: () => request<{ ok: boolean }>("/session/logout", { method: "POST" }),
+  /** 改用户名 / 密码：要验当前密码，成功后其它设备全部掉线 */
+  sessionUpdateAccount: (payload: {
+    currentPassword: string;
+    username?: string;
+    newPassword?: string;
+    confirm?: string;
+  }) =>
+    request<{ ok: boolean; username: string }>("/session/account", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  sessionLogoutOthers: () => request<{ ok: boolean; removed: number }>("/session/logout-others", { method: "POST" }),
 
   stats: () => request<Stats>("/settings/stats"),
   scanState: () => request<ScanState>("/scan/state"),

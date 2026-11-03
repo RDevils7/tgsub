@@ -151,5 +151,13 @@ export const env = {
     user: process.env.BASIC_AUTH_USER || "",
     pass: process.env.BASIC_AUTH_PASS || "",
   },
+  /**
+   * 临时关闭管理界面登录（AUTH_DISABLED=1）。
+   *
+   * 单账号登录最怕的情况是「密码忘了，又没有任何入口能改」。
+   * 这个开关就是那把备用钥匙：改 compose 加一行、重启、进去重设密码，再把它去掉。
+   * 默认永远是开启鉴权的 —— 只有显式写了 1 才关。
+   */
+  authDisabled: process.env.AUTH_DISABLED === "1" || process.env.AUTH_DISABLED === "true",
   timezone: process.env.TZ || "Asia/Shanghai",
 };

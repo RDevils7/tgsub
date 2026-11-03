@@ -224,6 +224,17 @@ html.dark {
       var(--shimmer-a) 100%
     );
   }
+
+  /*
+   * 登录页专用输入框。
+   * 颜色全部写死：登录页固定「深蓝插画 + 白卡」的观感，不跟随明暗主题
+   * （详见 pages/Login.tsx 顶部说明）。这里若用 .field 会在某个主题下发灰。
+   */
+  .login-input {
+    @apply h-10 w-full rounded-[9px] border border-transparent bg-[#f4f6f9] px-3 text-[13px] text-[#0f172a]
+      transition placeholder:text-[#b0b6c1] hover:bg-[#eff2f7] focus:border-[#9dbcf3] focus:bg-[#ffffff]
+      focus:ring-[3px] focus:ring-[rgba(47,111,228,0.12)];
+  }
 }
 
 .glass-line {

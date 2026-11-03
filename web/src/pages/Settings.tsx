@@ -15,6 +15,7 @@ import type {
 import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../components/ui";
 import PlatformPanel from "../components/PlatformPanel";
 import CollapsibleCard from "../components/CollapsibleCard";
+import AccountPanel from "../components/AccountPanel";
 import {
   IconAlert,
   IconBot,
@@ -1628,6 +1629,9 @@ export default function Settings() {
           </Button>
         </div>
       </CollapsibleCard>
+
+      {/* 管理界面登录：和上面的「Telegram 账号」不是一回事，别混在一起 */}
+      <AccountPanel />
 
       {/* 版本信息：与镜像标签、/api/health 的 version 保持一致 */}
       <p className="pb-2 text-center text-[11px] text-slate-600">

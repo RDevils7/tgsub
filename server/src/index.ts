@@ -26,6 +26,8 @@ import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
 import { platformRouter } from "./routes/platform";
 import { manualRouter } from "./routes/manual";
+import { sessionRouter } from "./routes/login";
+import { requireLogin, getAccount } from "./auth/service";
 import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
 import { startYtdlpAutoUpdate } from "./platform/updater";
@@ -71,6 +73,11 @@ app.use((req, res, next) => {
   });
   next();
 });
+
+/* 管理界面登录：先挂自己的接口，再把后面所有 /api 都拦在登录之后。
+   注意顺序 —— 这两行必须在其它业务路由之前，否则保护不到它们。 */
+app.use("/api/session", sessionRouter);
+app.use("/api", requireLogin);
 
 app.use("/api/auth", authRouter);
 app.use("/api/channels", channelsRouter);
@@ -185,6 +192,11 @@ const server = app.listen(env.port, env.host, () => {
     },
     "tgsub 已启动",
   );
+  if (env.authDisabled) {
+    logger.warn("已通过 AUTH_DISABLED 关闭管理界面登录，任何人都能访问界面与接口，用完请立刻去掉");
+  } else if (!getAccount()) {
+    logger.warn("尚未设置管理界面登录账号，首次打开网页时会要求设置用户名与密码");
+  }
   if (!isConfigured()) {
     logger.warn("当前为自定义 API 模式但未填写 API ID / API Hash，请在设置页补全或切换为内置凭证");
   } else if (meta.state === "none") {

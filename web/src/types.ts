@@ -894,3 +894,17 @@ export interface CropRect {
   width: number;
   height: number;
 }
+
+/** 管理界面登录状态（GET /api/session/state） */
+export interface SessionState {
+  /** 是否已设置管理员账号。false 时前端引导初始化，而不是显示登录框 */
+  configured: boolean;
+  authenticated: boolean;
+  /** 服务端以 AUTH_DISABLED 关闭了登录（逃生模式） */
+  authDisabled: boolean;
+  username: string | null;
+  since: number | null;
+  session: { expiresAt: number; createdAt: number } | null;
+  /** 当前有效会话数，用于「退出其它设备」文案 */
+  devices: number;
+}

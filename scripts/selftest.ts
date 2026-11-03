@@ -74,11 +74,26 @@ import {
   type EpisodeSource,
 } from "../server/src/tg/renameplan";
 import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
+import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
+import { parseCookie } from "../server/src/auth/cookie";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
   try {
     fn();
+    passed += 1;
+    console.log(`  \u2713 ${name}`);
+  } catch (err) {
+    console.error(`  \u2717 ${name}`);
+    console.error(`    ${(err as Error).message}`);
+    process.exitCode = 1;
+  }
+}
+
+/** 口令哈希是异步的（scrypt 不阻塞事件循环），所以需要一个 async 版本 */
+async function checkAsync(name: string, fn: () => Promise<void>) {
+  try {
+    await fn();
     passed += 1;
     console.log(`  \u2713 ${name}`);
   } catch (err) {
@@ -2183,6 +2198,100 @@ function m3u8ParseChecks(): void {
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
+/* 管理界面登录：口令哈希、输入校验、cookie 解析                       */
+/* ------------------------------------------------------------------ */
+
+async function loginChecks(): Promise<void> {
+  await checkAsync("口令哈希按 scrypt 参数格式落盘，且不含明文", async () => {
+    const hash = await hashPassword("Sup3r-secret");
+    const parts = hash.split("$");
+    assert.equal(parts.length, 6);
+    assert.equal(parts[0], "scrypt");
+    assert.equal(parts[1], "16384");
+    assert.equal(parts[2], "8");
+    assert.ok(parts[4].length > 10, "盐太短");
+    assert.ok(parts[5].length > 40, "哈希太短");
+    assert.ok(!hash.includes("Sup3r-secret"), "哈希里不该出现明文");
+  });
+
+  await checkAsync("正确密码校验通过（含中文与符号）", async () => {
+    const hash = await hashPassword("口令-with-中文-1234");
+    assert.equal(await verifyPassword("口令-with-中文-1234", hash), true);
+  });
+
+  await checkAsync("错误密码一律不通过", async () => {
+    const hash = await hashPassword("correct-horse");
+    assert.equal(await verifyPassword("correct-hors", hash), false);
+    assert.equal(await verifyPassword("Correct-horse", hash), false);
+    assert.equal(await verifyPassword("", hash), false);
+    assert.equal(await verifyPassword("correct-horse ", hash), false);
+  });
+
+  await checkAsync("同一密码两次哈希不同（盐随机），但都能校验", async () => {
+    const a = await hashPassword("same-password");
+    const b = await hashPassword("same-password");
+    assert.notEqual(a, b);
+    assert.equal(await verifyPassword("same-password", a), true);
+    assert.equal(await verifyPassword("same-password", b), true);
+  });
+
+  await checkAsync("坏掉/伪造的哈希记录只判失败，不抛错", async () => {
+    const bad = [
+      "",
+      "plaintext",
+      "scrypt$1$2$3",
+      "bcrypt$16384$8$1$AAAA$BBBB",
+      "scrypt$16384$8$1$$",
+      "scrypt$0$8$1$AAAA$BBBB",
+      // N 被改到超大：读库前就该拒，否则一次登录能把 CPU 钉死
+      "scrypt$999999999$8$1$AAAA$BBBB",
+    ];
+    for (const value of bad) {
+      assert.equal(await verifyPassword("anything", value), false, `应拒绝：${value}`);
+    }
+  });
+
+  check("用户名规则", () => {
+    assert.equal(usernameProblem("admin"), null);
+    assert.equal(usernameProblem("张三"), null);
+    assert.equal(usernameProblem("ops.admin-1"), null);
+    assert.ok(usernameProblem(""));
+    assert.ok(usernameProblem("a"), "单字符太短");
+    assert.ok(usernameProblem("a b"), "不能有空格");
+    assert.ok(usernameProblem("x".repeat(33)), "超过 32 位");
+    assert.ok(usernameProblem("admin/root"), "不允许斜杠");
+  });
+
+  check("密码规则：拦太短、纯重复、纯顺序", () => {
+    assert.equal(passwordProblem("abcd1234"), null);
+    assert.ok(passwordProblem(""), "空密码");
+    assert.ok(passwordProblem("abcd123"), "7 位太短");
+    assert.ok(passwordProblem("aaaaaaaa"), "纯重复");
+    assert.ok(passwordProblem("0123456789"), "纯顺序且不足 12 位");
+    assert.equal(passwordProblem("0123456789ab"), null, "长度够了就放行");
+    assert.ok(passwordProblem("x".repeat(129)), "超长");
+  });
+
+  check("两次输入不一致", () => {
+    assert.equal(confirmProblem("abcdefgh", "abcdefgh"), null);
+    assert.ok(confirmProblem("abcdefgh", "abcdefgi"));
+  });
+
+  check("Cookie 解析：同名子串、引号、空值、编码", () => {
+    assert.equal(parseCookie("a=1; tgsub_sid=abc-123", "tgsub_sid"), "abc-123");
+    assert.equal(parseCookie(undefined, "tgsub_sid"), "");
+    assert.equal(parseCookie("", "tgsub_sid"), "");
+    assert.equal(parseCookie("tgsub_sid=", "tgsub_sid"), "");
+    assert.equal(parseCookie('tgsub_sid="quoted"', "tgsub_sid"), "quoted");
+    // x 前缀同名不能被当成目标 cookie
+    assert.equal(parseCookie("xtgsub_sid=nope; tgsub_sid=ok", "tgsub_sid"), "ok");
+    assert.equal(parseCookie("tgsub_sid=a%3Db%26c", "tgsub_sid"), "a=b&c");
+    // 孤立的 % 不合法，按原样返回，而不是当作没有
+    assert.equal(parseCookie("tgsub_sid=bad%zz", "tgsub_sid"), "bad%zz");
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 分来源下载目录：默认值、路径拼接、用户输入校验                     */
 /* ------------------------------------------------------------------ */
 
@@ -2335,6 +2444,7 @@ async function main(): Promise<void> {
     ["剧集改名合并用例", () => renamePlanChecks()],
     ["手动下载记录用例", () => manualNoteChecks()],
     ["分来源下载目录用例", () => mediaDirChecks()],
+    ["管理界面登录用例", () => loginChecks()],
     ["m3u8 解析用例", () => m3u8ParseChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],

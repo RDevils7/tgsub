@@ -158,6 +158,20 @@ CREATE TABLE IF NOT EXISTS manual_history (
 );
 CREATE INDEX IF NOT EXISTS idx_manual_history_created ON manual_history(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_manual_history_status ON manual_history(status, id DESC);
+
+/* 管理界面登录会话。
+   只存 token 的 sha256，库文件被拿走也换不出可用的 cookie。
+   放数据库而不是内存：容器重启（升级镜像是最常见的一次）不该让人重新登录。 */
+CREATE TABLE IF NOT EXISTS login_sessions (
+  token_hash TEXT PRIMARY KEY,
+  username   TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_seen  INTEGER NOT NULL,
+  ip         TEXT,
+  ua         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_login_sessions_expires ON login_sessions(expires_at);
 `);
 
 /** 轻量迁移：老库补列（SQLite 没有 ADD COLUMN IF NOT EXISTS） */

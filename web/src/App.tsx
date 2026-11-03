@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { ScanState, Stats } from "./types";
-import { ToastProvider, Button, Badge, StatusDot, useToast } from "./components/ui";
+import { ToastProvider, Button, Badge, StatusDot, Spinner, useToast } from "./components/ui";
 import {
   IconBroadcast,
   IconDashboard,
@@ -9,6 +9,7 @@ import {
   IconImage,
   IconInbox,
   IconLink,
+  IconLogout,
   IconLogs,
   IconMenu,
   IconMoon,
@@ -29,6 +30,8 @@ import Metadata from "./pages/Metadata";
 import Emby from "./pages/Emby";
 import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
+import Login from "./pages/Login";
+import type { SessionState } from "./types";
 import { formatCountdown } from "./utils";
 import { useTheme } from "./hooks/useTheme";
 
@@ -75,7 +78,7 @@ function readHash(): PageKey {
   return (NAV.some((n) => n.key === key) ? key : "dashboard") as PageKey;
 }
 
-function Shell() {
+function Shell({ session, onLogout }: { session: SessionState; onLogout: () => void }) {
   const [page, setPage] = useState<PageKey>(readHash);
   const [navOpen, setNavOpen] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -212,6 +215,17 @@ function Shell() {
               ? `自动扫描 · 每 ${scanState.intervalMinutes} 分钟`
               : "前往设置完成 Telegram 登录"}
           </p>
+          {!session.authDisabled && (
+            <button
+              onClick={onLogout}
+              className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] py-1.5
+                text-[11px] text-slate-500 transition hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-slate-300"
+              title={session.username ? `已登录：${session.username}` : undefined}
+            >
+              <IconLogout className="h-3 w-3" />
+              退出登录
+            </button>
+          )}
         </div>
       </aside>
 
@@ -287,10 +301,88 @@ function Shell() {
   );
 }
 
+/**
+ * 登录门禁。
+ *
+ * 三种情况分开处理，而不是「没登录就跳路由」：
+ *   1. 还没设置过账号 → 直接进初始化界面（不能跳过，否则这个功能形同虚设）
+ *   2. 设置了但没登录 / 会话过期 → 登录界面
+ *   3. 已登录 → 主界面
+ *
+ * 任意接口返回 401 时会派发 tgsub:unauthorized，这里重新拉一次状态，
+ * 于是被踢下线的人会自然回到登录页，不用每个页面各写一遍。
+ */
+function useSessionState() {
+  const [state, setState] = useState<SessionState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const next = await api.sessionState();
+      setState(next);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message || "无法连接服务");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const onUnauthorized = () => void load();
+    window.addEventListener("tgsub:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("tgsub:unauthorized", onUnauthorized);
+  }, [load]);
+
+  return { state, error, reload: load };
+}
+
+function Boot({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4">
+      <img src="/logo.png" alt="tgsub" className="h-11 w-11 rounded-2xl object-cover shadow-glow ring-1 ring-white/10" />
+      {error ? (
+        <>
+          <p className="text-[13px] text-slate-400">{error}</p>
+          <Button size="sm" onClick={onRetry}>
+            重试
+          </Button>
+        </>
+      ) : (
+        <div className="flex items-center gap-2 text-[12.5px] text-slate-500">
+          <Spinner className="h-3.5 w-3.5" />
+          正在连接…
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
+  const { state, error, reload } = useSessionState();
+
+  if (!state) return <Boot error={error} onRetry={reload} />;
+
+  /**
+   * 门禁判断的两种顺序很关键：
+   *   - 还没设置过账号 → 一定先走初始化，哪怕服务端用 AUTH_DISABLED 关掉了登录。
+   *     否则「临时关掉登录」这种逃生模式下，账号永远没机会被创建。
+   *   - 已设置账号 → 登录关闭时直接放行，开启时才要 cookie。
+   */
+  if (!state.configured || (!state.authDisabled && !state.authenticated)) {
+    return <Login state={state} onDone={reload} />;
+  }
+
+  const logout = async () => {
+    try {
+      await api.sessionLogout();
+    } finally {
+      await reload();
+    }
+  };
+
   return (
     <ToastProvider>
-      <Shell />
+      <Shell session={state} onLogout={() => void logout()} />
     </ToastProvider>
   );
 }
