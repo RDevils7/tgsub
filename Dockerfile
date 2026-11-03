@@ -93,8 +93,8 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 # 版本号：与 package.json / server/src/version.ts 保持一致。
-# /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.2.3 → v1.2.3 / latest）。
-ARG APP_VERSION=1.2.3
+# /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.2.4 → v1.2.4 / latest）。
+ARG APP_VERSION=1.2.4
 
 ENV NODE_ENV=production \
     PORT=6789 \
