@@ -101,6 +101,40 @@ export function statusMeta(status: string): { label: string; className: string; 
   }
 }
 
+/**
+ * 网络线路徽章：这条任务到底走的是直连还是代理。
+ * auto = 还没下载（排队中），线路待定。
+ */
+export function routeMeta(route: string | null | undefined): { label: string; className: string; hint: string } {
+  switch (route) {
+    case "direct":
+      return {
+        label: "直连",
+        className: "bg-emerald-500/10 text-ok border-emerald-500/20",
+        hint: "这条没有经过代理，直接连源站",
+      };
+    case "proxy":
+      return {
+        label: "代理",
+        className: "bg-sky-500/10 text-info border-sky-500/20",
+        hint: "这条经代理中转（直连不通时自动切换）",
+      };
+    case "auto":
+      return {
+        label: "自动",
+        className: "bg-white/5 text-slate-400 border-white/10",
+        hint: "还没开始下载，线路待定",
+      };
+    default:
+      // 老记录没有这个字段（1.3.0 之前入队的），界面直接不显示徽章
+      return {
+        label: "",
+        className: "",
+        hint: "",
+      };
+  }
+}
+
 /** 监控日志的处理结果样式 */
 export function logKindMeta(kind: string): { label: string; className: string; dot: string } {
   switch (kind) {

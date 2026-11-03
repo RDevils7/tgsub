@@ -62,6 +62,8 @@ export interface DownloadItem {
   save_dir: string | null;
   /** 按剧集解析出的目标文件名 */
   save_name: string | null;
+  /** 实际使用的网络线路：direct=直连 / proxy=代理 / auto=尚未确定 */
+  net_route: string | null;
 }
 
 /** 按链接/指定消息直接下载的回执 */
@@ -256,6 +258,10 @@ export interface AppSettings {
   ytdlp_auto_update: boolean;
   /** 检查间隔（小时） */
   ytdlp_check_hours: number;
+  /** 网页 / m3u8 下载用的代理；留空则回落环境变量 */
+  m3u8_proxy: string;
+  /** 网页 / m3u8 下载的线路策略：auto=直连优先 / always=强制代理 / off=只直连 */
+  m3u8_proxy_mode: "auto" | "always" | "off";
   has_session?: boolean;
 }
 

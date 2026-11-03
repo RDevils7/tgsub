@@ -18,7 +18,7 @@ import {
   IconTrash,
   IconVideo,
 } from "../components/icons";
-import { formatBytes, formatDateTime, formatDuration, formatEta, formatRelative, formatSpeed, statusMeta } from "../utils";
+import { formatBytes, formatDateTime, formatDuration, formatEta, formatRelative, formatSpeed, routeMeta, statusMeta } from "../utils";
 
 const TABS: Array<{ key: string; label: string }> = [
   { key: "all", label: "全部" },
@@ -410,6 +410,7 @@ export default function Downloads() {
           <div className="divide-y divide-white/[0.04]">
             {items.map((item) => {
               const meta = statusMeta(item.status);
+              const route = routeMeta(item.net_route);
               return (
                 <div key={item.id} className="flex flex-wrap items-start gap-3 px-4 py-3 transition hover:bg-white/[0.02]">
                   <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${meta.className}`}>
@@ -435,6 +436,11 @@ export default function Downloads() {
                         <StatusDot className={meta.dot} />
                         {meta.label}
                       </Badge>
+                      {item.net_route && (
+                        <Badge className={route.className} title={route.hint}>
+                          {route.label}
+                        </Badge>
+                      )}
                     </div>
                     <p className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-slate-500">
                       <span className="truncate">{item.channel_title}</span>
