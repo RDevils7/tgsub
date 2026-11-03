@@ -700,6 +700,76 @@ B站 567 两种说法 + 缺登录态提示）、抖音链接不再被识别、�
 
 ---
 
+## 网页 / m3u8 视频下载（1.3.0）
+
+### 入口
+
+- **Web**：「手动下载」页粘普通网页链接或 `.m3u8` 直链；
+- **机器人**：把链接直接发给机器人；
+- 两者都落到同一张 `downloads` 表（`source='m3u8'`，`channel_id=0`），复用外部并行车道、进度、暂停/停止、Emby 收尾。
+
+### 解析流程（逐级兜底）
+
+| 级| 做法 | 能覆盖 |
+| --- | --- | --- |
+| 1 | 直接识别 `.m3u8` | 直链 |
+| 2 | 静态抓 HTML，正则找 `<video>` / `<source>` / JS 变量里的 m3u8 | 普通服务端渲染页 |
+| 3 | 试 `playlist.m3u8` / `index.m3u8` / `live.m3u8` / `hls.m3u8` | 路径固定的播放器 |
+| 4 | **无头 Chromium 真正渲染页面**，监听网络响应截获 m3u8 | SPA / 签名接口 / 加密接口（短视频站、短剧站） |
+
+第 4 级的实现要点：
+
+- `server/src/tg/m3u8Browser.ts` 复用单个 Chromium 进程，每���请求只开 context/page，空闲 3 分钟自动关掉释放内存；
+- `navigator.webdriver` 置false，并尝试点 `.vjs-big-play-button` / `button.play` 等播放按钮触发懒加载；
+- **标题在截获 m3u8 之后才取** —— SPA 往往等数据回来后才把真实标题写进 `<title>`，太早取只会拿到空壳标题；
+- 失败会换新 context 重试一次（代理抖动 / 站点限流时偶发 `ERR_CONNECTION_CLOSED`）。
+
+### 下载
+
+- `ffmpeg -headers "UA + Referer + Origin" -i <m3u8> -c copy -bsf:a aac_adtstoasc -f mp4`；
+- **输出必须先写 ASCII 临时文件**：ffmpeg 的 Windows 静态版打不开含中文的输出路径（报 `Invalid argument`），
+  且 `.part` 不是合法封装格式；故写到 `os.tmpdir()` 下的 `*.mp4`，成功后再 rename（跨卷回退 copy）；
+- AES-128 切片由 ffmpeg 自己取 key 解密（日志里能看到 `crypto+https://...`）；
+- 下载完成后按 `emby_json` 生成 nfo + 封面，可通知 Emby 入库。
+
+### 网络线路：直连优先（1.3.0）
+
+**目标：能不用代理的地方尽量直连。** 直连少一跳、延迟低，也不怕代理抽风。
+
+| 环节 | 做法 |
+| --- | --- |
+| 代理来源 | 设置项 `m3u8_proxy` → 环境变量 `M3U8_BROWSER_PROXY` → `HTTPS_PROXY` / `HTTP_PROXY`；自动跳过 `127.0.0.1` / `localhost` / `::1`（工具自带的内部代理，指向它们外网必挂） |
+| 线路策略 | `auto`（直连优先，默认）/ `always`（强制代理）/ `off`（只直连） |
+| 尝试顺序 | `auto` 下是 **直连 → 代理**；某域名上次走代理才通的，下次直接先用代理（`rememberedRoute`，10 分钟有效） |
+| 换线路条件 | **只有网络类错误**（超时 / DNS 失败 / 连接拒绝 / 连接重置 / SSL 握手）才换线路重试；403 / 签名失效 / 404 换线路也没用，直接报错 |
+| 失败记忆 | 某域名直连失败后记 30 分钟，之后不再浪费时间重试直连 |
+| 落库 | `downloads.net_route` 记 `direct` / `proxy` / `auto`；下载中实时更新为实际线路，Web 下载页与机器人 `/tasks` 显示「直连 / 代理 / 自动」徽章 |
+
+**SOCKS 代理怎么喂给 ffmpeg**：ffmpeg 的 http 协议只认 `http_proxy` / `https_proxy`，**不支持 socks**，
+Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因此 `server/src/tg/proxyBridge.ts` 起一个
+本地 HTTP 代理（`127.0.0.1:<随机端口>`），把 CONNECT 隧道转给 SOCKS 代理 —— 两种客户端都能用
+`socks4 / socks5 / socks5h`，且域名交给代理解析。桥按代理地址缓存复用，引用归零后空闲 60 秒关闭。
+
+**直连时必须清掉环境里的代理变量**：ffmpeg 会读 `http_proxy` / `https_proxy`，容器或宿主机上若存在
+`http_proxy=http://127.0.0.1:xxxx`，「直连优先」就名存实亡，故直连线路显式删除这些变量。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `server/src/tg/netroute.ts` | 线路决策的纯逻辑：策略枚举、代理挑选（跳过内部代理）、网络类错误判定、直连失败记忆、线路记忆 |
+| `server/src/tg/m3u8.ts` | 解析与下载：按线路抓页面、无头浏览器兜底、ffmpeg 下载（直连时清代理变量） |
+| `server/src/tg/m3u8Browser.ts` | 无头 Chromium 渲染与截获，按指定线路挂代理 |
+| `server/src/tg/proxyBridge.ts` | 本地 HTTP → SOCKS 桥 |
+| `server/src/lib/netprobe.ts` | 自研 HTTP 客户端（直连 + SOCKS4/4a/5/5h + HTTP/HTTPS CONNECT），`readAll()` 支持无 Content-Length 的响应 |
+
+### 自检
+
+`netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
+直连失败记忆、网络类错误判定、host 与文案。合计 154 项，全部不依赖网络。
+
+---
+
 ## Telegram 机器人
 
 在「设置 → Telegram 机器人」里配置，之后用手机就能遥控，不用开网页：

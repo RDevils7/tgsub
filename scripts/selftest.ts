@@ -1659,6 +1659,92 @@ function proxyChecks(): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* 网络线路：直连优先、失败回退代理                                   */
+/* ------------------------------------------------------------------ */
+
+function netRouteChecks(): void {
+  const {
+    clearDirectFailures,
+    clearRouteMemory,
+    directFailedRecently,
+    forgetDirectFailure,
+    hostOfUrl,
+    isInternalProxy,
+    isNetworkError,
+    orderRoutes,
+    pickProxyFrom,
+    planRoutes,
+    rememberDirectFailure,
+    rememberRoute,
+    rememberedRoute,
+    routeLabel,
+  } = require("../server/src/tg/netroute") as typeof import("../server/src/tg/netroute");
+
+  check("内部代理要被排除", () => {
+    assert.equal(isInternalProxy("127.0.0.1:7890"), true);
+    assert.equal(isInternalProxy("http://127.0.0.1:58906"), true);
+    assert.equal(isInternalProxy("localhost:1080"), true);
+    assert.equal(isInternalProxy("http://[::1]:1080"), true);
+    assert.equal(isInternalProxy("192.168.5.2:7890"), false);
+    assert.equal(isInternalProxy(""), false);
+  });
+
+  check("候选代理里跳过内部地址与空值", () => {
+    assert.equal(pickProxyFrom(["", "127.0.0.1:7890", "socks5://192.168.5.2:7890"]), "socks5://192.168.5.2:7890");
+    assert.equal(pickProxyFrom(["127.0.0.1:1", "localhost:2"]), undefined);
+    assert.equal(pickProxyFrom([]), undefined);
+  });
+
+  check("直连优先：auto 的尝试顺序是 直连 → 代理", () => {
+    assert.deepEqual(planRoutes("auto", true), ["direct", "proxy"]);
+    assert.deepEqual(planRoutes("auto", false), ["direct"]);
+    assert.deepEqual(planRoutes("always", true), ["proxy"]);
+    assert.deepEqual(planRoutes("always", false), ["direct"]);
+    assert.deepEqual(planRoutes("off", true), ["direct"]);
+  });
+
+  check("上次走通的线路会被排到前面", () => {
+    clearRouteMemory();
+    rememberRoute("v.example.com", "proxy");
+    assert.equal(rememberedRoute("v.example.com"), "proxy");
+    assert.deepEqual(orderRoutes(["direct", "proxy"], "v.example.com"), ["proxy", "direct"]);
+    // 不在候选里的线路不参与排序
+    assert.deepEqual(orderRoutes(["direct"], "v.example.com"), ["direct"]);
+    clearRouteMemory();
+    assert.equal(rememberedRoute("v.example.com"), undefined);
+  });
+
+  check("直连失败会被记住，恢复后清掉", () => {
+    clearDirectFailures();
+    assert.equal(directFailedRecently("a.example.com"), false);
+    rememberDirectFailure("a.example.com");
+    assert.equal(directFailedRecently("a.example.com"), true);
+    forgetDirectFailure("a.example.com");
+    assert.equal(directFailedRecently("a.example.com"), false);
+  });
+
+  check("只有网络类错误才值得换线路", () => {
+    assert.equal(isNetworkError("Connection timed out"), true);
+    assert.equal(isNetworkError("ECONNRESET"), true);
+    assert.equal(isNetworkError("Could not resolve host"), true);
+    assert.equal(isNetworkError("Connection refused"), true);
+    // 403 / 签名失效换线路也没用
+    assert.equal(isNetworkError("下载被拒绝（403）"), false);
+    assert.equal(isNetworkError("视频地址已失效（404）"), false);
+    assert.equal(isNetworkError(""), false);
+  });
+
+  check("取 host 与线路文案", () => {
+    assert.equal(hostOfUrl("https://a.example.com/x.m3u8"), "a.example.com");
+    assert.equal(hostOfUrl("不是网址"), "");
+    assert.equal(routeLabel("direct"), "直连");
+    assert.equal(routeLabel("proxy"), "代理");
+    assert.equal(routeLabel("auto"), "自动");
+    assert.equal(routeLabel(null), "未知");
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 媒体删除相关的路径规则                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1723,6 +1809,7 @@ async function main(): Promise<void> {
     ["Emby 入库用例", () => embyNotifyChecks()],
     ["缓存清理用例", () => cacheChecks()],
     ["网络代理用例", () => proxyChecks()],
+    ["网络线路用例", () => netRouteChecks()],
     ["第三方平台用例", () => platformChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
