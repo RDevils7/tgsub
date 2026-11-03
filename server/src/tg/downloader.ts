@@ -14,8 +14,18 @@ import { canNotifyCard, notifyCard } from "./notify";
 import { requestCacheTrim } from "../cache";
 import { parsePlatformLink } from "../platform/detect";
 import { downloadPlatform, platformName } from "../platform/ytdlp";
-import { downloadM3u8To, hostOf, pickProxy, plannedRoutes } from "./m3u8";
-import { isNetworkError, rememberRoute } from "./netroute";
+import {
+  downloadM3u8To,
+  hostOf,
+  isSignatureError,
+  looksLikeM3u8,
+  normalizeMediaUrl,
+  pickProxy,
+  plannedRoutes,
+  resolveM3u8Input,
+  shouldRetryRoute,
+} from "./m3u8";
+import { rememberRoute } from "./netroute";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -814,7 +824,7 @@ class DownloadQueue {
     const meta = decodeMeta(row.emby_json);
     const label = meta?.series ?? row.save_name ?? row.file_name;
     const dir = path.join(env.downloadDir, row.save_dir ?? "");
-    let m3u8: { url: string; referer?: string; origin?: string } | undefined;
+    let m3u8: { url: string; referer?: string; origin?: string; cookies?: string } | undefined;
     try {
       m3u8 = JSON.parse(row.emby_json || "{}").m3u8;
     } catch {
@@ -831,50 +841,98 @@ class DownloadQueue {
       // 线路：默认直连优先（直连不通再回退代理）。解析阶段走通的线路会被记住，
       // 这次直接沿用，省掉一次失败尝试。
       const proxy = pickProxy();
-      const routes = plannedRoutes(m3u8.url);
-      let lastError: Error | null = null;
-      let downloaded = false;
+      let target = {
+        url: normalizeMediaUrl(m3u8.url),
+        referer: m3u8.referer,
+        origin: m3u8.origin,
+        cookies: m3u8.cookies,
+      };
 
-      for (let i = 0; i < routes.length; i += 1) {
-        const route = routes[i];
-        // 实时写回线路，界面上能立刻看到「这条在走直连还是代理」
-        stmtRoute.run(route, id);
+      const attemptDownload = async (): Promise<void> => {
+        const routes = plannedRoutes(target.url);
+        let lastError: Error | null = null;
+
+        for (let i = 0; i < routes.length; i += 1) {
+          const route = routes[i];
+          // 实时写回线路，界面上能立刻看到「这条在走直连还是代理」
+          stmtRoute.run(route, id);
+          try {
+            await downloadM3u8To(target.url, outFile, {
+              referer: target.referer,
+              origin: target.origin,
+              cookies: target.cookies,
+              signal: controller.signal,
+              route,
+              proxy,
+              onProgress: (pct, bytes) => {
+                const now = Date.now();
+                const live = this.live.get(id);
+                if (live) {
+                  live.downloaded = bytes;
+                  live.lastAt = now;
+                  live.lastBytes = bytes;
+                }
+                if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
+                this.lastProgressAt.set(id, now);
+                stmtProgress.run(pct, bytes, id);
+              },
+            });
+            rememberRoute(hostOf(target.url), route);
+            return;
+          } catch (err) {
+            if (controller.signal.aborted) throw err;
+            lastError = err as Error;
+            const message = lastError?.message ?? String(err);
+            const isLast = i === routes.length - 1;
+            if (isLast || !shouldRetryRoute(message)) break;
+            logger.warn(
+              { id, route, err: message },
+              `按${route === "direct" ? "直连" : "代理"}下载失败，换另一条线路重试`,
+            );
+          }
+        }
+        throw lastError ?? new Error("下载失败");
+      };
+
+      // m3u8 的 auth_key 与 cf_clearance 都有有效期。硬失败一次后，用原始网页链接
+      // 重新解析一遍就能拿到新的签名与 Cookie —— 比让用户重新粘贴链接友好，
+      // 也顺手修好「库里存的是过期地址」这种隔天重试的场景。
+      let refreshed = false;
+      for (;;) {
         try {
-          await downloadM3u8To(m3u8.url, outFile, {
-            referer: m3u8.referer,
-            origin: m3u8.origin,
-            signal: controller.signal,
-            route,
-            proxy,
-            onProgress: (pct, bytes) => {
-              const now = Date.now();
-              const live = this.live.get(id);
-              if (live) {
-                live.downloaded = bytes;
-                live.lastAt = now;
-                live.lastBytes = bytes;
-              }
-              if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
-              this.lastProgressAt.set(id, now);
-              stmtProgress.run(pct, bytes, id);
-            },
-          });
-          downloaded = true;
-          rememberRoute(hostOf(m3u8.url), route);
+          await attemptDownload();
           break;
         } catch (err) {
           if (controller.signal.aborted) throw err;
-          lastError = err as Error;
-          const message = lastError?.message ?? String(err);
-          const isLast = i === routes.length - 1;
-          if (isLast || !isNetworkError(message)) break;
-          logger.warn(
-            { id, route, err: message },
-            `按${route === "direct" ? "直连" : "代理"}下载失败，换另一条线路重试`,
-          );
+          const message = (err as Error)?.message ?? "";
+          const original = meta?.link;
+          if (refreshed || !original || !isSignatureError(message)) throw err;
+          // 用户直接粘 m3u8 直链时没有「原始网页」可重解析，别白跑一趟
+          if (looksLikeM3u8(original)) throw err;
+          refreshed = true;
+          logger.info({ id, link: original }, "签名或登录态可能已失效，用原始网页链接重新解析后再试一次");
+          const fresh = await resolveM3u8Input(original);
+          target = {
+            url: normalizeMediaUrl(fresh.m3u8Url),
+            referer: fresh.referer,
+            origin: fresh.origin,
+            cookies: fresh.cookies,
+          };
+          // 把新地址写回任务，后面「继续 / 重试」就不用再解析一次
+          try {
+            const emby = JSON.parse(row.emby_json || "{}") as Record<string, unknown>;
+            emby.m3u8 = {
+              url: target.url,
+              referer: target.referer,
+              origin: target.origin,
+              cookies: target.cookies ?? null,
+            };
+            db.prepare("UPDATE downloads SET emby_json = ? WHERE id = ?").run(JSON.stringify(emby), id);
+          } catch {
+            /* 元数据坏了就算了，不影响这次下载 */
+          }
         }
       }
-      if (!downloaded) throw lastError ?? new Error("下载失败");
 
       const stat = await fs.promises.stat(outFile);
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");

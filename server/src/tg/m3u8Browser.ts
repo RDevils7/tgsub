@@ -2,10 +2,11 @@ import type { Browser, Page, Response } from "playwright";
 import { chromium } from "playwright";
 import { logger } from "../logger";
 import {
-  refererOf,
-  originOf,
+  cleanTitle,
+  hostOf,
   sanitizeName,
   titleFromUrl,
+  originOf,
   type M3u8Target,
 } from "./m3u8";
 import { acquireProxyBridge } from "./proxyBridge";
@@ -93,6 +94,74 @@ function rank(url: string): number {
   if (/(segment|chunk|\/ts\/|\.ts(?:\?|$))/i.test(u)) return 0;
   if (/(master|playlist|index|hls|\.m3u8$)/i.test(u)) return 3;
   return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 人机验证（Cloudflare 等）                                            */
+/* ------------------------------------------------------------------ */
+
+/** 挑战页的特征：标题、脚本变量、挑战脚本路径都算 */
+const CHALLENGE_RE =
+  /Just a moment|Attention Required|cf_chl|challenge-platform|__cf_chl_opt|Enable JavaScript and cookies|Client Challenge/i;
+
+/** 等挑战通过的上限：Cloudflare 非交互挑战实测 15~45 秒，给足 60 秒 */
+const CHALLENGE_WAIT_MS = 60_000;
+
+async function looksLikeChallenge(page: Page): Promise<boolean> {
+  const title = await page.title().catch(() => "");
+  if (title) return CHALLENGE_RE.test(title);
+  // 标题还没出来：看头部 HTML 里有没有挑战脚本
+  const head = await page.content().then((html) => html.slice(0, 3000)).catch(() => "");
+  return CHALLENGE_RE.test(head);
+}
+
+/**
+ * 等挑战自己跑完再继续。
+ *
+ * 挑战期间页面会不断重载，此时点播放只会点空；必须等标题变成真实标题
+ * （说明挑战脚本已放行、正文已拿到），截获 m3u8 才可能成功。
+ * 很多站只靠浏览器指纹 + 少量 JS 就能自动过，不需要人工点验证码。
+ */
+async function waitForChallenge(page: Page): Promise<void> {
+  if (!(await looksLikeChallenge(page))) return;
+  const deadline = Date.now() + CHALLENGE_WAIT_MS;
+  const startedAt = Date.now();
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(1000);
+    if (!(await looksLikeChallenge(page))) {
+      logger.info("人机验证已通过（约 %d 秒）", Math.round((Date.now() - startedAt) / 1000));
+      return;
+    }
+  }
+  logger.warn("等待人机验证超时（%d 秒），继续尝试截获播放请求", Math.round(CHALLENGE_WAIT_MS / 1000));
+}
+
+/* ------------------------------------------------------------------ */
+/* Cookie                                                             */
+/* ------------------------------------------------------------------ */
+
+interface SimpleCookie {
+  name: string;
+  value: string;
+  domain: string;
+}
+
+/**
+ * 挑出与这些地址相关的 Cookie，拼成 `Cookie:` 头的值。
+ *
+ * 为什么必须带：Cloudflare 的 `cf_clearance`、站点的登录态都在 Cookie 里。
+ * 浏览器能播，ffmpeg 一带头就 403 —— 差的就是它。
+ * 只取同域名/父域名的，别把整筐 Cookie 塞给第三方 CDN。
+ */
+export function cookieHeaderFor(urls: string[], cookies: SimpleCookie[]): string {
+  const hosts = urls.map((u) => hostOf(u).toLowerCase()).filter(Boolean);
+  if (!hosts.length) return "";
+  const picked = cookies.filter((c) => {
+    const domain = String(c.domain ?? "").replace(/^\./, "").toLowerCase();
+    if (!domain) return false;
+    return hosts.some((host) => host === domain || host.endsWith(`.${domain}`));
+  });
+  return picked.map((c) => `${c.name}=${c.value}`).join("; ");
 }
 
 async function tryTriggerPlay(page: Page): Promise<void> {
@@ -211,13 +280,18 @@ async function resolveOnce(
   }
   await context.addInitScript((): void => {
     const nav: any = (globalThis as any).navigator;
+    const glob: any = globalThis as any;
     if (nav) {
       try {
+        // navigator.webdriver 为 true 是最容易被指纹脚本抓的一条，先抹掉
         Object.defineProperty(nav, "webdriver", { get: () => false });
+        Object.defineProperty(nav, "languages", { get: () => ["en-US", "en"] });
       } catch {
         /* ignore */
       }
     }
+    // 部分人机验证的指纹脚本会摸 window.chrome，无头环境里默认没有
+    if (!glob.chrome) glob.chrome = { runtime: {} };
   });
 
   const page = await context.newPage();
@@ -240,7 +314,16 @@ async function resolveOnce(
     await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   } catch (e) {
     logger.warn("无头浏览器打开页面失败: %s", String(e));
+    // 页面根本没打开（直连不通时最常见），再等播放请求是白等，直接换线路
+    await context.close().catch(() => {
+      /* ignore */
+    });
+    releaseBridge?.();
+    return null;
   }
+
+  // 被 Cloudflare 之类的挑战挡住时，先等它自己跑完（此时页面还在重载，点播放没意义）
+  await waitForChallenge(page);
 
   // 等待播放器发出 m3u8 请求；master 优先，其次任意 m3u8。
   // 期间反复点播放：短视频站播放前常有贴片广告倒计时，
@@ -266,21 +349,36 @@ async function resolveOnce(
   // 太早取会拿到空壳的初始 <title>。
   pageTitle = await page.title().catch(() => "");
 
+  if (!candidates.length) {
+    await context.close().catch(() => {
+      /* ignore */
+    });
+    releaseBridge?.();
+    return null;
+  }
+
+  candidates.sort((a, b) => rank(b) - rank(a));
+  const chosen = candidates[0];
+
+  // Cookie 必须在关掉 context 之前取：cf_clearance、登录态都只在里面
+  const cookies = await context.cookies().catch(() => [] as SimpleCookie[]);
+  const cookieHeader = cookieHeaderFor([pageUrl, chosen], cookies as SimpleCookie[]);
+
   await context.close().catch(() => {
     /* ignore */
   });
   releaseBridge?.();
 
-  if (!candidates.length) return null;
-
-  candidates.sort((a, b) => rank(b) - rank(a));
-  const chosen = candidates[0];
-
+  // 站点标题常带「- 站名」后缀，去掉再当文件名，别每次多建一个目录
+  const cleanedTitle = cleanTitle(pageTitle);
   return {
     m3u8Url: chosen,
-    title: pageTitle ? sanitizeName(pageTitle) : titleFromUrl(pageUrl),
-    referer: refererOf(pageUrl),
+    title: cleanedTitle ? sanitizeName(cleanedTitle) : titleFromUrl(pageUrl),
+    // 浏览器发请求时就带当前页地址作 Referer，ffmpeg 必须照抄，
+    // 用源站根目录去顶，很多站的防盗链会直接判为外链。
+    referer: pageUrl,
     origin: originOf(pageUrl),
+    cookies: cookieHeader || undefined,
     route,
   };
 }

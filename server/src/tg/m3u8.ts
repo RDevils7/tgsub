@@ -46,12 +46,56 @@ export interface M3u8Target {
   m3u8Url: string;
   /** 给文件 / 目录用的标题（已清洗，安全用于路径） */
   title: string;
-  /** 防盗链 Referer（源站根） */
+  /**
+   * 防盗链 Referer。
+   * 无头浏览器解析出来的是**视频页原始地址**（浏览器就是这么发的）；
+   * 直接粘 m3u8 直链时退回源站根。
+   */
   referer: string;
   /** 防盗链 Origin */
   origin: string;
+  /**
+   * 解析阶段拿到的 Cookie（`a=1; b=2`）。
+   * Cloudflare 的 cf_clearance、站点的登录态都靠它，少了它 m3u8 能解析却下不动。
+   */
+  cookies?: string;
   /** 解析阶段实际走通的线路 */
   route: NetRoute;
+}
+
+/**
+ * 网页里内嵌的 m3u8 地址常被 HTML 转义成 `...&amp;v=3&amp;time=0`。
+ * 不还原的话 CDN 收到的签名参数是残的（`amp;v` 而不是 `v`），直接 403。
+ */
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+export function decodeHtmlEntities(text: string): string {
+  return String(text ?? "").replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (whole, body: string) => {
+    if (body.startsWith("#")) {
+      const code =
+        body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number(body.slice(1));
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return whole;
+      try {
+        return String.fromCodePoint(code);
+      } catch {
+        return whole;
+      }
+    }
+    return HTML_ENTITIES[body.toLowerCase()] ?? whole;
+  });
+}
+
+/** 媒体地址归一化：还原 HTML 实体、去掉首尾空白与包裹的引号 */
+export function normalizeMediaUrl(raw: string): string {
+  const text = decodeHtmlEntities(String(raw ?? "").trim());
+  return text.replace(/^[`"']+/, "").replace(/[`"']+$/, "").trim();
 }
 
 /** 是否看起来就是个 m3u8 链接 */
@@ -145,11 +189,22 @@ export function titleFromUrl(url: string): string {
   }
 }
 
+/**
+ * 网页标题清洗：去掉「标题 - 站名 / 标题 | 站名」这类后缀。
+ * 直接拿来当文件名会得到「合租室友 - 某某短剧网」这种长尾巴，
+ * 而且站名天天变，每次都多出一个新目录。
+ */
+export function cleanTitle(raw: string): string {
+  return String(raw ?? "")
+    .replace(/\s*[-–—|·•]\s*.*$/, "")
+    .trim();
+}
+
 function titleFromHtml(html: string): string | null {
   const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   if (!m) return null;
-  const t = m[1].replace(/\s*[-–|·].*$/, "").trim();
-  return sanitizeName(t) || null;
+  const cleaned = cleanTitle(m[1]);
+  return sanitizeName(cleaned) || null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -204,11 +259,13 @@ export function plannedRoutes(url: string): NetRoute[] {
 /* 网页抓取                                                             */
 /* ------------------------------------------------------------------ */
 
-/** 从网页 HTML 里挑出 m3u8 地址（已把相对路径解析成绝对地址） */
-function extractM3u8FromHtml(html: string, pageUrl: string): string | null {
+/** 从网页 HTML 里挑出 m3u8 地址（已把相对路径解析成绝对地址、并还原 HTML 转义） */
+export function extractM3u8FromHtml(html: string, pageUrl: string): string | null {
   const found: string[] = [];
 
-  const push = (candidate: string): void => {
+  const push = (raw: string): void => {
+    // `&amp;` 之类的实体必须先还原，否则签名参数会变成 `amp;v=3`
+    const candidate = normalizeMediaUrl(raw);
     if (/\.m3u8(\?[^ "'`)\s]*)?$/i.test(candidate)) found.push(candidate);
   };
 
@@ -227,7 +284,17 @@ function extractM3u8FromHtml(html: string, pageUrl: string): string | null {
     }
   }
 
-  // 3) 裸 m3u8 片段（无引号包裹）
+  // 3) 站内绝对路径 "/hls/abc/master.m3u8"（很多播放器就是这么写 src 的）
+  const re4 = /(["'`])(\/[^"'`\s]+?\.m3u8(?:\?[^"'`\s]*)?)\1/gi;
+  while ((mm = re4.exec(html))) {
+    try {
+      push(new URL(mm[2], pageUrl).toString());
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 4) 裸 m3u8 片段（无引号包裹）
   const re3 = /https?:\/\/[^\s"'`)<>]+?\.m3u8(?:\?[^"'`\s<>]*)?/gi;
   while ((mm = re3.exec(html))) push(mm[0]);
 
@@ -307,64 +374,105 @@ async function probeM3u8(url: string, route: NetRoute, proxy?: string): Promise<
 /* 解析入口                                                             */
 /* ------------------------------------------------------------------ */
 
-/** 用指定线路解析一个网页链接 */
+/**
+ * 用指定线路解析一个网页链接。
+ *
+ * 顺序：先静态抓 HTML（快），抓不到再上无头浏览器（慢但能过 JS / 人机验证）。
+ * **静态抓取失败不能直接放弃**：像 Cloudflare 护着的站，普通 HTTP 客户端一律 403，
+ * 只有真浏览器跑完挑战才拿得到 m3u8。所以错误先记下来，浏览器也没辙时才抛。
+ */
 async function resolveViaRoute(
   pageUrl: string,
   route: NetRoute,
   proxy: string | undefined,
 ): Promise<M3u8Target> {
-  const html = await requestText(pageUrl, { route, proxy });
-  let found = extractM3u8FromHtml(html, pageUrl);
-  if (!found) {
-    for (const guess of guessPlaylistUrls(pageUrl)) {
-      if (await probeM3u8(guess, route, proxy)) {
-        found = guess;
-        break;
+  let staticError: Error | null = null;
+  let html = "";
+
+  try {
+    html = await requestText(pageUrl, { route, proxy });
+  } catch (err) {
+    staticError = err as Error;
+    logger.warn("静态抓取失败（%s），改用无头浏览器：%s", route, staticError.message);
+  }
+
+  if (html) {
+    let found = extractM3u8FromHtml(html, pageUrl);
+    if (!found) {
+      for (const guess of guessPlaylistUrls(pageUrl)) {
+        if (await probeM3u8(guess, route, proxy)) {
+          found = guess;
+          break;
+        }
       }
     }
-  }
-  if (!found) {
-    // 静态解析失败：这类站很可能是 SPA / JS 动态加载 / 签名接口，
-    // 用无头浏览器把页面跑起来、截获真实 m3u8 请求再试一次。
-    try {
-      // 短视频站的播放器要等贴片广告倒计时结束才起播，给足 30 秒
-      const viaBrowser = await resolveM3u8ViaBrowser(pageUrl, 30_000, route, proxy);
-      if (viaBrowser) {
-        return {
-          m3u8Url: viaBrowser.m3u8Url,
-          title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(pageUrl),
-          referer: viaBrowser.referer,
-          origin: viaBrowser.origin,
-          route,
-        };
-      }
-    } catch (e) {
-      logger.warn("无头浏览器解析 m3u8 失败: %s", String(e));
+    if (found) {
+      return {
+        m3u8Url: found,
+        title: titleFromHtml(html) || titleFromUrl(found),
+        referer: pageUrl,
+        origin: originOf(pageUrl),
+        route,
+      };
     }
   }
-  if (!found) {
-    throw new Error(
-      "没能从网页里解析出 m3u8 视频地址（已尝试无头浏览器渲染页面，仍未能捕获播放请求；" +
-        "该站可能用了加密、签名接口，或需要登录才能看。可改用浏览器 F12 → Network → 过滤 .m3u8 → 复制直链粘贴）",
-    );
+
+  // 静态解析失败：这类站很可能是 SPA / JS 动态加载 / 签名接口 / 人机验证，
+  // 用无头浏览器把页面跑起来、截获真实 m3u8 请求（顺带把 Cookie 一起带走）。
+  try {
+    const viaBrowser = await resolveM3u8ViaBrowser(pageUrl, 30_000, route, proxy);
+    if (viaBrowser) {
+      return {
+        ...viaBrowser,
+        title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(pageUrl),
+      };
+    }
+  } catch (e) {
+    logger.warn("无头浏览器解析 m3u8 失败: %s", String(e));
   }
-  return {
-    m3u8Url: found,
-    title: titleFromHtml(html) || titleFromUrl(found),
-    referer: refererOf(pageUrl),
-    origin: originOf(pageUrl),
-    route,
-  };
+
+  if (staticError) throw staticError;
+  throw new Error(
+    "没能从网页里解析出 m3u8 视频地址（已尝试无头浏览器渲染页面，仍未能捕获播放请求；" +
+      "该站可能用了加密、签名接口，或需要登录才能看。可改用浏览器 F12 → Network → 过滤 .m3u8 → 复制直链粘贴）",
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 错误分类：什么时候值得换线路 / 重新解析                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 解析阶段值不值得换一条线路再试。
+ *
+ * 除了网络类错误，403 / 429 / 5xx 也算 —— 出口 IP 不同，站点的放行结果往往不同
+ * （Cloudflare 的挑战、区域封锁、按 IP 限流都属于这种）。
+ */
+export function isRetryableResolve(message: string): boolean {
+  if (isNetworkError(message)) return true;
+  return /\b(403|429|5\d\d)\b|challenge|Just a moment|Forbidden/i.test(message);
+}
+
+/**
+ * 下载阶段的 403 / 404 / 410 这类「换线路也没用，但重新解析可能有用」的错误。
+ * 典型场景：m3u8 的 auth_key 过期、cf_clearance 过期、防盗链签名失效。
+ */
+export function isSignatureError(message: string): boolean {
+  return /\b(403|404|410)\b|签名|防盗链|Forbidden|Not Found/i.test(message);
+}
+
+/** 下载阶段值不值得换线路（403 / 429 换出口 IP 常常能过） */
+export function shouldRetryRoute(message: string): boolean {
+  return isNetworkError(message) || /\b(403|429|5\d\d)\b/.test(message);
 }
 
 /**
  * 把用户输入（直接 m3u8 或网页链接）解析成真正要下载的 m3u8 地址 + 标题 + 防盗链信息。
  *
- * 线路：默认直连优先。直连抓不到（网络类错误）才换代理重试；
- * 403 / 签名失效这类换线路也没用的错误直接抛出，不浪费时间。
+ * 线路：默认直连优先。直连抓不到（网络类错误 / 403）才换代理重试。
  */
 export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
-  const url = input.trim();
+  const url = normalizeMediaUrl(input);
   if (looksLikeM3u8(url)) {
     return {
       m3u8Url: url,
@@ -392,7 +500,7 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
     } catch (err) {
       lastError = err as Error;
       const message = lastError?.message ?? String(err);
-      if (!isNetworkError(message)) throw lastError;
+      if (!isRetryableResolve(message)) throw lastError;
       logger.warn("按 %s 线路解析失败，尝试换线路: %s", route, message);
       if (route === "direct") rememberDirectFailure(hostOf(url));
     }
@@ -403,6 +511,8 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
 export interface M3u8DownloadOpts {
   referer?: string;
   origin?: string;
+  /** 解析阶段拿到的 Cookie（Cloudflare 的 cf_clearance、站点登录态都靠它） */
+  cookies?: string;
   signal?: AbortSignal;
   /** 进度回调：pct 0~99（无总时长时为 0），downloadedBytes 为当前输出文件字节数 */
   onProgress?: (pct: number, downloadedBytes: number) => void;
@@ -430,6 +540,8 @@ export async function downloadM3u8To(
     );
   }
   const ffmpegPath = info.ffmpeg;
+  // 早先版本把从 HTML 抠出来的地址带着 `&amp;` 存进了库，这里再兜一次底
+  const mediaUrl = normalizeMediaUrl(m3u8Url);
 
   // ffmpeg 的 Windows 静态版无法打开含非 ASCII（中文）字符的输出路径，会报
   // “Invalid argument”。所以让 ffmpeg 先写到系统临时目录下的 ASCII 文件名，
@@ -441,14 +553,16 @@ export async function downloadM3u8To(
     `tgsub-m3u8-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`,
   );
 
-  const headers = [`User-Agent: ${UA}`, `Referer: ${opts.referer ?? refererOf(m3u8Url)}`];
+  // ffmpeg 要求 -headers 里各条用 CRLF 分隔，且最后一条也要跟一个 CRLF。
+  const headers = [`User-Agent: ${UA}`, `Referer: ${opts.referer ?? refererOf(mediaUrl)}`];
   if (opts.origin) headers.push(`Origin: ${opts.origin}`);
+  if (opts.cookies) headers.push(`Cookie: ${opts.cookies}`);
 
   const args = [
     "-headers",
-    headers.join("\r\n"),
+    `${headers.join("\r\n")}\r\n`,
     "-i",
-    m3u8Url,
+    mediaUrl,
     "-c",
     "copy",
     "-bsf:a",
@@ -527,7 +641,12 @@ export async function downloadM3u8To(
         if (code === 0) resolve();
         // 被用户停掉时 stderr 里只有一堆进度行，别拿它当错误原因
         else if (opts.signal?.aborted) reject(new Error("下载已取消"));
-        else reject(new Error(parseFfmpegError(stderr)));
+        else {
+          // 把 ffmpeg 原文留在日志里：只报「403」看不出是哪一跳被拒，
+          // 排查时得靠它区分播放列表、key 还是分片。
+          logger.warn("ffmpeg 失败输出（尾部）：%s", stderr.slice(-1500).replace(/\s+/g, " ").trim());
+          reject(new Error(parseFfmpegError(stderr)));
+        }
       });
     });
   } catch (err) {
@@ -553,7 +672,8 @@ export async function downloadM3u8To(
 }
 
 function parseFfmpegError(stderr: string): string {
-  if (/403|Forbidden/i.test(stderr)) return "下载被拒绝（403），可能是防盗链/签名失效，试试带 Cookie 或换源";
+  if (/403|Forbidden/i.test(stderr))
+    return "源站拒绝下载（403）：登录态 / 防盗链签名已失效，重新提交原始网页链接会自动换取新的地址与 Cookie";
   if (/404|Not Found/i.test(stderr)) return "视频地址已失效（404），源站可能已删除，或这是过期的临时链接";
   if (/Connection|timed out|ECONN|resolve|No route to host/i.test(stderr))
     return "网络拉取失败，确认服务器能访问该地址（必要时配置代理）";

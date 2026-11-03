@@ -101,11 +101,22 @@ export function hostOfUrl(url: string): string {
  *
  * 只有这类错误才值得换一条线路重试：源站返回 403 / 签名失效之类，
  * 换代理也没用（甚至更糟），重试只是浪费时间。
+ *
+ * 注意两种文案都要认：netprobe 自己抛的是**中文**（「连接超时」「网络不可达」
+ * 「目标拒绝连接」），chromium / ffmpeg 抛的是英文。只认英文的话，
+ * 「直连优先」在超时这一步就断了 —— 明明该回退代理，却直接报错。
  */
 export function isNetworkError(message: string): boolean {
   const text = String(message ?? "");
   if (!text) return false;
-  return /Connection|timed out|ETIMEDOUT|ECONN|ECONNRESET|resolve|Name or service not known|Could not resolve|Network is unreachable|No route to host|Connection refused|Connection reset|failed to resolve|Network is down|SSL|handshake/i.test(
+  if (
+    /Connection|timed out|ETIMEDOUT|ECONN|ECONNRESET|resolve|Name or service not known|Could not resolve|Network is unreachable|No route to host|Connection refused|Connection reset|failed to resolve|Network is down|SSL|handshake/i.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  return /连接超时|读写超时|网络读写超时|连接失败|连接被(重置|拒绝|断开)|网络不可达|网络异常|网络不通|无法解析|域名解析|拒绝连接|已断开|断开连接|握手失败/.test(
     text,
   );
 }

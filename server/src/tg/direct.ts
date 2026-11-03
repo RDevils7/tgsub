@@ -282,7 +282,13 @@ export async function enqueueM3u8(input: string): Promise<M3u8Result> {
     likes: null,
     duration: null,
     categories: [],
-    m3u8: { url: target.m3u8Url, referer: target.referer, origin: target.origin },
+    m3u8: {
+      url: target.m3u8Url,
+      referer: target.referer,
+      origin: target.origin,
+      // 人机验证（cf_clearance）与登录态都在 Cookie 里，下载时必须原样带上
+      cookies: target.cookies ?? null,
+    },
   };
 
   const info = stmtInsertM3u8.run(

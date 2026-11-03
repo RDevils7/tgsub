@@ -40,6 +40,15 @@ import {
   telegramProxyUnsupported,
 } from "../server/src/lib/netprobe";
 import {
+  cleanTitle,
+  decodeHtmlEntities,
+  extractM3u8FromHtml,
+  isRetryableResolve,
+  isSignatureError,
+  normalizeMediaUrl,
+  shouldRetryRoute,
+} from "../server/src/tg/m3u8";
+import {
   DEFAULT_CHECK_HOURS,
   MAX_RETRY_DELAY_MS,
   daysToHours,
@@ -2105,6 +2114,63 @@ async function mediaPathChecks(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 网页 / m3u8 解析：HTML 转义、地址归一化、错误分类                   */
+/* ------------------------------------------------------------------ */
+
+function m3u8ParseChecks(): void {
+  check("HTML 实体还原：&amp; 与数字实体", () => {
+    assert.equal(decodeHtmlEntities("a=1&amp;b=2"), "a=1&b=2");
+    assert.equal(decodeHtmlEntities("a=1&#38;b=2"), "a=1&b=2");
+    assert.equal(decodeHtmlEntities("a=1&#x26;b=2"), "a=1&b=2");
+    // 不认识的实体原样保留，别把正常文本改坏
+    assert.equal(decodeHtmlEntities("100%&nbsp;ok"), "100% ok");
+    assert.equal(decodeHtmlEntities("&notareal;"), "&notareal;");
+  });
+
+  check("媒体地址归一化：还原转义并去掉包裹引号", () => {
+    const url = normalizeMediaUrl('"https://cdn.x/a.m3u8?auth_key=1-2-3&amp;v=3&amp;time=0"');
+    assert.equal(url, "https://cdn.x/a.m3u8?auth_key=1-2-3&v=3&time=0");
+    assert.ok(!url.includes("&amp;"));
+  });
+
+  check("从 HTML 里抽 m3u8 时就把 &amp; 解开", () => {
+    const html = `<script>var u="https://cdn.x/v/a.m3u8?auth_key=1-2-3&amp;v=3&amp;via=hgdj";</script>`;
+    const found = extractM3u8FromHtml(html, "https://site.com/video/1/");
+    assert.equal(found, "https://cdn.x/v/a.m3u8?auth_key=1-2-3&v=3&via=hgdj");
+  });
+
+  check("相对地址按页面地址补全", () => {
+    const html = `<video src="/hls/abc/master.m3u8"></video>`;
+    assert.equal(extractM3u8FromHtml(html, "https://site.com/video/1/"), "https://site.com/hls/abc/master.m3u8");
+  });
+
+  check("页面标题去掉站名后缀", () => {
+    assert.equal(cleanTitle("合租室友 - 短剧视频在线观看 | 黄果短剧"), "合租室友");
+    assert.equal(cleanTitle("糖糖负债百万 - 91茄子 - 小黄书 xChina"), "糖糖负债百万");
+    assert.equal(cleanTitle("没有分隔符的标题"), "没有分隔符的标题");
+  });
+
+  check("签名失效判定：403 / 404 / 签名类文案命中", () => {
+    assert.equal(isSignatureError("源站拒绝下载（403）"), true);
+    assert.equal(isSignatureError("视频地址已失效（404）"), true);
+    assert.equal(isSignatureError("网络拉取失败，确认服务器能访问该地址"), false);
+  });
+
+  check("下载换线路判定：403 与网络错误都值得再试一次", () => {
+    assert.equal(shouldRetryRoute("源站拒绝下载（403）"), true);
+    assert.equal(shouldRetryRoute("Connection timed out"), true);
+    assert.equal(shouldRetryRoute("下载被取消"), false);
+  });
+
+  check("解析换线路判定：403 / 挑战页也算可重试", () => {
+    assert.equal(isRetryableResolve("抓取失败：HTTP 403"), true);
+    assert.equal(isRetryableResolve("抓取失败：HTTP 429"), true);
+    assert.equal(isRetryableResolve("连接超时"), true);
+    assert.equal(isRetryableResolve("链接格式不对"), false);
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 手动下载提交记录：状态判定与一行摘要                               */
 /* ------------------------------------------------------------------ */
 
@@ -2178,6 +2244,7 @@ async function main(): Promise<void> {
     ["yt-dlp 更新排期用例", () => updatePlanChecks()],
     ["剧集改名合并用例", () => renamePlanChecks()],
     ["手动下载记录用例", () => manualNoteChecks()],
+    ["m3u8 解析用例", () => m3u8ParseChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
   ];
