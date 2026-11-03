@@ -46,6 +46,16 @@ import {
   retryDelayMs,
   shouldRunCheck,
 } from "../server/src/platform/updateplan";
+import {
+  buildRenamePlan,
+  countEffective,
+  episodeFileName,
+  naturalCompare,
+  samePath,
+  seriesDirName,
+  sortEpisodeSources,
+  type EpisodeSource,
+} from "../server/src/tg/renameplan";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -1884,6 +1894,160 @@ function updatePlanChecks(): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* 剧集改名 / 合并的排序与命名                                        */
+/* ------------------------------------------------------------------ */
+
+function renamePlanChecks(): void {
+  const src = (name: string, episode: number | null, season: number | null = 1): EpisodeSource => ({
+    path: `/media/剧/${name}`,
+    name,
+    episode,
+    season,
+  });
+
+  check("自然排序：数字按大小比", () => {
+    assert.ok(naturalCompare("第2集.mp4", "第10集.mp4") < 0, "2 应排在 10 前");
+    assert.ok(naturalCompare("E9.mp4", "E10.mp4") < 0);
+    assert.ok(naturalCompare("a.mp4", "b.mp4") < 0);
+    assert.equal(naturalCompare("同名.mp4", "同名.mp4"), 0);
+  });
+
+  check("排序：有集号的在前，按集号升序", () => {
+    const sorted = sortEpisodeSources([src("b.mp4", 10), src("a.mp4", null, null), src("c.mp4", 2)]);
+    assert.deepEqual(
+      sorted.map((s) => s.name),
+      ["c.mp4", "b.mp4", "a.mp4"],
+    );
+  });
+
+  check("排序：集号相同按文件名自然序", () => {
+    const sorted = sortEpisodeSources([src("第2版.mp4", 5), src("第10版.mp4", 5)]);
+    assert.deepEqual(
+      sorted.map((s) => s.name),
+      ["第2版.mp4", "第10版.mp4"],
+    );
+  });
+
+  check("集号重排成连续的 E01…EN（顺序不变）", () => {
+    const plan = buildRenamePlan({
+      sources: [src("第12集.mp4", 12), src("第3集.mp4", 3), src("第7集.mp4", 7)],
+      title: "我的剧",
+      targetDir: "/media/我的剧",
+    });
+    assert.deepEqual(
+      plan.items.map((i) => i.newEpisode),
+      [1, 2, 3],
+    );
+    // 原顺序 3 → 7 → 12 保持不变
+    assert.deepEqual(
+      plan.items.map((i) => i.oldEpisode),
+      [3, 7, 12],
+    );
+    assert.equal(plan.items[0].to, path.resolve("/media/我的剧", "我的剧S01E01.mp4"));
+    assert.equal(plan.items[2].to, path.resolve("/media/我的剧", "我的剧S01E03.mp4"));
+  });
+
+  check("保留原扩展名（mkv 不会变成 mp4）", () => {
+    const plan = buildRenamePlan({
+      sources: [src("第一集.mkv", 1)],
+      title: "剧名",
+      targetDir: "/media/剧名",
+    });
+    assert.ok(plan.items[0].to.endsWith("剧名S01E01.mkv"));
+  });
+
+  check("剧名里的非法字符被清洗", () => {
+    assert.equal(seriesDirName("剧/名:测试?"), sanitizeSegment("剧/名:测试?", 120));
+    const plan = buildRenamePlan({
+      sources: [src("a.mp4", 1)],
+      title: "剧/名",
+      targetDir: "/media/x",
+    });
+    assert.ok(!plan.title.includes("/"), "剧名里不该留下路径分隔符");
+  });
+
+  check("临时名在每个源文件自己的目录里且互不相同", () => {
+    const plan = buildRenamePlan({
+      sources: [src("a.mp4", 1), src("b.mp4", 2)],
+      title: "T",
+      targetDir: "/media/T",
+    });
+    const tmps = plan.items.map((i) => i.tmp);
+    assert.equal(new Set(tmps).size, tmps.length, "临时名必须唯一");
+    for (const item of plan.items) {
+      assert.equal(path.dirname(item.tmp), path.dirname(item.from));
+      assert.ok(path.basename(item.tmp).startsWith(".tgsub-rn-"));
+    }
+  });
+
+  check("冲突检测：目标已有同名且不在本次清单里", () => {
+    const plan = buildRenamePlan({
+      sources: [src("a.mp4", 1), src("b.mp4", 2)],
+      title: "T",
+      targetDir: "/media/T",
+      existingNames: ["TS01E01.mp4"],
+    });
+    assert.deepEqual(plan.conflicts, ["TS01E01.mp4"]);
+  });
+
+  check("冲突检测：目标是本次要移动的文件本身不算冲突", () => {
+    // 原地改名：文件已经在目标位置，名字也正好对
+    const plan = buildRenamePlan({
+      sources: [
+        { path: "/media/T/TS01E01.mp4", name: "TS01E01.mp4", episode: 1, season: 1 },
+        { path: "/media/T/TS01E02.mp4", name: "TS01E02.mp4", episode: 2, season: 1 },
+      ],
+      title: "T",
+      targetDir: "/media/T",
+      existingNames: ["TS01E01.mp4", "TS01E02.mp4"],
+    });
+    assert.deepEqual(plan.conflicts, []);
+    assert.equal(countEffective(plan), 0, "已经叫对的文件不该再动");
+  });
+
+  check("集号重复与无集号都会给出提醒", () => {
+    const plan = buildRenamePlan({
+      sources: [src("a.mp4", 3), src("b.mp4", 3), src("c.mp4", null, null)],
+      title: "T",
+      targetDir: "/media/T",
+    });
+    assert.ok(
+      plan.warnings.some((w) => w.includes("集号重复")),
+      `应提醒集号重复，实际：${plan.warnings.join(" | ")}`,
+    );
+    assert.ok(
+      plan.warnings.some((w) => w.includes("没有集号")),
+      `应提醒缺集号，实际：${plan.warnings.join(" | ")}`,
+    );
+  });
+
+  check("多季混在一起会提醒并统一按第一季编号", () => {
+    const plan = buildRenamePlan({
+      sources: [src("a.mp4", 1, 1), src("b.mp4", 1, 2)],
+      title: "T",
+      targetDir: "/media/T",
+    });
+    assert.equal(plan.season, 1);
+    assert.ok(plan.warnings.some((w) => w.includes("多个季号")));
+  });
+
+  check("单集命名与路径同一套规则", () => {
+    assert.equal(episodeFileName("剧名", 1, 5, ".mp4"), "剧名S01E05.mp4");
+    assert.equal(episodeFileName("剧名", 2, 12, "mkv"), "剧名S02E12.mkv");
+    // 空剧名走 sanitizeSegment 的兜底（"untitled"），路由层本来也不允许空剧名
+    assert.equal(episodeFileName("", 1, 1, ".mp4"), `${sanitizeSegment("", 120)}S01E01.mp4`);
+  });
+
+  check("samePath 在当前平台上按大小写规则比较", () => {
+    assert.equal(samePath("/a/b.mp4", "/a/b.mp4"), true);
+    assert.equal(samePath("/a/b.mp4", "/a/c.mp4"), false);
+    if (process.platform === "win32") {
+      assert.equal(samePath("/a/B.mp4", "/a/b.mp4"), true);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 媒体删除相关的路径规则                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1951,6 +2115,7 @@ async function main(): Promise<void> {
     ["网络线路用例", () => netRouteChecks()],
     ["第三方平台用例", () => platformChecks()],
     ["yt-dlp 更新排期用例", () => updatePlanChecks()],
+    ["剧集改名合并用例", () => renamePlanChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
   ];
