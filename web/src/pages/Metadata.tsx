@@ -1075,7 +1075,7 @@ function ImagesTab({
                     <img
                       src={img.url}
                       alt={slot.label}
-                      className="h-full w-full cursor-zoom-in object-contain"
+                      className="h-full w-full cursor-zoom-in rounded-lg object-contain"
                       onClick={() => setZoom({ url: img.url, label: slot.label })}
                     />
                     <span className="absolute right-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] tabular-nums text-[#fff]/80">
@@ -1131,7 +1131,7 @@ function ImagesTab({
                 className="overflow-hidden rounded-lg border border-white/10"
                 title={file.file}
               >
-                <img src={file.url} alt={file.file} className="h-16 w-16 object-cover" />
+                <img src={file.url} alt={file.file} className="h-16 w-16 rounded-lg object-cover" />
               </a>
             ))}
           </div>
@@ -1153,7 +1153,7 @@ function ImagesTab({
           </Button>
         }
       >
-        {zoom && <img src={zoom.url} alt={zoom.label} className="max-h-[70vh] w-full object-contain" />}
+        {zoom && <img src={zoom.url} alt={zoom.label} className="max-h-[70vh] w-full rounded-xl object-contain" />}
       </Modal>
     </div>
   );

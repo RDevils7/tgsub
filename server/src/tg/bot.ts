@@ -863,8 +863,12 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
     }
 
     case "tasks": {
-      const rows = db
-        .prepare("SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads ORDER BY id DESC LIMIT 8")
+      // 进行中的任务（下载中 / 排队 / 暂停）永远全部列出，不被数量截断；
+      // 它们后面再补最近的已完成 / 失败记录，整体设上限避免刷屏。
+      const active = db
+        .prepare(
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
+        )
         .all() as Array<{
         id: number;
         save_name: string | null;
@@ -874,9 +878,26 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         file_size: number;
         created_at: number;
       }>;
+      const recent = db
+        .prepare(
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
+        )
+        .all() as Array<{
+        id: number;
+        save_name: string | null;
+        file_name: string;
+        status: string;
+        progress: number;
+        file_size: number;
+        created_at: number;
+      }>;
+      const MAX = 60;
+      const capRecent = Math.max(0, MAX - active.length);
+      const rows = [...active, ...recent.slice(0, capRecent)];
+      const hidden = Math.max(0, recent.length - capRecent);
       if (!rows.length) return { text: "还没有下载任务" };
       const icon = (s: string): string =>
-        s === "done" ? "✅" : s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "failed" ? "❌" : "⏭";
+        s === "done" ? "✅" : s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "paused" ? "⏸" : s === "failed" ? "❌" : "⏭";
       const body = rows
         .map(
           (r) =>
@@ -885,7 +906,8 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
             } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}`,
         )
         .join("\n");
-      return { text: `🗂 <b>最近任务</b>\n${body}` };
+      const footer = hidden > 0 ? `\n…还有 ${hidden} 条历史记录未显示，可到网页端查看` : "";
+      return { text: `🗂 <b>下载任务</b>（${active.length} 进行中）\n${body}${footer}` };
     }
 
     case "queue": {

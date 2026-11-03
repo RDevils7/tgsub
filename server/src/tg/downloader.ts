@@ -332,48 +332,79 @@ class DownloadQueue {
     return row.media_kind === "video" || row.media_kind === "gif" ? "video" : "other";
   }
 
+  /** 第三方平台（B站 / 小红书 / YouTube）走独立 yt-dlp 进程，与 Telegram 串行队列互不干扰 */
+  private isPlatform(id: number): boolean {
+    const row = stmtGet.get(id);
+    return Boolean(row && row.source === "platform");
+  }
+
   private pump(): void {
     if (this.stopped) return;
     const { concurrency } = getSettings();
     /**
-     * 实际并发固定为 1。
-     *
-     * 这个频道的媒体在别的 DC，gramjs 每次下载都会「导出授权 + 切 DC」，
-     * 只要同一个连接上还有别的下载在跑，那些下载就会被打断成 0 字节
-     * （实测并发 3 时相册 3 张封面必挂 1~2 张）。代理带宽本来就是瓶颈，
-     * 串行的总耗时几乎一样，但不会留下坏文件。
+     * 两条车道，互不排队：
+     * - Telegram 车道：gramjs 同一条连接跨 DC 下载会打断彼此（导出授权 + 切 DC），
+     *   所以 Telegram 必须串行（tgSlots = 1），且封面图 / 正片分阶段跑，
+     *   避免同连接上正片把封面图打断成 0 字节。
+     * - 平台车道：B站 / 小红书 / YouTube 走独立 yt-dlp 子进程，跟 Telegram 连接完全无关，
+     *   因此放在独立车道并行，并发数由 `concurrency` 控制（默认 3）。
+     *   平台任务不再和 Telegram 排队，B站、小红书、YouTube 之间也能同时下。
      */
-    const limit = Math.max(1, Math.min(1, concurrency || 1));
-    while (this.active.size < limit && this.queue.length > 0) {
-      /**
-       * 视频和封面图不要同时下：正片常常落在别的 DC，gramjs 会导出授权并切 DC，
-       * 这段时间里并发的小图会被打断成 0 字节（实测 2/3 张封面直接失败）。
-       * 所以按「先小图、后正片」分阶段跑，两个阶段不重叠。
-       */
-      const activeKinds = [...this.active].map((id) => this.kindOf(id));
-      const hasArtWaiting = () => this.queue.some((id) => !this.active.has(id) && this.kindOf(id) === "art");
-      /**
-       * 三个阶段互不重叠：
-       * 1) 空闲时先把封面图下载完（串行，一次一张）
-       * 2) 封面图期间不启动正片
-       * 3) 正片下载期间不再插封面图
-       * 手动插队的任务跳过这套分阶段限制，插了就先下。
-       */
-      const phase: "art" | "video" | "idle" = activeKinds.includes("art")
-        ? "art"
-        : activeKinds.includes("video")
-          ? "video"
-          : "idle";
-      const accept = (id: number): boolean => {
-        if (this.priority.has(id)) return true;
-        const kind = this.kindOf(id);
-        if (phase === "art") return false;
-        if (phase === "video") return kind !== "art";
-        return (kind === "art") === hasArtWaiting();
-      };
-      const index = this.queue.findIndex((id) => !this.active.has(id) && accept(id));
-      if (index < 0) break;
-      const id = this.queue.splice(index, 1)[0];
+    const tgSlots = 1;
+    const platformSlots = Math.max(1, Math.min(10, concurrency || 3));
+
+    while (true) {
+      const activeIds = [...this.active];
+      const activePlatform = activeIds.filter((id) => this.isPlatform(id)).length;
+      const activeTg = activeIds.length - activePlatform;
+      const freePlatform = platformSlots - activePlatform;
+      const freeTg = tgSlots - activeTg;
+
+      let chosen = -1;
+
+      // 1) 插队任务优先（按其类别占用对应车道）
+      const prioIdx = this.queue.findIndex(
+        (id) =>
+          !this.active.has(id) &&
+          this.priority.has(id) &&
+          (this.isPlatform(id) ? freePlatform > 0 : freeTg > 0),
+      );
+      if (prioIdx >= 0) chosen = prioIdx;
+      // 2) 平台车道：独立并发，不受 Telegram 分阶段限制
+      else if (freePlatform > 0) {
+        const idx = this.queue.findIndex((id) => !this.active.has(id) && this.isPlatform(id));
+        if (idx >= 0) chosen = idx;
+      }
+      // 3) Telegram 车道：串行 + 封面 / 正片分阶段，避免同连接被打断
+      else if (freeTg > 0) {
+        const tgActiveKinds = activeIds.filter((id) => !this.isPlatform(id)).map((id) => this.kindOf(id));
+        const hasArtWaiting = () =>
+          this.queue.some((id) => !this.active.has(id) && !this.isPlatform(id) && this.kindOf(id) === "art");
+        /**
+         * 三个阶段互不重叠：
+         * 1) 空闲时先把封面图下载完（串行，一次一张）
+         * 2) 封面图期间不启动正片
+         * 3) 正片下载期间不再插封面图
+         * 手动插队的任务跳过这套分阶段限制，插了就先下。
+         */
+        const phase: "art" | "video" | "idle" = tgActiveKinds.includes("art")
+          ? "art"
+          : tgActiveKinds.includes("video")
+            ? "video"
+            : "idle";
+        const accept = (id: number): boolean => {
+          if (this.priority.has(id)) return true;
+          const kind = this.kindOf(id);
+          if (phase === "art") return false;
+          if (phase === "video") return kind !== "art";
+          return (kind === "art") === hasArtWaiting();
+        };
+        const idx = this.queue.findIndex((id) => !this.active.has(id) && !this.isPlatform(id) && accept(id));
+        if (idx >= 0) chosen = idx;
+      }
+
+      if (chosen < 0) break;
+      const id = this.queue.splice(chosen, 1)[0];
       this.priority.delete(id);
       this.active.add(id);
       void this.run(id).finally(() => {
