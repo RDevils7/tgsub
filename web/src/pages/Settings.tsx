@@ -34,6 +34,22 @@ type LoginStep = "idle" | "code" | "password";
 
 const MB = 1024 * 1024;
 
+type SourceDirKey =
+  | "dir_telegram"
+  | "dir_bilibili"
+  | "dir_xiaohongshu"
+  | "dir_youtube"
+  | "dir_m3u8";
+
+/** 分来源保存目录：顺序与下载列表里的来源一致 */
+const SOURCE_DIR_FIELDS: Array<{ key: SourceDirKey; label: string }> = [
+  { key: "dir_telegram", label: "Telegram" },
+  { key: "dir_bilibili", label: "B站" },
+  { key: "dir_xiaohongshu", label: "小红书" },
+  { key: "dir_youtube", label: "YouTube" },
+  { key: "dir_m3u8", label: "网页 / m3u8" },
+];
+
 export default function Settings() {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -128,6 +144,16 @@ export default function Settings() {
       window.clearInterval(timer);
     };
   }, [qr?.active, load, toast]);
+
+  /** 相对目录 → 绝对路径（只用于预览，真实的拼接与校验在服务端） */
+  const previewDir = (rel: string): string => {
+    const base = String(data?.paths?.downloadDir ?? "").replace(/[\\/]+$/, "");
+    const tail = String(rel ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!tail) return base;
+    // 跟着系统的写法走：Windows 用反斜杠，其它平台用正斜杠，别混着写成 downloads/telegram
+    const sep = base.includes("\\") ? "\\" : "/";
+    return `${base}${sep}${tail.split("/").join(sep)}`;
+  };
 
   const patch = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
@@ -1142,6 +1168,41 @@ export default function Settings() {
           </Field>
         </div>
 
+        {/* 分来源保存目录：每条下载链路各一个顶层目录，可改名、可加层级 */}
+        <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <p className="text-[11px] uppercase tracking-wider text-slate-500">分来源保存目录</p>
+            <span className="text-[11px] text-slate-600">相对下载根；留空 = 直接放根下</span>
+          </div>
+          <div className="mt-2.5 space-y-3">
+            {SOURCE_DIR_FIELDS.map(({ key, label }) => (
+              <div
+                key={key}
+                className="grid grid-cols-1 gap-1 sm:grid-cols-[84px_minmax(0,1fr)] sm:items-start sm:gap-x-3"
+              >
+                <span className="pt-2 text-[12px] text-slate-400">{label}</span>
+                <div>
+                  <input
+                    className="field font-mono text-[12.5px]"
+                    value={draft[key]}
+                    onChange={(e) => patch(key, e.target.value)}
+                    placeholder="（空）"
+                    spellCheck={false}
+                  />
+                  <p className="mt-1 break-all font-mono text-[10.5px] text-slate-400">
+                    {previewDir(draft[key])}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2.5 text-[11px] leading-relaxed text-slate-600">
+            默认 <span className="font-mono text-slate-500">telegram / B站 / 小红书 / youtube / m3u8</span>，
+            可以改名，也可以加一层（如 <span className="font-mono text-slate-500">影视/B站</span>）。
+            只能填下载目录内的相对路径 —— 元数据页、删除校验与 Emby 路径映射都建立在「下载根之下」这个前提上。
+          </p>
+        </div>
+
         <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <p className="text-[11px] uppercase tracking-wider text-slate-500">存储位置</p>
           <dl className="mt-2 space-y-1.5">
@@ -1175,7 +1236,13 @@ export default function Settings() {
             variant="primary"
             size="sm"
             onClick={() =>
-              void saveSection("download", ["concurrency", "min_file_size", "max_file_size", "file_template"])
+              void saveSection("download", [
+                "concurrency",
+                "min_file_size",
+                "max_file_size",
+                "file_template",
+                ...SOURCE_DIR_FIELDS.map((field) => field.key),
+              ])
             }
             loading={savingSection === "download"}
           >

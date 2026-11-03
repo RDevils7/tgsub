@@ -236,13 +236,18 @@ function repairSeriesNaming(): SeriesMigration {
     const season = marks.season ?? meta?.season ?? 1;
     const ext = path.extname(currentName);
     const nextName = `${series}${episodeTag(season, episode, null)}${ext}`;
-    if (nextName === currentName && currentDir === series) continue;
+    // 1.3.2 起剧集目录前面还有来源前缀（telegram/剧名），改名时要把前缀带上，
+    // 否则会把整个 telegram 目录当成一部剧改名
+    const slash = currentDir.lastIndexOf("/");
+    const dirPrefix = slash >= 0 ? currentDir.slice(0, slash + 1) : "";
+    const nextDir = `${dirPrefix}${series}`;
+    if (nextName === currentName && currentDir === nextDir) continue;
 
     const list = plans.get(currentDir) ?? [];
     list.push({
       id: row.id,
       currentName,
-      nextDir: series,
+      nextDir,
       nextName,
       season,
       episode,

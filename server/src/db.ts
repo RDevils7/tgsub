@@ -295,6 +295,34 @@ migrateOnce("migration_ytdlp_check_hours_v131", () => {
 });
 
 /**
+ * 1.3.2：下载目录按来源拆开（telegram / B站 / 小红书 / youtube / m3u8）。
+ *
+ * 老版本只有一个「第三方平台总目录」（platform_dir，默认「第三方」）。
+ * 用户如果自己改过这个名字（比如改成「影视」），升级后不该把目录结构打乱 ——
+ * 按 <旧根>/<平台名> 代入三个平台目录，结构上等价于原来的 platformSaveDir。
+ * 没改过（仍是「第三方」或压根没存）就用新默认值，此时老目录保持原位不动。
+ */
+migrateOnce("migration_download_dirs_v132", () => {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'platform_dir'").get() as
+    | { value: string }
+    | undefined;
+  const oldRoot = String(row?.value ?? "").trim().replace(/^\/+|\/+$/g, "");
+  if (!oldRoot || oldRoot === "第三方") return;
+
+  const mapping: Array<[string, string]> = [
+    ["dir_bilibili", "B站"],
+    ["dir_xiaohongshu", "小红书"],
+    ["dir_youtube", "youtube"],
+  ];
+  for (const [key, name] of mapping) {
+    const exists = db.prepare("SELECT 1 AS hit FROM settings WHERE key = ?").get(key);
+    if (exists) continue;
+    db.prepare("INSERT INTO settings(key, value) VALUES(?, ?)").run(key, `${oldRoot}/${name}`);
+  }
+  logger.info("第三方平台下载目录已按来源拆分（沿用原目录 %s）", oldRoot);
+});
+
+/**
  * 1.0.2：封面与每集缩略图改为「下载完成后从视频随机截帧」，不再下载消息里的图片。
  *
  * 老库里可能还躺着 .art-* 的封面图任务（排队中/失败重试中等），升级后要一并作废，

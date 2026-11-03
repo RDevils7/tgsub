@@ -380,8 +380,18 @@ function isoDate(ts: number): string {
 /** 表单值回写到 downloads.emby_json，保证以后重新生成 NFO 时与手改一致 */
 function syncEmbyJson(row: Download, fields: NfoFields): EmbyMeta {
   const old = decodeMeta(row.emby_json);
-  const series =
-    (fields.showtitle || fields.originaltitle || fields.title || old?.series || row.save_dir || "未命名").trim();
+  // save_dir 可能带来源前缀（telegram/剧名），兜底取最后一段当剧名
+  const dirTitle = row.save_dir
+    ? String(row.save_dir).split("/").filter(Boolean).pop() ?? null
+    : null;
+  const series = (
+    fields.showtitle ||
+    fields.originaltitle ||
+    fields.title ||
+    old?.series ||
+    dirTitle ||
+    "未命名"
+  ).trim();
   const season = Number(fields.season) || old?.season || 1;
   const episode = fields.episode.trim() ? Number(fields.episode) : (old?.episode ?? null);
   const airedAt = parseDate(fields.premiered || fields.aired) ?? old?.airedAt ?? row.finished_at ?? Date.now();

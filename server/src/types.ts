@@ -170,8 +170,20 @@ export interface AppSettings {
   ytdlp_path: string;
   /** 清晰度上限：best=最高（默认）/ 1080 / 720 / 480 */
   platform_quality: string;
-  /** 第三方视频存到下载目录下的哪个子目录，留空表示直接放根目录 */
+  /**
+   * 旧的「第三方平台总目录」，1.3.2 起被下面 5 个分来源目录取代。
+   * 仅保留字段用于迁移老配置（启动时会把自定义值拆成 平台根/B站 之类），代码不再读它。
+   */
   platform_dir: string;
+  /**
+   * 分来源的落盘子目录（相对下载根，可多级；留空 = 直接放下载根下）。
+   * 默认：telegram / B站 / 小红书 / youtube / m3u8
+   */
+  dir_telegram: string;
+  dir_bilibili: string;
+  dir_xiaohongshu: string;
+  dir_youtube: string;
+  dir_m3u8: string;
   /** 第三方视频也写 .nfo + 截帧封面，供 Emby 识别 */
   platform_meta: boolean;
   /**
@@ -255,6 +267,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ytdlp_path: "",
   platform_quality: "best",
   platform_dir: "第三方",
+  dir_telegram: "telegram",
+  dir_bilibili: "B站",
+  dir_xiaohongshu: "小红书",
+  dir_youtube: "youtube",
+  dir_m3u8: "m3u8",
   platform_meta: true,
   platform_proxy: "",
   platform_proxy_domestic: false,

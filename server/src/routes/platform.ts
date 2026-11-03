@@ -9,6 +9,7 @@ import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
 import { engineState, updateYtdlp } from "../platform/updater";
 import { recordManual } from "../manual/history";
 import { clamp, manualStatus, platformNote } from "../manual/note";
+import { platformDirKey } from "../tg/mediadir";
 
 /**
  * 第三方平台（B站 / 小红书 / YouTube）
@@ -31,8 +32,14 @@ platformRouter.get(
     res.json({
       enabled: settings.platform_enabled,
       quality: settings.platform_quality,
-      dir: settings.platform_dir,
-      root: platformRootDir(),
+      // 每个平台自己的落盘目录（相对下载根）与绝对路径，界面上直接展示
+      dirs: Object.fromEntries(
+        PLATFORM_IDS.map((id) => [id, settings[platformDirKey(id) ?? "dir_bilibili"]]),
+      ) as Record<string, string>,
+      roots: Object.fromEntries(PLATFORM_IDS.map((id) => [id, platformRootDir(id)])) as Record<
+        string,
+        string
+      >,
       meta: settings.platform_meta,
       proxy: settings.platform_proxy,
       proxyDomestic: settings.platform_proxy_domestic,

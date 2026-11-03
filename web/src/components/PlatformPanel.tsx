@@ -81,6 +81,9 @@ const PLATFORMS: PlatformMeta[] = [
   },
 ];
 
+/** 落盘目录展示用：与后端 PLATFORM_IDS 顺序一致 */
+const PLATFORM_DIR_IDS = ["bilibili", "xiaohongshu", "youtube"] as const;
+
 const QUALITIES = [
   { value: "best", label: "最高（原画）" },
   { value: "1080", label: "1080P" },
@@ -233,7 +236,6 @@ export default function PlatformPanel() {
   const [status, setStatus] = useState<PlatformStatus | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [quality, setQuality] = useState("best");
-  const [dir, setDir] = useState("第三方");
   const [meta, setMeta] = useState(true);
   const [proxy, setProxy] = useState("");
   const [proxyDomestic, setProxyDomestic] = useState(false);
@@ -259,7 +261,6 @@ export default function PlatformPanel() {
     const res = await refreshStatus();
     setEnabled(res.enabled);
     setQuality(res.quality || "best");
-    setDir(res.dir || "第三方");
     setMeta(res.meta);
     setProxy(res.proxy ?? "");
     setProxyDomestic(Boolean(res.proxyDomestic));
@@ -285,7 +286,6 @@ export default function PlatformPanel() {
       await api.saveSettings({
         platform_enabled: enabled,
         platform_quality: quality,
-        platform_dir: dir,
         platform_meta: meta,
         platform_proxy: proxy.trim(),
         platform_proxy_domestic: proxyDomestic,
@@ -504,7 +504,7 @@ export default function PlatformPanel() {
       </div>
 
       {/* 下载选项 */}
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">
           <span className="mb-1 block text-[11px] text-slate-500">清晰度上限</span>
           <select className="field" value={quality} onChange={(e) => setQuality(e.target.value)}>
@@ -514,16 +514,6 @@ export default function PlatformPanel() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-[11px] text-slate-500">存放子目录</span>
-          <input
-            className="field"
-            value={dir}
-            onChange={(e) => setDir(e.target.value)}
-            placeholder="第三方"
-            spellCheck={false}
-          />
         </label>
         <div className="flex items-end">
           <label className="flex w-full cursor-pointer items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
@@ -576,7 +566,13 @@ export default function PlatformPanel() {
 
       <div className="mt-3 flex items-center justify-between gap-2">
         <p className="text-[11px] leading-relaxed text-slate-500">
-          目录结构：<span className="font-mono text-slate-400">{dir || "第三方"}/平台/作者/标题 [ID]</span>
+          落盘目录：
+          <span className="break-all font-mono text-slate-400">
+            {PLATFORM_DIR_IDS.map((id) => `${status?.dirs?.[id] || "—"}/作者/标题 [ID]`).join(" · ")}
+          </span>
+          <span className="mt-0.5 block text-slate-600">
+            在「下载设置 → 分来源保存目录」里改
+          </span>
         </p>
         <Button size="sm" variant="primary" onClick={() => void saveConfig()} loading={busy === "config"}>
           <IconCheck className="h-3.5 w-3.5" />

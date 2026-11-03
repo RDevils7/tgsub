@@ -9,6 +9,7 @@ import { sanitizeSegment } from "../utils";
 import { PlatformLink } from "./detect";
 import { platformName, platformUsesProxy, probePlatform, PlatformProbe, PlaylistEntry } from "./ytdlp";
 import { downloader } from "../tg/downloader";
+import { joinRel, platformDirKey, sanitizeRelDir } from "../tg/mediadir";
 
 /**
  * 第三方链接入队。
@@ -72,8 +73,9 @@ function findExisting(url: string, fileName: string): { id: number; status: stri
 }
 
 /**
- * 目录：<平台根>/<平台>/<UP主>/<标题> [id]
+ * 目录：<该平台自己的目录>/<UP主>/<标题> [id]
  *
+ * 每个平台有自己的顶层目录（B站 / 小红书 / youtube，可改），所以不再多套一层平台名。
  * 每条视频一个目录：Emby 里就是一个独立条目，tvshow.nfo / 封面不会互相覆盖；
  * UP主 这一层让同一作者的内容排在一起，方便人工浏览。
  */
@@ -84,13 +86,17 @@ export function platformSaveDir(
   id: string,
   root: string,
 ): string {
-  const parts = [
-    sanitizeSegment(root || "第三方", 40),
-    platformName(platform),
+  return joinRel(
+    sanitizeRelDir(root, 40),
     sanitizeSegment(uploader || "未知作者", 40),
     sanitizeSegment(`${title}${id ? ` [${id}]` : ""}`, 80),
-  ].filter(Boolean);
-  return parts.join("/");
+  );
+}
+
+/** 某个平台的落盘目录（相对下载根）；未知平台回落到旧的总目录设置 */
+export function platformSourceDir(settings: Record<string, unknown>, platform: PlatformId): string {
+  const key = platformDirKey(platform);
+  return String((key ? settings[key] : settings.platform_dir) ?? "");
 }
 
 /* ------------------------------------------------------------------ */
@@ -135,7 +141,13 @@ function enqueueProbe(platform: PlatformId, url: string, probe: PlatformProbe): 
   const settings = getSettings();
   const fileName = `${probe.title}${probe.id ? ` [${probe.id}]` : ""}`.slice(0, 200);
   const existing = findExisting(url, fileName);
-  const saveDir = platformSaveDir(platform, probe.uploader, probe.title, probe.id, settings.platform_dir);
+  const saveDir = platformSaveDir(
+    platform,
+    probe.uploader,
+    probe.title,
+    probe.id,
+    platformSourceDir(settings as unknown as Record<string, unknown>, platform),
+  );
 
   if (existing && existing.status !== "failed" && existing.status !== "stopped") {
     return {
@@ -336,8 +348,9 @@ export async function enqueueFromChoice(token: string, mode: PlaylistMode): Prom
 }
 
 /** 平台状态：给设置页显示「有没有配 Cookie / yt-dlp 是哪个版本」 */
-export function platformRootDir(): string {
-  return path.join(env.downloadDir, getSettings().platform_dir || "第三方");
+export function platformRootDir(platform: PlatformId): string {
+  const rel = platformSourceDir(getSettings() as unknown as Record<string, unknown>, platform);
+  return path.join(env.downloadDir, ...rel.split("/").filter(Boolean));
 }
 
 /* ------------------------------------------------------------------ */

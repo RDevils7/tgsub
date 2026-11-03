@@ -40,6 +40,14 @@ import {
   telegramProxyUnsupported,
 } from "../server/src/lib/netprobe";
 import {
+  DEFAULT_SOURCE_DIRS,
+  DIR_KEYS,
+  joinRel,
+  parseDirSetting,
+  platformDirKey,
+  sanitizeRelDir,
+} from "../server/src/tg/mediadir";
+import {
   cleanTitle,
   decodeHtmlEntities,
   extractM3u8FromHtml,
@@ -2174,6 +2182,88 @@ function m3u8ParseChecks(): void {
 /* 手动下载提交记录：状态判定与一行摘要                               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* 分来源下载目录：默认值、路径拼接、用户输入校验                     */
+/* ------------------------------------------------------------------ */
+
+function mediaDirChecks(): void {
+  check("默认目录：telegram / B站 / 小红书 / youtube / m3u8", () => {
+    assert.equal(DEFAULT_SOURCE_DIRS.dir_telegram, "telegram");
+    assert.equal(DEFAULT_SOURCE_DIRS.dir_bilibili, "B站");
+    assert.equal(DEFAULT_SOURCE_DIRS.dir_xiaohongshu, "小红书");
+    assert.equal(DEFAULT_SOURCE_DIRS.dir_youtube, "youtube");
+    assert.equal(DEFAULT_SOURCE_DIRS.dir_m3u8, "m3u8");
+    assert.equal(DIR_KEYS.length, 5);
+  });
+
+  check("平台 id 映射到各自的目录设置项", () => {
+    assert.equal(platformDirKey("bilibili"), "dir_bilibili");
+    assert.equal(platformDirKey("xiaohongshu"), "dir_xiaohongshu");
+    assert.equal(platformDirKey("youtube"), "dir_youtube");
+    assert.equal(platformDirKey("douyin"), null);
+  });
+
+  check("拼接：过滤空段、统一斜杠、去掉首尾斜杠", () => {
+    assert.equal(joinRel("telegram", "美人局"), "telegram/美人局");
+    assert.equal(joinRel("", "美人局"), "美人局");
+    assert.equal(joinRel(null, undefined, ""), "");
+    assert.equal(joinRel("/m3u8/", "/标题/"), "m3u8/标题");
+    assert.equal(joinRel("影视\\B站", "UP"), "影视/B站/UP");
+    assert.equal(joinRel("影视//B站", "UP"), "影视/B站/UP");
+  });
+
+  check("拼接：来源目录留空时文件直接落在下载根下", () => {
+    assert.equal(joinRel("", "美人局") || null, "美人局");
+    assert.equal(joinRel("", "") || null, null);
+  });
+
+  check("逐段清洗：斜杠保留，段内非法字符被替换", () => {
+    assert.equal(sanitizeRelDir("telegram/美人局", 60), "telegram/美人局");
+    assert.equal(sanitizeRelDir("a/b:c", 60), "a/b_c");
+    assert.equal(sanitizeRelDir("   ", 60), "");
+    assert.equal(sanitizeRelDir(null, 60), "");
+  });
+
+  check("用户输入：普通相对路径原样通过", () => {
+    assert.equal(parseDirSetting("telegram", "/downloads").dir, "telegram");
+    assert.equal(parseDirSetting(" 影视/B站 ", "/downloads").dir, "影视/B站");
+    assert.equal(parseDirSetting("", "/downloads").dir, "");
+    assert.equal(parseDirSetting(undefined, "/downloads").dir, "");
+  });
+
+  check("用户输入：下载根内的绝对路径自动转成相对", () => {
+    assert.equal(parseDirSetting("/downloads/B站", "/downloads").dir, "B站");
+    assert.equal(parseDirSetting("/downloads/影视/小红书/", "/downloads").dir, "影视/小红书");
+    assert.equal(parseDirSetting("C:/downloads/youtube", "C:/downloads").dir, "youtube");
+  });
+
+  check("用户输入：下载根外的绝对路径被拒绝", () => {
+    const r = parseDirSetting("/etc/passwd", "/downloads");
+    assert.equal(r.dir, "");
+    assert.ok(Boolean(r.error), "应当报错");
+  });
+
+  check("用户输入：.. 与 . 片段被拒绝", () => {
+    assert.ok(Boolean(parseDirSetting("../../etc", "/downloads").error), ".. 应当报错");
+    assert.ok(Boolean(parseDirSetting("a/../b", "/downloads").error), "夹在中间的 .. 也报错");
+    assert.ok(Boolean(parseDirSetting("./B站", "/downloads").error), ". 也报错");
+  });
+
+  check("用户输入：非法字符与过深层级被拒绝", () => {
+    assert.ok(Boolean(parseDirSetting("B站?", "/downloads").error), "问号应当报错");
+    assert.ok(Boolean(parseDirSetting("a/b/c/d/e/f/g", "/downloads").error), "超过 6 层应当报错");
+  });
+
+  check("目录结构：telegram 剧集路径与平台路径不会重复套平台名", () => {
+    const telegram = joinRel(DEFAULT_SOURCE_DIRS.dir_telegram, "美人局");
+    assert.equal(telegram, "telegram/美人局");
+    const bili = joinRel(DEFAULT_SOURCE_DIRS.dir_bilibili, "影视飓风", "标题 [BV1xx]");
+    assert.equal(bili, "B站/影视飓风/标题 [BV1xx]");
+    const web = joinRel(DEFAULT_SOURCE_DIRS.dir_m3u8, "标题");
+    assert.equal(web, "m3u8/标题");
+  });
+}
+
 function manualNoteChecks(): void {
   check("提交结果状态：入队 > 之前下过 > 没入队", () => {
     assert.equal(manualStatus({ queued: 2, existing: 3 }), "ok");
@@ -2244,6 +2334,7 @@ async function main(): Promise<void> {
     ["yt-dlp 更新排期用例", () => updatePlanChecks()],
     ["剧集改名合并用例", () => renamePlanChecks()],
     ["手动下载记录用例", () => manualNoteChecks()],
+    ["分来源下载目录用例", () => mediaDirChecks()],
     ["m3u8 解析用例", () => m3u8ParseChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],

@@ -273,8 +273,14 @@ export interface AppSettings {
   ytdlp_path: string;
   /** 清晰度上限：best / 1080 / 720 / 480 */
   platform_quality: string;
-  /** 第三方视频存放的子目录名 */
+  /** 旧字段（1.3.2 起由下面 5 个分来源目录取代），仅用于兼容老后端 */
   platform_dir: string;
+  /** 分来源落盘子目录（相对下载根，可多级；留空 = 直接放下载根下） */
+  dir_telegram: string;
+  dir_bilibili: string;
+  dir_xiaohongshu: string;
+  dir_youtube: string;
+  dir_m3u8: string;
   /** 第三方视频也写 nfo + 封面 */
   platform_meta: boolean;
   /** 只给 yt-dlp 用的代理；下 YouTube 通常必须填 */
@@ -339,8 +345,10 @@ export interface PlatformInfo {
 export interface PlatformStatus {
   enabled: boolean;
   quality: string;
-  dir: string;
-  root: string;
+  /** 每个平台自己的落盘目录（相对下载根），键是平台 id */
+  dirs: Record<string, string>;
+  /** 上面那些目录解析成的绝对路径 */
+  roots: Record<string, string>;
   meta: boolean;
   proxy: string;
   /** 国内平台是否也走代理（默认 false：B站直连，避免 567） */

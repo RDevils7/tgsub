@@ -18,10 +18,11 @@ import { normalizeEmbyUrl } from "../tg/embyapi";
 import { normalizeProxyUrl } from "../lib/netprobe";
 import { withLiveProgress } from "../tg/downloader";
 import { AppSettings, Download, PLATFORM_IDS } from "../types";
-import { asyncHandler, clampInt } from "../lib/http";
+import { asyncHandler, assert, clampInt } from "../lib/http";
 import { APP_VERSION } from "../version";
 import { clearYtdlpCache } from "../platform/ytdlp";
 import { engineState } from "../platform/updater";
+import { DIR_KEYS, DIR_LABEL, parseDirSetting } from "../tg/mediadir";
 
 export const settingsRouter = Router();
 
@@ -162,14 +163,22 @@ settingsRouter.put(
         ? quality
         : current.platform_quality;
     }
+    // 老字段：1.3.2 起由下面 5 个分来源目录取代，仍接受写入只为兼容旧前端
     if (typeof body.platform_dir === "string") {
-      // 只允许一级目录名：去掉分隔符，避免填成 ../../etc
       const dir = body.platform_dir
         .trim()
         .replace(/[\\/]+/g, "")
         .replace(/^\.+/, "")
         .slice(0, 40);
       patch.platform_dir = dir || "第三方";
+    }
+
+    // 分来源目录：只允许下载根内的相对路径，越界或带 .. 直接 400
+    for (const key of DIR_KEYS) {
+      if (typeof body[key] !== "string") continue;
+      const parsed = parseDirSetting(body[key], env.downloadDir);
+      assert(!parsed.error, 400, `${DIR_LABEL[key]} 下载目录无效：${parsed.error}`);
+      patch[key] = parsed.dir;
     }
     if (body.platform_meta !== undefined) patch.platform_meta = Boolean(body.platform_meta);
 

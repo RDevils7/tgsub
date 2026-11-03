@@ -26,6 +26,7 @@ import {
   shouldRetryRoute,
 } from "./m3u8";
 import { rememberRoute } from "./netroute";
+import { sanitizeRelDir } from "./mediadir";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -532,16 +533,20 @@ class DownloadQueue {
       // 同一剧名的后续集数会自然落进同一个文件夹；其余文件仍走 file_template。
       let rel: string;
       if (row.save_name) {
-        const dir = row.save_dir ? sanitizeSegment(row.save_dir, 80) : "";
+        // save_dir 可能带来源前缀（telegram/剧名），必须逐段清洗 ——
+        // 整串丢进 sanitizeSegment 会把 `/` 换成 `_`，电视目录就变成一个大长名字
+        const dir = sanitizeRelDir(row.save_dir, 80);
         const name = path.basename(row.save_name);
         rel = dir ? path.join(dir, name) : name;
       } else {
-        rel = targetRelativePath(settings.file_template, {
+        // 没走剧集命名的文件（图片、文档）也归到 Telegram 来源目录下
+        const templated = targetRelativePath(settings.file_template, {
           date: formatDateFolder(row.created_at),
           channel: sanitizeSegment(channel.title, 60),
           name: sanitizeSegment(fileName, 150),
           messageId: row.message_id,
         });
+        rel = settings.dir_telegram ? path.join(settings.dir_telegram, templated) : templated;
       }
 
       const candidate = path.join(env.downloadDir, rel);

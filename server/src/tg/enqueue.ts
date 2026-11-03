@@ -5,6 +5,7 @@ import { extractMedia, groupIdOf, messageText, type MediaInfo } from "./media";
 import { parseCaptionMeta, planFileNames } from "./naming";
 import { channelMessageLink } from "./entity";
 import { encodeMeta, type EmbyMeta } from "./emby";
+import { joinRel } from "./mediadir";
 
 /**
  * 把「一条消息（含整个相册）」落成下载任务 + 监控记录。
@@ -136,6 +137,10 @@ export function excerptOf(text: string): string {
 const runGroup = db.transaction(
   (channel: Channel, messages: Array<Record<string, unknown>>, opts: GroupEnqueueOptions): GroupEnqueueResult => {
   const settings = getSettings();
+  // Telegram 来源的落盘子目录（默认 telegram/）。剧本目录名由命名规划给出，
+  // 这里只负责在它前面套上来源目录 —— 存储路径与「剧名」是两件事，后者要原样写进 NFO。
+  const telegramRoot = settings.dir_telegram;
+  const diskDir = (rel: string | null | undefined): string | null => joinRel(telegramRoot, rel) || null;
   // 图片默认计入可下载文件（网页手动下载 / 定时扫描保持原行为）；机器人显式传 false 时跳过
   const includeImages = opts.includeImages ?? true;
   const text = messages.map((m) => messageText(m)).join("\n");
@@ -193,7 +198,7 @@ const runGroup = db.transaction(
         // 认不出剧名时：一个链接一个文件夹，名字取正文
         looseFolder: settings.fallback_folder,
         uniqueLooseDir: (base) =>
-          stmtLooseDirOwner.get(base, messageId) ? `${base}-${messageId}` : base,
+          stmtLooseDirOwner.get(diskDir(base) ?? base, messageId) ? `${base}-${messageId}` : base,
         // 消息条数决定「一个文件含多集」还是「相册一集一条」
         messageCount: messages.length,
       },
@@ -214,7 +219,7 @@ const runGroup = db.transaction(
       skipped: 0,
       existing: 0,
       hasVideo: hasVideo,
-      saveDir: naming.find((n) => !n.skip)?.dir ?? null,
+      saveDir: diskDir(naming.find((n) => !n.skip)?.dir ?? null),
       saveName: naming.find((n) => !n.skip)?.name ?? null,
       pendingIds: [],
     };
@@ -310,7 +315,7 @@ const runGroup = db.transaction(
 
       // 同名目标文件已经在队列里/已下过：不再新建一行，避免两个任务抢同一个路径
       const sameName = named?.name
-        ? stmtFindBySaveName.get(channel.id, named.dir ?? null, named.name)
+        ? stmtFindBySaveName.get(channel.id, diskDir(named.dir), named.name)
         : undefined;
       if (sameName) {
         if (opts.force && (sameName.status === "failed" || sameName.status === "skipped")) {
@@ -336,7 +341,7 @@ const runGroup = db.transaction(
         matched_keyword: hitKeyword,
         subscription_id: hitSubId,
         created_at: now,
-        save_dir: named?.dir ?? null,
+        save_dir: diskDir(named?.dir ?? null),
         save_name: named?.name ?? null,
         emby_json: embyJson,
         // Telegram 的连接由 proxy_url 决定：填了代理就走代理，没填就直连

@@ -1,4 +1,4 @@
-import { db } from "../db";
+import { db, getSettings } from "../db";
 import { logger } from "../logger";
 import { Channel } from "../types";
 import { getClient } from "./client";
@@ -7,6 +7,7 @@ import { channelEntityKey, channelMessageLink } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { downloader } from "./downloader";
 import { resolveM3u8Input, isHttpUrl } from "./m3u8";
+import { joinRel } from "./mediadir";
 
 /**
  * 直接按 Telegram 消息链接下载（不等关键词命中）。
@@ -259,7 +260,8 @@ export interface M3u8Result {
 export async function enqueueM3u8(input: string): Promise<M3u8Result> {
   const target = await resolveM3u8Input(input);
   const safeTitle = target.title || "video";
-  const saveDir = `m3u8/${safeTitle}`;
+  // 来源目录可配（默认 m3u8/），标题是它下面的剧集目录
+  const saveDir = joinRel(getSettings().dir_m3u8, safeTitle) || safeTitle;
   const saveName = `${safeTitle}.mp4`;
 
   // 把 m3u8 真实地址与防盗链信息塞进 emby_json，runM3u8 运行时再取出来。
