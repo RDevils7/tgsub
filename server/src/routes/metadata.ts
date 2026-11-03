@@ -45,6 +45,14 @@ import {
   type DeleteMode,
 } from "../tg/mediamanage";
 import {
+  buildRenamePlan,
+  samePath,
+  seriesDirName,
+  type EpisodeSource,
+  type RenamePlan,
+} from "../tg/renameplan";
+import { executeRenamePlan } from "../tg/seriesrename";
+import {
   applyFields,
   buildNfo,
   fieldsFromNfo,
@@ -1451,5 +1459,253 @@ metadataRouter.get(
   asyncHandler(async (req, res) => {
     const info = await ffmpegInfo(req.query.refresh === "1");
     res.json({ ffmpeg: info, sharp: Boolean(await loadSharp()), settings: { ffmpeg_path: getSettings().ffmpeg_path } });
+  }),
+);
+
+/* ------------------------------------------------------------------ */
+/* 改名 / 合并剧集                                                     */
+/* ------------------------------------------------------------------ */
+
+/** 目录里的视频 → 改名计划的输入（集号从文件名解析） */
+function episodeSourcesOf(dir: string): EpisodeSource[] {
+  const dirName = path.basename(dir);
+  return scanVideoFiles(dir).map((p) => {
+    const name = path.basename(p);
+    const info = deriveEpisodeInfo(name, dirName);
+    return { path: p, name, episode: info.episode, season: info.season };
+  });
+}
+
+/** child 是否在 parent 之下（含相等） */
+function under(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/**
+ * 多个目录的公共祖先。
+ *
+ * 用于「合并」的默认目标位置：把散落在几个文件夹里的分集放进同一个剧集目录。
+ * 跨盘时没有公共祖先可言，返回 null 让调用方报错（跨盘合并会把大文件整体复制，太慢）。
+ */
+export function commonParentOf(dirs: string[]): string | null {
+  const unique = [...new Set(dirs.map((d) => path.resolve(d)))];
+  if (unique.length === 0) return null;
+  let common = unique[0];
+  for (const dir of unique.slice(1)) {
+    while (!under(dir, common)) {
+      const up = path.dirname(common);
+      if (up === common) return null; // 已经到根还覆盖不了 → 跨盘
+      common = up;
+    }
+  }
+  return common;
+}
+
+/**
+ * 改名后把 NFO 里的内容同步成新名字与新集号。
+ *
+ * 三处要一起改，否则 Emby 读到的是一套自相矛盾的数据：
+ *   - tvshow.nfo 的 title（剧名）
+ *   - 单集 nfo 的 showtitle（剧名）
+ *   - 单集 nfo 的 season / episode（重排后编号变了）
+ * 「第10集」这种纯序号标题也顺手换成新编号；自定义标题不动。
+ */
+async function refreshSeriesMeta(plan: RenamePlan): Promise<number> {
+  const dir = plan.targetDir;
+  let changed = 0;
+
+  const showNfo = path.join(dir, "tvshow.nfo");
+  const showRaw = await readText(showNfo);
+  if (showRaw) {
+    const parsed = parseNfo(showRaw);
+    if (parsed) {
+      const fields = { ...fieldsFromNfo(parsed), title: plan.title };
+      await writeTextAtomic(showNfo, applyFields(parsed, fields));
+      changed += 1;
+    }
+  }
+
+  const seqTitle = /^第\s*\d+\s*[集话話期]$/;
+  for (const item of plan.items) {
+    const nfo = path.join(
+      path.dirname(item.to),
+      `${path.basename(item.to, path.extname(item.to))}.nfo`,
+    );
+    const raw = await readText(nfo);
+    if (!raw) continue;
+    const parsed = parseNfo(raw);
+    if (!parsed) continue;
+    const fields = fieldsFromNfo(parsed);
+    const next = applyFields(parsed, {
+      ...fields,
+      showtitle: plan.title,
+      season: String(plan.season),
+      episode: String(item.newEpisode),
+      title: seqTitle.test(fields.title.trim())
+        ? `第${String(item.newEpisode).padStart(2, "0")}集`
+        : fields.title,
+    });
+    if (next === raw) continue;
+    await writeTextAtomic(nfo, next);
+    changed += 1;
+  }
+  return changed;
+}
+
+/**
+ * 剧集改名：目录名与目录内每一集的文件名一起改，集号按原顺序重排成连续的 E01…EN。
+ *
+ * 只改 NFO 是不够的 —— Emby 以文件名里的 SxxExx 为准，文件还叫旧名的话，
+ * 改完剧名在界面上看到的仍是旧的排序与标题。
+ */
+metadataRouter.post(
+  "/rename-series",
+  asyncHandler(async (req, res) => {
+    const key = String(req.body?.key ?? "");
+    assert(key, 400, "缺少路径标识");
+    const target = resolveTarget(key);
+    assert(target.kind === "folder", 400, "只能对整个剧集目录改名");
+
+    const title = String(req.body?.title ?? "").trim();
+    assert(title, 400, "请填写新的剧集名称");
+    const dryRun = Boolean(req.body?.dryRun);
+
+    const parent = path.dirname(target.path);
+    const dirName = seriesDirName(title);
+    const targetDir = samePath(path.basename(target.path), dirName)
+      ? target.path
+      : path.join(parent, dirName);
+    // 目标目录已存在且不是自己：说明会和另一部剧混在一起，让用户先处理
+    assert(
+      samePath(targetDir, target.path) || !fs.existsSync(targetDir),
+      409,
+      `目标目录已存在：${targetDir}。如果是想合并，请用「合并为剧集」`,
+    );
+    assert(isAllowedPath(targetDir), 403, "目标目录不在允许操作的范围内");
+
+    const sources = episodeSourcesOf(target.path);
+    assert(sources.length > 0, 400, "这个目录里没有视频文件，无法重命名");
+
+    const plan = buildRenamePlan({
+      sources,
+      title,
+      targetDir,
+      existingNames: fs.existsSync(targetDir) ? fs.readdirSync(targetDir) : [],
+    });
+
+    if (dryRun) {
+      res.json({ ok: true, dryRun: true, plan, count: plan.items.length });
+      return;
+    }
+    assert(plan.conflicts.length === 0, 409, `目标位置已有同名文件：${plan.conflicts.slice(0, 5).join("、")}`);
+
+    const result = await executeRenamePlan(plan);
+    const nfoUpdated = await refreshSeriesMeta(plan);
+    res.json({
+      ok: true,
+      result,
+      nfoUpdated,
+      key: encodePath(plan.targetDir),
+      dir: plan.targetDir,
+      title: plan.title,
+      plan,
+    });
+  }),
+);
+
+/**
+ * 合并：把散在不同文件夹里的分集并成一部剧。
+ *
+ * 顺序按文件名里的集号（或自然序）排，编号重排成连续的 E01…EN ——
+ * 零散来源拼起来之后，Emby 里不会出现跳集。
+ */
+metadataRouter.post(
+  "/merge",
+  asyncHandler(async (req, res) => {
+    const rawKeys: unknown = req.body?.keys;
+    const keys = Array.isArray(rawKeys) ? rawKeys.map((k) => String(k)).filter(Boolean) : [];
+    assert(keys.length >= 1, 400, "请至少选择一个视频文件");
+    const title = String(req.body?.title ?? "").trim();
+    assert(title, 400, "请填写剧集名称");
+    const dryRun = Boolean(req.body?.dryRun);
+
+    const files: string[] = [];
+    for (const k of keys) {
+      const abs = decodePath(k);
+      assert(isAllowedPath(abs), 403, `路径不在允许范围内：${abs}`);
+      assert(isVideoFile(abs) && fs.existsSync(abs), 400, `不是有效的视频文件：${path.basename(abs)}`);
+      if (!files.some((f) => samePath(f, abs))) files.push(abs);
+    }
+
+    const explicitDir = String(req.body?.dir ?? "").trim();
+    let targetDir: string;
+    if (explicitDir) {
+      targetDir = path.resolve(explicitDir);
+      assert(isAllowedPath(targetDir), 403, "目标目录不在允许操作的范围内");
+    } else {
+      const dirs = [...new Set(files.map((f) => path.dirname(f)))];
+      let baseDir: string;
+      if (dirs.length === 1) {
+        // 全在同一目录：目标是「把这个目录改名」，所以取它的父目录
+        const parent = path.dirname(dirs[0]);
+        // 父目录不在允许范围（比如勾的就是下载根目录里的散文件）时退回自己
+        baseDir = isAllowedPath(parent) ? parent : dirs[0];
+      } else {
+        const common = commonParentOf(dirs);
+        assert(common, 400, "这些文件不在同一个磁盘上，无法合并；请手动指定目标目录");
+        baseDir = common;
+      }
+      targetDir = path.join(baseDir, seriesDirName(title));
+    }
+
+    // 目标目录里已有的视频也纳入排序：否则新文件会从 E01 开始，把老集覆盖掉
+    const incoming = new Set(files.map((f) => path.resolve(f)));
+    const sources: EpisodeSource[] = files.map((p) => {
+      const info = deriveEpisodeInfo(path.basename(p), path.dirname(p));
+      return {
+        path: p,
+        name: path.basename(p),
+        episode: info.episode,
+        season: info.season,
+      };
+    });
+    if (fs.existsSync(targetDir)) {
+      for (const existing of episodeSourcesOf(targetDir)) {
+        if (incoming.has(path.resolve(existing.path))) continue;
+        sources.push(existing);
+      }
+    }
+
+    const plan = buildRenamePlan({
+      sources,
+      title,
+      targetDir,
+      existingNames: fs.existsSync(targetDir) ? fs.readdirSync(targetDir) : [],
+    });
+
+    if (dryRun) {
+      res.json({
+        ok: true,
+        dryRun: true,
+        plan,
+        count: plan.items.length,
+        merged: sources.length - files.length,
+      });
+      return;
+    }
+    assert(plan.conflicts.length === 0, 409, `目标位置已有同名文件：${plan.conflicts.slice(0, 5).join("、")}`);
+
+    const result = await executeRenamePlan(plan);
+    const nfoUpdated = await refreshSeriesMeta(plan);
+    res.json({
+      ok: true,
+      result,
+      nfoUpdated,
+      key: encodePath(plan.targetDir),
+      dir: plan.targetDir,
+      title: plan.title,
+      plan,
+    });
   }),
 );

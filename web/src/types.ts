@@ -637,6 +637,48 @@ export interface MetadataFolderItem {
   files: MetadataFileItem[];
 }
 
+/**
+ * 改名 / 合并剧集的预览：每一条都是「原文件 → 新文件」。
+ *
+ * 顺序由后端按集号（或文件名自然序）确定，编号重排成连续的 E01…EN。
+ */
+export interface RenamePlanItem {
+  from: string;
+  to: string;
+  oldEpisode: number | null;
+  newEpisode: number;
+}
+
+export interface RenamePlanPreview {
+  title: string;
+  season: number;
+  targetDir: string;
+  items: RenamePlanItem[];
+  /** 需要提醒但不阻断的问题（集号重复、季号混用等） */
+  warnings: string[];
+  /** 目标位置已有同名文件 */
+  conflicts: string[];
+}
+
+export interface RenameExecuteResult {
+  ok: boolean;
+  /** 改完之后目录的路径标识，界面据此跳转 */
+  key: string;
+  dir: string;
+  title: string;
+  plan: RenamePlanPreview;
+  /** 同步更新了剧名的 NFO 份数 */
+  nfoUpdated: number;
+  result: {
+    moved: number;
+    sidecars: number;
+    downloads: number;
+    emptyDirs: number;
+    skipped: string[];
+    failed: Array<{ path: string; error: string }>;
+  };
+}
+
 /** 手动添加的媒体来源 */
 export interface MetadataSource {
   id: number;

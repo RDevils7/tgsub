@@ -30,6 +30,8 @@ import type {
   MetadataDeletePlan,
   MetadataDeleteResult,
   MetadataExcludedItem,
+  RenamePlanPreview,
+  RenameExecuteResult,
   DeleteMode,
   BrowseResult,
   FrameCandidate,
@@ -332,6 +334,30 @@ export const api = {
     request<{ ok: boolean }>("/metadata/excluded/restore", {
       method: "POST",
       body: JSON.stringify({ path }),
+    }),
+  /** 剧集改名预览：目录与每一集的新文件名，改之前先看一遍 */
+  previewRenameSeries: (key: string, title: string) =>
+    request<{ ok: boolean; dryRun: true; plan: RenamePlanPreview; count: number }>(
+      "/metadata/rename-series",
+      { method: "POST", body: JSON.stringify({ key, title, dryRun: true }) },
+    ),
+  /** 剧集改名执行：目录名 + 每集文件名一起改，集号重排成连续 */
+  renameSeries: (key: string, title: string) =>
+    request<RenameExecuteResult>("/metadata/rename-series", {
+      method: "POST",
+      body: JSON.stringify({ key, title }),
+    }),
+  /** 合并预览：把散在不同文件夹里的视频并成一部剧 */
+  previewMerge: (keys: string[], title: string, dir?: string) =>
+    request<{ ok: boolean; dryRun: true; plan: RenamePlanPreview; count: number; merged: number }>(
+      "/metadata/merge",
+      { method: "POST", body: JSON.stringify({ keys, title, dir, dryRun: true }) },
+    ),
+  /** 合并执行 */
+  mergeSeries: (keys: string[], title: string, dir?: string) =>
+    request<RenameExecuteResult>("/metadata/merge", {
+      method: "POST",
+      body: JSON.stringify({ keys, title, dir }),
     }),
   /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录 */
   metadataBrowse: (path?: string) =>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../api";
 import type {
   BrowseResult,
@@ -11,6 +12,7 @@ import type {
   MetadataSource,
   MetadataExcludedItem,
   NfoFields,
+  RenamePlanPreview,
 } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { CropDialog } from "../components/CropDialog";
@@ -147,6 +149,10 @@ export default function Metadata() {
   const [addOpen, setAddOpen] = useState(false);
   /** 待删除的媒体条目（剧集目录 / 单集视频） */
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  /** 勾选的视频（跨文件夹合并成一部剧用，存的是路径标识） */
+  const [checked, setChecked] = useState<Set<string>>(() => new Set());
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -297,6 +303,16 @@ export default function Metadata() {
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  /** 勾选/取消一个视频（可跨文件夹，合并时按集号统一排序） */
+  const toggleCheck = (key: string) => {
+    setChecked((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -465,6 +481,15 @@ export default function Metadata() {
                                 fileActive ? "bg-brand-500/[0.14]" : "hover:bg-white/[0.03]"
                               }`}
                             >
+                              {/* 勾选后可跨文件夹合并成一部剧 */}
+                              <input
+                                type="checkbox"
+                                className="mr-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand-500"
+                                checked={checked.has(file.key)}
+                                onChange={() => toggleCheck(file.key)}
+                                aria-label={`选择 ${file.name}`}
+                                title="勾选后可与其他文件夹的视频合并成一部剧"
+                              />
                               <button
                                 onClick={() => setSelected({ key: file.key, kind: "file" })}
                                 className="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -519,6 +544,32 @@ export default function Metadata() {
             })}
           </ul>
         </div>
+
+        {/* 勾选后浮出的操作条：把不同文件夹里的分集并成一部剧。
+            挂到 body 上 —— 页面容器带 animate-fade-up（transform 常驻），
+            里面的 fixed 会以容器为基准定位，滚到视口外就看不见了。 */}
+        {checked.size > 0 &&
+          createPortal(
+            <div className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-[min(92vw,520px)] items-center gap-2 rounded-2xl border border-brand-500/30 bg-ink-850/95 px-4 py-2.5 shadow-card backdrop-blur">
+              <span className="text-[11.5px] text-slate-300">
+                已选 <span className="tabular-nums font-semibold text-white">{checked.size}</span> 个视频
+              </span>
+              <Button
+                size="sm"
+                variant="primary"
+                className="ml-auto"
+                onClick={() => setMergeOpen(true)}
+                title="把这些视频按集号排序，重命名成一部剧"
+              >
+                <IconSpark className="h-3.5 w-3.5" />
+                合并为剧集
+              </Button>
+              <Button size="sm" onClick={() => setChecked(new Set())} title="清空选择">
+                清空
+              </Button>
+            </div>,
+            document.body,
+          )}
 
         <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] px-3 py-2">
           <PageSizeControl
@@ -643,6 +694,16 @@ export default function Metadata() {
                   <IconImage className="h-3.5 w-3.5" />
                   生成图片
                 </Button>
+                {isFolderTarget && (
+                  <Button
+                    size="sm"
+                    onClick={() => setRenameOpen(true)}
+                    title="把目录和每一集的文件名一起改成「剧名S01E01」，集号按原顺序重排"
+                  >
+                    <IconEdit className="h-3.5 w-3.5" />
+                    重命名文件
+                  </Button>
+                )}
                 {detail.download && (
                   <a
                     className="btn-ghost !px-2.5 !py-1.5 !text-[12.5px]"
@@ -768,6 +829,35 @@ export default function Metadata() {
           await fetchList(page, true);
         }}
       />
+
+      {/* 合并勾选的视频为一部剧（可跨文件夹） */}
+      {mergeOpen && (
+        <MergeSeriesDialog
+          keys={[...checked]}
+          onClose={() => setMergeOpen(false)}
+          onDone={async (key) => {
+            setMergeOpen(false);
+            setChecked(new Set());
+            await fetchList(page, true);
+            setSelected({ key, kind: "folder" });
+          }}
+        />
+      )}
+
+      {/* 剧集改名：目录与每一集的文件名一起改 */}
+      {renameOpen && detail && detail.target.kind === "folder" && (
+        <RenameSeriesDialog
+          itemKey={detail.target.key}
+          currentTitle={detail.fields.show.title || detail.target.name}
+          onClose={() => setRenameOpen(false)}
+          onDone={async (key) => {
+            setRenameOpen(false);
+            await fetchList(page, true);
+            // 目录名变了，旧的 key 已经失效，切到新路径
+            setSelected({ key, kind: "folder" });
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1944,5 +2034,337 @@ function NfoTab({
         保存后 Emby 需要「刷新元数据」才会看到变化。
       </p>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 改名 / 合并剧集                                                     */
+/* ------------------------------------------------------------------ */
+
+/** 从路径里取文件名（前端没有 node:path） */
+const baseName = (p: string): string => p.split(/[\\/]/).pop() || p;
+
+const pad2 = (n: number): string => String(Math.max(0, Math.floor(n))).padStart(2, "0");
+
+/**
+ * 改名 / 合并共用的预览：一行一个「原文件 → 新文件」。
+ *
+ * 磁盘操作不可撤销，动手前必须让人看清每一条会变成什么。
+ */
+function RenamePlanView({ plan }: { plan: RenamePlanPreview }) {
+  const last = plan.items.length;
+  return (
+    <div className="space-y-2.5">
+      <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2 text-[11.5px]">
+        <div className="flex gap-2">
+          <span className="w-16 shrink-0 text-slate-500">目标目录</span>
+          <span className="min-w-0 break-all font-mono text-slate-300">{plan.targetDir}</span>
+        </div>
+        <div className="mt-1 flex gap-2">
+          <span className="w-16 shrink-0 text-slate-500">命名规则</span>
+          <span className="min-w-0 break-all font-mono text-slate-300">
+            {plan.title}S{pad2(plan.season)}E01 … E{pad2(last)}
+          </span>
+        </div>
+      </div>
+
+      {plan.warnings.map((w) => (
+        <p key={w} className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-warn">
+          <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {w}
+        </p>
+      ))}
+
+      {plan.conflicts.length > 0 && (
+        <p className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-rose-300">
+          <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          目标位置已有同名文件：{plan.conflicts.slice(0, 5).join("、")}
+          {plan.conflicts.length > 5 ? ` 等 ${plan.conflicts.length} 个` : ""}。换个剧名或先处理这些文件。
+        </p>
+      )}
+
+      <div className="max-h-[44vh] overflow-y-auto rounded-xl border border-white/[0.07]">
+        <table className="w-full border-collapse text-[11.5px]">
+          <thead className="sticky top-0 z-10 bg-ink-850">
+            <tr className="text-left text-slate-500">
+              <th className="w-9 px-2 py-1.5 font-normal">#</th>
+              <th className="px-2 py-1.5 font-normal">原文件</th>
+              <th className="w-6 px-0 py-1.5 font-normal" />
+              <th className="px-2 py-1.5 font-normal">新文件</th>
+            </tr>
+          </thead>
+          <tbody>
+            {plan.items.map((item, idx) => {
+              const unchanged = baseName(item.from) === baseName(item.to);
+              return (
+                <tr key={`${item.from}-${idx}`} className="border-t border-white/[0.05]">
+                  <td className="px-2 py-1.5 tabular-nums text-slate-600">{idx + 1}</td>
+                  <td className="break-all px-2 py-1.5 text-slate-400" title={item.from}>
+                    {baseName(item.from)}
+                  </td>
+                  <td className="px-0 py-1.5 text-center text-slate-600">→</td>
+                  <td
+                    className={`break-all px-2 py-1.5 ${unchanged ? "text-slate-500" : "text-slate-200"}`}
+                    title={item.to}
+                  >
+                    {baseName(item.to)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-slate-500">
+        同名的 <span className="font-mono">.nfo</span> 与缩略图会跟着改名，剧集封面不受影响；
+        改完会通知 Emby 重新识别这个目录。
+      </p>
+    </div>
+  );
+}
+
+/** 合并：把勾选的视频（可跨文件夹）按集号排成一部剧 */
+function MergeSeriesDialog({
+  keys,
+  onClose,
+  onDone,
+}: {
+  keys: string[];
+  onClose: () => void;
+  onDone: (key: string) => void;
+}) {
+  const toast = useToast();
+  const [title, setTitle] = useState("");
+  const [plan, setPlan] = useState<RenamePlanPreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dep = keys.join("|");
+
+  useEffect(() => {
+    const name = title.trim();
+    if (!name) {
+      setPlan(null);
+      setError(null);
+      return undefined;
+    }
+    let alive = true;
+    setPreviewing(true);
+    const timer = setTimeout(() => {
+      api
+        .previewMerge(keys, name)
+        .then((res) => {
+          if (!alive) return;
+          setPlan(res.plan);
+          setError(null);
+        })
+        .catch((err: Error) => {
+          if (!alive) return;
+          setPlan(null);
+          setError(err.message);
+        })
+        .finally(() => {
+          if (alive) setPreviewing(false);
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+    // keys 用 dep 代替，避免每次渲染都重新预览
+  }, [title, dep]);
+
+  const run = async () => {
+    if (!plan || plan.conflicts.length > 0) return;
+    setRunning(true);
+    try {
+      const res = await api.mergeSeries(keys, title.trim());
+      toast.push(`已合并 ${res.result.moved} 个视频 → ${res.title}`, "success");
+      onDone(res.key);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="合并为剧集"
+      description="勾选的视频会按集号排序，重排成连续的 E01…EN，并搬进同一个剧集目录"
+      width="max-w-2xl"
+      footer={
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11.5px] text-slate-500">
+            {plan ? `${plan.items.length} 个文件` : `已选 ${keys.length} 个视频`}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={onClose}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={running}
+              disabled={!plan || previewing || plan.conflicts.length > 0}
+              onClick={() => void run()}
+            >
+              <IconCheck className="h-3.5 w-3.5" />
+              开始合并
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div>
+          <label className="label">剧集名称</label>
+          <input
+            className="field"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="例如：我的妈妈徐秋曼"
+            autoFocus
+          />
+          <p className="mt-1 text-[11px] text-slate-500">
+            会建成「剧名/剧名S01E01.mp4」这样的结构；目标目录默认取勾选文件的公共上级目录。
+          </p>
+        </div>
+
+        {previewing && (
+          <div className="flex items-center gap-2 py-6 text-[12px] text-slate-500">
+            <Spinner /> 正在算新的文件名…
+          </div>
+        )}
+        {!previewing && error && (
+          <p className="flex items-start gap-1.5 rounded-xl border border-rose-500/20 bg-rose-500/[0.08] px-3 py-2 text-[11.5px] leading-relaxed text-rose-300">
+            <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            {error}
+          </p>
+        )}
+        {!previewing && plan && <RenamePlanView plan={plan} />}
+      </div>
+    </Modal>
+  );
+}
+
+/** 剧集改名：目录名 + 目录内每一集的文件名一起改 */
+function RenameSeriesDialog({
+  itemKey,
+  currentTitle,
+  onClose,
+  onDone,
+}: {
+  itemKey: string;
+  currentTitle: string;
+  onClose: () => void;
+  onDone: (key: string) => void;
+}) {
+  const toast = useToast();
+  const [title, setTitle] = useState(currentTitle);
+  const [plan, setPlan] = useState<RenamePlanPreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const name = title.trim();
+    if (!name) {
+      setPlan(null);
+      return undefined;
+    }
+    let alive = true;
+    setPreviewing(true);
+    const timer = setTimeout(() => {
+      api
+        .previewRenameSeries(itemKey, name)
+        .then((res) => {
+          if (!alive) return;
+          setPlan(res.plan);
+          setError(null);
+        })
+        .catch((err: Error) => {
+          if (!alive) return;
+          setPlan(null);
+          setError(err.message);
+        })
+        .finally(() => {
+          if (alive) setPreviewing(false);
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [title, itemKey]);
+
+  const run = async () => {
+    if (!plan || plan.conflicts.length > 0) return;
+    setRunning(true);
+    try {
+      const res = await api.renameSeries(itemKey, title.trim());
+      toast.push(`已重命名 ${res.result.moved} 个视频，并同步了 ${res.nfoUpdated} 份 NFO`, "success");
+      onDone(res.key);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="重命名剧集文件"
+      description="目录名与每一集的文件名一起改成「剧名S01E01」，集号按原顺序重排成连续"
+      width="max-w-2xl"
+      footer={
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11.5px] text-slate-500">{plan ? `${plan.items.length} 个文件` : "—"}</span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={onClose}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={running}
+              disabled={!plan || previewing || plan.conflicts.length > 0}
+              onClick={() => void run()}
+            >
+              <IconCheck className="h-3.5 w-3.5" />
+              开始重命名
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div>
+          <label className="label">剧集名称</label>
+          <input className="field" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+          <p className="mt-1 text-[11px] text-slate-500">
+            只改名字、不动集号的话，把「剧名」改成想要的名字即可 —— 顺序保持原样。
+          </p>
+        </div>
+
+        {previewing && (
+          <div className="flex items-center gap-2 py-6 text-[12px] text-slate-500">
+            <Spinner /> 正在算新的文件名…
+          </div>
+        )}
+        {!previewing && error && (
+          <p className="flex items-start gap-1.5 rounded-xl border border-rose-500/20 bg-rose-500/[0.08] px-3 py-2 text-[11.5px] leading-relaxed text-rose-300">
+            <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            {error}
+          </p>
+        )}
+        {!previewing && plan && <RenamePlanView plan={plan} />}
+      </div>
+    </Modal>
   );
 }
