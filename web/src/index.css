@@ -231,8 +231,8 @@ html.dark {
    * （详见 pages/Login.tsx 顶部说明）。这里若用 .field 会在某个主题下发灰。
    */
   .login-input {
-    @apply h-10 w-full rounded-[9px] border border-transparent bg-[#f4f6f9] px-3 text-[13px] text-[#0f172a]
-      transition placeholder:text-[#b0b6c1] hover:bg-[#eff2f7] focus:border-[#9dbcf3] focus:bg-[#ffffff]
+    @apply h-10 w-full rounded-[8px] border border-[#e3e7ee] bg-[#ffffff] px-3 text-[13px] text-[#0f172a]
+      transition placeholder:text-[#b6bdc8] hover:border-[#d2d9e3] focus:border-[#2f6fe4]
       focus:ring-[3px] focus:ring-[rgba(47,111,228,0.12)];
   }
 }

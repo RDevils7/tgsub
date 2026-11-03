@@ -233,7 +233,8 @@
 React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双主题，桌面与移动端均可用。
 
 1.3.2 起界面本身也要登录：首次访问强制设置管理员账号，之后凭账号密码进入（见[管理界面登录](#管理界面登录132)）。
-登录页是独立的一套固定浅色视觉（深蓝插画 + 白卡），**不跟随应用主题**。
+登录页是独立的一套固定浅色视觉（浅灰底 + 居中白卡），**不跟随应用主题**；
+页面上没有任何图片资源，只有文字、输入框与按钮。
 
 ### 日志页面
 
@@ -1060,7 +1061,7 @@ environment:
 | `server/src/auth/cookie.ts` | 纯逻辑：手写 cookie 解析（同名子串、引号、URL 编码） |
 | `server/src/auth/service.ts` | 账号读写、会话增删查、失败限流、`requireLogin` 中间件 |
 | `server/src/routes/login.ts` | `/api/session/*` 接口 |
-| `web/src/pages/Login.tsx` | 登录页 / 初始化页（深蓝插画 + 白卡，配色写死不跟随主题） |
+| `web/src/pages/Login.tsx` | 登录页 / 初始化页（浅灰底 + 居中白卡，配色写死不跟随主题，不含图片） |
 | `web/src/components/AccountPanel.tsx` | 设置页「账号与安全」：改名字、改密码、下线其它设备 |
 
 挂载顺序在 `index.ts` 里是有讲究的：
