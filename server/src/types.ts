@@ -65,6 +65,11 @@ export interface Download {
   source: string;
   /** 第三方任务的原链接 */
   source_url: string | null;
+  /**
+   * 实际使用的网络线路：direct = 直连，proxy = 经代理，auto = 尚未确定（排队中）。
+   * 界面上用它告诉用户「这条到底走没走代理」。
+   */
+  net_route: string | null;
 }
 
 export interface ScanRun {
@@ -184,6 +189,18 @@ export interface AppSettings {
   ytdlp_auto_update: boolean;
   /** 多久检查一次（小时），默认 24 */
   ytdlp_check_hours: number;
+  /**
+   * 网页 / m3u8 下载用的代理（无头浏览器与 ffmpeg 共用）。
+   * 留空则回落环境变量 M3U8_BROWSER_PROXY / HTTPS_PROXY / HTTP_PROXY。
+   */
+  m3u8_proxy: string;
+  /**
+   * 网页 / m3u8 下载的线路策略：
+   *   auto   = 直连优先，直连不通才回退代理（默认）
+   *   always = 强制走代理
+   *   off    = 只直连，完全不用代理
+   */
+  m3u8_proxy_mode: "auto" | "always" | "off";
 }
 
 /**
@@ -238,4 +255,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   platform_proxy_domestic: false,
   ytdlp_auto_update: true,
   ytdlp_check_hours: 24,
+  m3u8_proxy: "",
+  m3u8_proxy_mode: "auto",
 };

@@ -15,7 +15,8 @@ WORKDIR /app
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV npm_config_registry=${NPM_REGISTRY} \
     npm_config_fund=false \
-    npm_config_audit=false
+    npm_config_audit=false \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # better-sqlite3 需要预编译二进制；若 GitHub 不可达则回退到本地编译
 RUN apt-get update \
@@ -43,7 +44,8 @@ ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV npm_config_registry=${NPM_REGISTRY} \
     npm_config_fund=false \
     npm_config_audit=false \
-    NODE_ENV=production
+    NODE_ENV=production \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
@@ -94,7 +96,7 @@ WORKDIR /app
 
 # 版本号：与 package.json / server/src/version.ts 保持一致。
 # /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.2.4 → v1.2.4 / latest）。
-ARG APP_VERSION=1.2.4
+ARG APP_VERSION=1.3.0test
 
 ENV NODE_ENV=production \
     PORT=6789 \
@@ -104,7 +106,8 @@ ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
     PUID=1000 \
     PGID=1000 \
-    APP_VERSION=${APP_VERSION}
+    APP_VERSION=${APP_VERSION} \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
 # OCI 标准标签：docker inspect / Docker Hub 都能看到版本与来源
 LABEL org.opencontainers.image.title="tgsub" \
@@ -114,8 +117,13 @@ LABEL org.opencontainers.image.title="tgsub" \
       org.opencontainers.image.licenses="MIT"
 
 # util-linux 提供 setpriv：入口脚本用它把 root 降权成 PUID/PGID
+# 同时装 Chromium 运行所需的系统库（无头浏览器解析 SPA 站点的 m3u8 用）
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini util-linux ca-certificates \
+    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 libxshmfence1 \
+    libx11-6 libxcb1 libxext6 fonts-liberation \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /downloads \
  && chown -R node:node /data /downloads /app
@@ -144,6 +152,14 @@ COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/server/package.json ./server/package.json
 COPY --from=build --chown=node:node /app/server/dist ./server/dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
+
+# 无头浏览器（Chromium）：仅用于渲染 SPA / 签名接口站点、截获真实 m3u8 请求。
+# 浏览器二进制单独下载并固定到 /opt/playwright，运行时靠 PLAYWRIGHT_BROWSERS_PATH 定位。
+# 镜像体积会比之前大（Chromium ~170MB），换来「网页链接自动解析」对所有主流视频站可用。
+RUN set -eux; \
+    export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright; \
+    node_modules/.bin/playwright install chromium; \
+    chmod -R a+rX /opt/playwright
 
 # 入口脚本：以 root 启动时先把 /data /downloads 属主改成 PUID:PGID，再降权运行 node。
 # NAS 场景（面板自动创建挂载目录、属主是 root）就是靠这一步解决反复重启的问题。

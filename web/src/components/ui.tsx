@@ -136,10 +136,20 @@ export function Toggle({
 
 /* ----------------------------- Badge ----------------------------- */
 
-export function Badge({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+export function Badge({
+  children,
+  className = "",
+  title,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  /** 鼠标悬停时的说明文字 */
+  title?: string;
+}) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-[3px] text-[11px] font-medium ${className}`}
+      title={title}
     >
       {children}
     </span>

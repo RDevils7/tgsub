@@ -6,6 +6,7 @@ import { fetchMessageGroup } from "./media";
 import { channelEntityKey, channelMessageLink } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { downloader } from "./downloader";
+import { resolveM3u8Input, isHttpUrl } from "./m3u8";
 
 /**
  * 直接按 Telegram 消息链接下载（不等关键词命中）。
@@ -133,6 +134,13 @@ function insertChannel(
   return { channel, entityKey: channelEntityKey(channel) || fallbackKey, autoAdded: true };
 }
 
+/** m3u8 / 网页视频下载任务落库：source='m3u8'，channel 相关字段留 0（不属于任何 Telegram 频道） */
+const stmtInsertM3u8 = db.prepare<[string, string, string, string, string, number]>(
+  `INSERT INTO downloads
+   (channel_id, channel_title, message_id, file_name, source, source_url, save_dir, save_name, media_kind, emby_json, status, progress, downloaded_bytes, file_size, created_at, net_route)
+   VALUES (0, 'm3u8', 0, ?, 'm3u8', ?, ?, ?, 'video', ?, 'queued', 0, 0, 0, ?, 'auto')`,
+);
+
 async function enqueueFromTarget(
   target: Target,
   messageId: number,
@@ -180,11 +188,15 @@ async function enqueueFromTarget(
 /** 按链接下载单条消息（含相册整组） */
 export async function downloadFromLink(link: string, opts?: { includeImages?: boolean }): Promise<DirectResult> {
   const parsed = parseTelegramLink(link);
-  if (!parsed) {
-    throw new Error("链接格式不对，示例：https://t.me/频道名/123 或 https://t.me/c/1234567890/123");
+  if (parsed) {
+    const target = await resolveTarget(parsed);
+    return enqueueFromTarget(target, parsed.messageId, parsed.raw, opts?.includeImages);
   }
-  const target = await resolveTarget(parsed);
-  return enqueueFromTarget(target, parsed.messageId, parsed.raw, opts?.includeImages);
+  // 非 Telegram 链接：m3u8 直链或普通网页（自动解析其中的 m3u8 视频）
+  if (isHttpUrl(link)) {
+    return m3u8ToDirectResult(await enqueueM3u8(link));
+  }
+  throw new Error("链接格式不对，示例：https://t.me/频道名/123 或 https://t.me/c/1234567890/123；也支持网页 / m3u8 视频链接");
 }
 
 /**
@@ -224,4 +236,87 @@ export async function downloadFromChannelMessage(channelId: number, messageId: n
   if (!entityKey) throw new Error("该频道没有可用的标识，无法下载");
   const link = channelMessageLink(channel, messageId);
   return enqueueFromTarget({ channel, entityKey, autoAdded: false }, messageId, link);
+}
+
+export interface M3u8Result {
+  ok: boolean;
+  /** 解析得到的标题 */
+  title: string;
+  /** 相对下载根目录的存放目录，如 m3u8/视频标题 */
+  saveDir: string;
+  /** 用户原始输入 */
+  link: string;
+  /** 已入队文件数 */
+  queued: number;
+  /** 这条下载记录在 downloads 表的 id */
+  id: number;
+}
+
+/**
+ * 把一个网页 / m3u8 链接解析并落库为一条下载任务（source='m3u8'）。
+ * 真正的 ffmpeg 下载在 downloader 的 runM3u8 里进行。
+ */
+export async function enqueueM3u8(input: string): Promise<M3u8Result> {
+  const target = await resolveM3u8Input(input);
+  const safeTitle = target.title || "video";
+  const saveDir = `m3u8/${safeTitle}`;
+  const saveName = `${safeTitle}.mp4`;
+
+  // 把 m3u8 真实地址与防盗链信息塞进 emby_json，runM3u8 运行时再取出来。
+  // 同时填好 series/title 等基本字段，finalizeMedia 才能据此生成 NFO + 封面。
+  const emby = {
+    series: safeTitle,
+    season: 1,
+    episode: 1,
+    firstLine: safeTitle,
+    plot: "",
+    tags: [],
+    studio: "m3u8",
+    link: input,
+    airedAt: Date.now(),
+    messageId: 0,
+    kind: "video",
+    platform: null,
+    cover: null,
+    views: null,
+    likes: null,
+    duration: null,
+    categories: [],
+    m3u8: { url: target.m3u8Url, referer: target.referer, origin: target.origin },
+  };
+
+  const info = stmtInsertM3u8.run(
+    saveName,
+    input,
+    saveDir,
+    saveName,
+    JSON.stringify(emby),
+    Date.now(),
+  );
+  const id = Number(info.lastInsertRowid);
+  // 用自增 id 当 message_id，避开 downloads 唯一索引 (channel_id, message_id, file_name)
+  db.prepare("UPDATE downloads SET message_id = ? WHERE id = ?").run(id, id);
+  downloader.enqueue([id]);
+
+  logger.info({ id, title: safeTitle, url: target.m3u8Url }, "已入队 m3u8 下载任务");
+  return { ok: true, title: safeTitle, saveDir, link: input, queued: 1, id };
+}
+
+/** 把 m3u8 入队结果包装成 DirectResult，复用机器人回执渲染（directText） */
+function m3u8ToDirectResult(r: M3u8Result): DirectResult {
+  return {
+    ok: true,
+    channelId: 0,
+    channelTitle: "m3u8",
+    messageId: r.id,
+    messageIds: [r.id],
+    files: 1,
+    queued: r.queued,
+    skipped: 0,
+    existing: 0,
+    title: r.title,
+    saveDir: r.saveDir,
+    link: r.link,
+    autoAdded: false,
+  };
 }

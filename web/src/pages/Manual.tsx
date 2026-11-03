@@ -5,7 +5,7 @@ import { Badge, Button, Modal, StatusDot, useToast } from "../components/ui";
 import { IconDownload, IconLink, IconSend, IconSpark, IconVideo } from "../components/icons";
 import { formatBytes, formatDuration } from "../utils";
 
-type LinkKind = "telegram" | "platform";
+type LinkKind = "telegram" | "platform" | "web";
 
 interface Entry {
   key: string;
@@ -28,6 +28,7 @@ const EXAMPLES = [
   "https://b23.tv/29inbIp",
   "https://xhslink.cn/o/8c7hpV57rvQ",
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "https://example.com/playlist/index.m3u8",
 ];
 
 /** 只认这几个平台的域名，避免把任意链接都当第三方任务提交 */
@@ -74,6 +75,7 @@ function splitLinks(raw: string): Array<{ link: string; kind: LinkKind }> {
     }
     if (/^(?:www\.)?(?:t|telegram)\.me$/i.test(url.hostname)) push(withScheme, "telegram");
     else if (PLATFORM_HOST_RE.test(url.hostname)) push(url.toString(), "platform");
+    else push(url.toString(), "web");
   }
   return out;
 }
@@ -92,6 +94,7 @@ export default function Manual() {
 
   const links = splitLinks(input);
   const platformLinks = links.filter((l) => l.kind === "platform");
+  const webLinks = links.filter((l) => l.kind === "web");
 
   const askPlaylist = (link: string, choice: PlatformChoiceInfo): Promise<"one" | "all" | "cancel"> =>
     new Promise((resolve) => setAsk({ link, choice, resolve }));
@@ -104,7 +107,7 @@ export default function Manual() {
 
   const start = async () => {
     if (!links.length) {
-      toast.push("没找到可识别的链接：支持 Telegram 消息链接与 B站 / 小红书 / YouTube", "error");
+      toast.push("没找到可识别的链接：支持 Telegram 消息链接、B站 / 小红书 / YouTube，以及网页 / m3u8 视频链接", "error");
       return;
     }
     setRunning(true);
@@ -114,6 +117,7 @@ export default function Manual() {
     let queued = 0;
     let platformQueued = 0;
     let platformExisting = 0;
+    let webQueued = 0;
     for (let i = 0; i < initial.length; i += 1) {
       const entry = initial[i];
       setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "running" } : e)));
@@ -138,7 +142,8 @@ export default function Manual() {
           setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "ok", platform: res } : e)));
         } else {
           const { item } = await api.downloadLink({ link: entry.link });
-          queued += item.queued;
+          if (entry.kind === "web") webQueued += item.queued;
+          else queued += item.queued;
           setEntries((prev) =>
             prev.map((e) => (e.key === entry.key ? { ...e, status: "ok", result: item } : e)),
           );
@@ -154,6 +159,7 @@ export default function Manual() {
     const parts: string[] = [];
     if (queued > 0) parts.push(`Telegram ${queued} 个文件`);
     if (platformQueued > 0) parts.push(`${platformQueued} 个第三方视频`);
+    if (webQueued > 0) parts.push(`${webQueued} 个网页 / m3u8 视频`);
     if (platformExisting > 0) parts.push(`${platformExisting} 个已在队列`);
     toast.push(
       parts.length ? `已入队 ${parts.join("、")}，去「下载记录」看进度` : "解析完成，没有新的下载任务",
@@ -175,12 +181,13 @@ export default function Manual() {
               <h3 className="text-[13.5px] font-medium text-slate-100">粘贴链接下载</h3>
               <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
                 Telegram 消息链接直接把这条消息里的文件（含相册整组）加入队列；
-                B站 / 小红书 / YouTube 交给 yt-dlp 解析后下载。命名、封面与 Emby 元信息跟自动扫描一致。
+                B站 / 小红书 / YouTube 交给 yt-dlp 解析后下载；网页链接或 .m3u8 直链
+                自动解析页面内的视频、用 ffmpeg 合并下载。命名、封面与 Emby 元信息跟自动扫描一致。
               </p>
             </div>
           </div>
           <Badge className="!bg-white/[0.04] !text-slate-400 !border-white/[0.08]">
-            <IconVideo className="h-3 w-3" /> 相册整组 · 四平台分享口令
+            <IconVideo className="h-3 w-3" /> 相册整组 · 四平台 · 网页 / m3u8
           </Badge>
         </div>
 
@@ -200,6 +207,9 @@ export default function Manual() {
               已识别 <span className="text-slate-300">{links.length}</span> 个链接
               {platformLinks.length > 0 && (
                 <span className="text-slate-600">（含第三方 {platformLinks.length} 个）</span>
+              )}
+              {webLinks.length > 0 && (
+                <span className="text-slate-600">（含网页 / m3u8 {webLinks.length} 个）</span>
               )}
               {links.length > 0 && <span className="text-slate-600"> · Ctrl+Enter 直接开始</span>}
             </p>
@@ -240,6 +250,7 @@ export default function Manual() {
               <li>· 私有频道用 https://t.me/c/频道ID/消息ID（手机端「复制链接」就是这个格式）</li>
               <li>· B站 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、xhslink.cn、youtu.be）</li>
               <li>· 也可以把 App 里「复制链接」的整段分享口令原样粘进来，说明文字会自动忽略</li>
+              <li>· 网页链接或 .m3u8 直链：自动从页面里提取视频并下载（支持 Referer / UA 防盗链）</li>
               <li>· 合集 / 多P 链接会先弹窗问「只下第一个」还是「全部下载」，最多展开 200 个</li>
               <li>· 各平台的 Cookie 在设置 → 第三方平台里填，缺了会影响清晰度和成功率</li>
             </ul>
@@ -283,6 +294,9 @@ export default function Manual() {
                     <Badge className="border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-200">
                       {PLATFORM_LABEL[entry.platform?.platform ?? ""] ?? "第三方"}
                     </Badge>
+                  )}
+                  {entry.kind === "web" && (
+                    <Badge className="border-sky-500/25 bg-sky-500/10 text-sky-200">网页 / m3u8</Badge>
                   )}
                   {entry.status === "ok" && (entry.result || entry.platform) && (
                     <Badge

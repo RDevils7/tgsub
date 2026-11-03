@@ -59,13 +59,20 @@
   - 同一条消息重复扫到只累加「扫描次数」并刷新「最近扫描时间」，不堆重复行。
   - 增量不足时会回看频道最近 20 条（留痕不重复入队），频道安静时页面也不会空着。
 - **按链接直接下载**：`手动下载`页粘贴 `t.me` 链接即可抓取（公开/私有频道、相册整组均可），私有频道的 `t.me/c/<内部ID>/<消息ID>` 链接同样支持；监控历史每条记录也有「下载」按钮，机器人收到链接同样立即开始。
+- **网页 / m3u8 视频下载**：除了 Telegram 与平台分享口令，还能直接发**普通网页链接或 .m3u8 直链**——自动解析页面里的 `<video>`/`<source>`/JS 变量，挑不出再试 `playlist/index/live/hls.m3u8` 等常见播放器路径兜底，解析出 m3u8 后用 ffmpeg 合并下载（AES-128 加密会自动取 key）。防盗链靠自动带 `User-Agent` + `Referer` + `Origin`（Referer/Origin 取源站根 URL）过大多数裸防盗链；不支持自定义 Cookie。机器人发链接、Web 手动下载页粘贴链接都支持，落库为 `source=m3u8` 的独立任务，下载完同样生成 NFO 与封面。
+  - **SPA / 签名接口站点（无头浏览器兜底）**：很多视频站是单页应用，m3u8 由页面 JS 向带签名的 API 请求得来，静态抓 HTML 根本看不到。此时自动用**无头 Chromium**把页面真正渲染出来、监听网络请求截获真实的 `.m3u8`（含 hls.js 经 fetch 喂给 MSE 的情况，按 `content-type` 识别），再交给 ffmpeg 下载。触发播放按钮、隐藏 `navigator.webdriver` 以降低被识别概率。`Chromium` 由镜像构建阶段 `playwright install chromium` 装好（默认路径 `/opt/playwright`，运行时靠 `PLAYWRIGHT_BROWSERS_PATH` 定位）；**本地开发若想测这条链路，需先 `npx playwright install chromium`**（约 170MB，受限网络可能很慢或下不下来，可只在能联网的部署上验证）。若 Chromium 没装，解析器会优雅降级为原来的报错文案，不会让服务崩溃。
+    - **标题取渲染后的**：SPA 常常等数据回来才把真实剧名写进 `<title>`，所以标题在**截获 m3u8 之后**才取；过早取会拿到空壳的初始标题（如站点通用名），导致文件名和 NFO 剧名都不对。
+    - **失败重试一次**：走代理时 `ERR_CONNECTION_CLOSED` / 超时很常见，单次失败就报错体验太差，故解析失败会换新 context 再试一次。
+    - **空闲自动关浏览器**：Chromium 常驻约 150MB 内存，NAS 上不该一直占着，故空闲 3 分钟后自动关闭，下次用时再拉起。
+  - **代理（`M3U8_BROWSER_PROXY`）**：网页解析与 ffmpeg 下载共用一个代理。`pickProxy()` 优先读 `M3U8_BROWSER_PROXY`，未设时回落到 `HTTPS_PROXY` / `HTTP_PROXY`（大小写都看），并**自动跳过 `127.0.0.1` / `localhost`** —— 这类是开发工具的内部代理，指向它们会让外网视频站访问失败。ffmpeg 的 http/https 协议读 `http_proxy` / `https_proxy` 环境变量，所以切片与 AES 密钥也一起走代理。
+  - **ffmpeg 输出的坑（务必记住）**：ffmpeg 靠**输出文件扩展名**推断封装格式，写成 `xxx.mp4.part` 会直接报 `Invalid argument`（真实信息是 "Unable to find a suitable output format"）。因此 ffmpeg 先写到 `os.tmpdir()` 下**带 `.mp4` 扩展名**的临时文件（并显式 `-f mp4`），下载完成再 rename 到最终路径（node 的 rename 处理中文没问题；跨卷时回退 copy + 删源）。
 - **分页与清空**：监控历史、下载记录都可切换每页条数（20 / 50 / 100 / 200，或手动输入 5–500，按页面记住上次选择），底部是「首页 / 上一页 / 页码跳转 / 下一页 / 末页」的翻页条（不是无限加载）；「清空」按钮带范围选择——监控历史可只清未命中、下载记录可只清已结束，还能顺带删除磁盘上的原文件。
 
 ### 下载与队列
 
 - **两条下载车道，互不排队**：
   - **Telegram 车道**：媒体常位于独立数据中心，gramjs 每次下载都要「导出授权 + 切 DC」，并发会互相打断成 0 字节，因此 Telegram 下载固定**串行**（同连接上同时只跑 1 个）。
-  - **平台车道**：B站 / 小红书 / YouTube 走独立 yt-dlp 子进程，跟 Telegram 连接完全无关，因此放在独立车道**并行**；并发数由「并发下载数」设置控制（默认 3），平台任务不再和 Telegram 排队，B站、小红书、YouTube 之间也能同时下。
+  - **外部车道（平台 + m3u8）**：B站 / 小红书 / YouTube 走独立 yt-dlp 子进程，m3u8 网页视频走独立 ffmpeg 子进程，都跟 Telegram 连接完全无关，因此放在同一条独立车道**并行**；并发数由「并发下载数」设置控制（默认 3），外部任务不再和 Telegram 排队，B站、小红书、YouTube、m3u8 之间也能同时下。
 - **失败重试**：单任务自动重试一次，仍失败则标记失败；支持单条重试与「重试所有失败任务」。
 - **进度明细**：每条任务显示总大小、已下载量、实时速度、剩余时间，以及开始/完成的具体日期时间（下载中每秒刷新，速度取 250ms 采样做指数平滑，数字不跳）。
 - **队列管控**：每条任务带「暂停 / 停止 / 继续 / 插队」。
@@ -270,7 +277,7 @@ flowchart TB
 1. **增量为王**：每个频道记录 `last_scanned_id`，只拉新消息；首轮回溯条数可配（默认 40）。
 2. **以消息为单位**：相册按 `groupedId` 聚合，代表 ID 取组内最小 `message_id`（`t.me/<频道>/<id>` 打开就是第一条），跨批次被游标切开时沿用已有记录。
 3. **去重键**：频道内按 `message_id + 文件名`，另有「目标路径」去重，避免两个任务抢写同一个文件。
-4. **Telegram 串行的理由**：并发实测会把相册里 2/3 张图打断成 0 字节，串行总耗时几乎相同但不会留坏文件；Telegram 车道内下载分「先封面、后正片」两个阶段，避免切 DC 干扰小图。平台（B站/小红书/YouTube）走独立 yt-dlp 进程，不受此约束，可并行。
+4. **Telegram 串行的理由**：并发实测会把相册里 2/3 张图打断成 0 字节，串行总耗时几乎相同但不会留坏文件；Telegram 车道内下载分「先封面、后正片」两个阶段，避免切 DC 干扰小图。平台（B站/小红书/YouTube）与 m3u8 网页视频走独立子进程（yt-dlp / ffmpeg），不受此约束，可并行。
 5. **限流退避**：遇到 `FLOOD_WAIT` 自动按 1 → 2 → 4 … 分钟退避（上限 30 分钟）后重试，不中断长期任务。
 
 ---
@@ -396,6 +403,7 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
 | `v1.2.4` | 打 `v1.2.4` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.3.0-test` | 1.3.0 测试构建（含网页 / m3u8 视频下载），分支 `feat/m3u8-download`，未正式发版 |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
@@ -534,6 +542,7 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | 空 | 同时设置后启用 HTTP Basic 认证 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `TZ` | `Asia/Shanghai` | 时区，影响日志与按天分目录 |
+| `M3U8_BROWSER_PROXY` | 空 | 网页 / m3u8 下载链路的代理，如 `http://192.168.5.2:7890`；未设时回落到 `HTTPS_PROXY` / `HTTP_PROXY`（`127.0.0.1` / `localhost` 会被自动忽略，避免误用工具内部代理）。**无头浏览器解析与 ffmpeg 下载共用**，只作用于 m3u8 链路，不影响 Telegram |
 
 > **compose 不读 `.env`** —— 仓库里的两份 compose 全部使用真实值，不做变量插值。
 > 要改镜像版本、宿主机端口、两个持久化目录、认证信息，直接编辑 compose 对应的那一行。
@@ -688,6 +697,76 @@ session 用 AES-256-GCM 加密后写入数据库，重启无需重新登录。
 去重、Cookie 四种粘法与体检、Cookie 文件多域名、画质映射、错误文案（YouTube 两类 + TLS 中断 + ffmpeg 合并 +
 B站 567 两种说法 + 缺登录态提示）、抖音链接不再被识别、版本比较、资产名、代理参数），
 全部是纯函数，不依赖网络与二进制。
+
+---
+
+## 网页 / m3u8 视频下载（1.3.0）
+
+### 入口
+
+- **Web**：「手动下载」页粘普通网页链接或 `.m3u8` 直链；
+- **机器人**：把链接直接发给机器人；
+- 两者都落到同一张 `downloads` 表（`source='m3u8'`，`channel_id=0`），复用外部并行车道、进度、暂停/停止、Emby 收尾。
+
+### 解析流程（逐级兜底）
+
+| 级| 做法 | 能覆盖 |
+| --- | --- | --- |
+| 1 | 直接识别 `.m3u8` | 直链 |
+| 2 | 静态抓 HTML，正则找 `<video>` / `<source>` / JS 变量里的 m3u8 | 普通服务端渲染页 |
+| 3 | 试 `playlist.m3u8` / `index.m3u8` / `live.m3u8` / `hls.m3u8` | 路径固定的播放器 |
+| 4 | **无头 Chromium 真正渲染页面**，监听网络响应截获 m3u8 | SPA / 签名接口 / 加密接口（短视频站、短剧站） |
+
+第 4 级的实现要点：
+
+- `server/src/tg/m3u8Browser.ts` 复用单个 Chromium 进程，每���请求只开 context/page，空闲 3 分钟自动关掉释放内存；
+- `navigator.webdriver` 置false，并尝试点 `.vjs-big-play-button` / `button.play` 等播放按钮触发懒加载；
+- **标题在截获 m3u8 之后才取** —— SPA 往往等数据回来后才把真实标题写进 `<title>`，太早取只会拿到空壳标题；
+- 失败会换新 context 重试一次（代理抖动 / 站点限流时偶发 `ERR_CONNECTION_CLOSED`）。
+
+### 下载
+
+- `ffmpeg -headers "UA + Referer + Origin" -i <m3u8> -c copy -bsf:a aac_adtstoasc -f mp4`；
+- **输出必须先写 ASCII 临时文件**：ffmpeg 的 Windows 静态版打不开含中文的输出路径（报 `Invalid argument`），
+  且 `.part` 不是合法封装格式；故写到 `os.tmpdir()` 下的 `*.mp4`，成功后再 rename（跨卷回退 copy）；
+- AES-128 切片由 ffmpeg 自己取 key 解密（日志里能看到 `crypto+https://...`）；
+- 下载完成后按 `emby_json` 生成 nfo + 封面，可通知 Emby 入库。
+
+### 网络线路：直连优先（1.3.0）
+
+**目标：能不用代理的地方尽量直连。** 直连少一跳、延迟低，也不怕代理抽风。
+
+| 环节 | 做法 |
+| --- | --- |
+| 代理来源 | 设置项 `m3u8_proxy` → 环境变量 `M3U8_BROWSER_PROXY` → `HTTPS_PROXY` / `HTTP_PROXY`；自动跳过 `127.0.0.1` / `localhost` / `::1`（工具自带的内部代理，指向它们外网必挂） |
+| 线路策略 | `auto`（直连优先，默认）/ `always`（强制代理）/ `off`（只直连） |
+| 尝试顺序 | `auto` 下是 **直连 → 代理**；某域名上次走代理才通的，下次直接先用代理（`rememberedRoute`，10 分钟有效） |
+| 换线路条件 | **只有网络类错误**（超时 / DNS 失败 / 连接拒绝 / 连接重置 / SSL 握手）才换线路重试；403 / 签名失效 / 404 换线路也没用，直接报错 |
+| 失败记忆 | 某域名直连失败后记 30 分钟，之后不再浪费时间重试直连 |
+| 落库 | `downloads.net_route` 记 `direct` / `proxy` / `auto`；下载中实时更新为实际线路，Web 下载页与机器人 `/tasks` 显示「直连 / 代理 / 自动」徽章 |
+
+**SOCKS 代理怎么喂给 ffmpeg**：ffmpeg 的 http 协议只认 `http_proxy` / `https_proxy`，**不支持 socks**，
+Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因此 `server/src/tg/proxyBridge.ts` 起一个
+本地 HTTP 代理（`127.0.0.1:<随机端口>`），把 CONNECT 隧道转给 SOCKS 代理 —— 两种客户端都能用
+`socks4 / socks5 / socks5h`，且域名交给代理解析。桥按代理地址缓存复用，引用归零后空闲 60 秒关闭。
+
+**直连时必须清掉环境里的代理变量**：ffmpeg 会读 `http_proxy` / `https_proxy`，容器或宿主机上若存在
+`http_proxy=http://127.0.0.1:xxxx`，「直连优先」就名存实亡，故直连线路显式删除这些变量。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `server/src/tg/netroute.ts` | 线路决策的纯逻辑：策略枚举、代理挑选（跳过内部代理）、网络类错误判定、直连失败记忆、线路记忆 |
+| `server/src/tg/m3u8.ts` | 解析与下载：按线路抓页面、无头浏览器兜底、ffmpeg 下载（直连时清代理变量） |
+| `server/src/tg/m3u8Browser.ts` | 无头 Chromium 渲染与截获，按指定线路挂代理 |
+| `server/src/tg/proxyBridge.ts` | 本地 HTTP → SOCKS 桥 |
+| `server/src/lib/netprobe.ts` | 自研 HTTP 客户端（直连 + SOCKS4/4a/5/5h + HTTP/HTTPS CONNECT），`readAll()` 支持无 Content-Length 的响应 |
+
+### 自检
+
+`netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
+直连失败记忆、网络类错误判定、host 与文案。合计 154 项，全部不依赖网络。
 
 ---
 
@@ -847,6 +926,8 @@ tgsub/
 │   │   │   ├── enqueue.ts      # 命中后按组入队（命名、去重、Emby 元信息）
 │   │   │   ├── downloader.ts   # 串行下载队列、实时进度、重试、暂停/停止/插队
 │   │   │   ├── direct.ts       # 按链接 / 频道+消息 ID 直接下载
+│   │   │   ├── m3u8.ts         # 网页 / m3u8 解析（静态 + 兜底）与 ffmpeg 合并下载
+│   │   │   ├── m3u8Browser.ts  # 无头 Chromium 渲染页面截获真实 m3u8（SPA / 签名接口兜底）
 │   │   │   ├── media.ts        # 媒体信息解析、路径生成
 │   │   │   ├── entity.ts       # 频道实体标识（-100 标记形式）与消息链接
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）

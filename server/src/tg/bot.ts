@@ -552,6 +552,8 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 · 把频道消息<b>转发</b>给机器人：自动识别并下载原消息（视频 / 文件照常）
 · B站 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
   原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条
+· <b>网页 / m3u8 视频</b>：直接把网页链接或 .m3u8 直链发给机器人，
+  自动解析页面里的视频并下载（支持 Referer / UA 防盗链）
 · <b>图片下载</b>：默认只下视频 / 文件；纯图片消息需先在菜单点
   「🖼 图片下载」开启，再发链接或转发
 点消息下方的按钮也能直接操作。`;
@@ -867,7 +869,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       // 它们后面再补最近的已完成 / 失败记录，整体设上限避免刷屏。
       const active = db
         .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
         )
         .all() as Array<{
         id: number;
@@ -877,10 +879,11 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         progress: number;
         file_size: number;
         created_at: number;
+        net_route: string | null;
       }>;
       const recent = db
         .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
         )
         .all() as Array<{
         id: number;
@@ -890,6 +893,7 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         progress: number;
         file_size: number;
         created_at: number;
+        net_route: string | null;
       }>;
       const MAX = 60;
       const capRecent = Math.max(0, MAX - active.length);
@@ -898,12 +902,15 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
       if (!rows.length) return { text: "还没有下载任务" };
       const icon = (s: string): string =>
         s === "done" ? "✅" : s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "paused" ? "⏸" : s === "failed" ? "❌" : "⏭";
+      // 线路标记：直连 / 代理 / 自动，旧的记录没有这个字段就不显示
+      const routeTag = (r: string | null): string =>
+        r === "direct" ? " · 直连" : r === "proxy" ? " · 代理" : r === "auto" ? " · 自动" : "";
       const body = rows
         .map(
           (r) =>
             `${icon(r.status)} <b>#${r.id}</b> ${esc(r.save_name ?? r.file_name)}${
               r.status === "downloading" ? ` ${r.progress}%` : ""
-            } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}`,
+            } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}${routeTag(r.net_route)}`,
         )
         .join("\n");
       const footer = hidden > 0 ? `\n…还有 ${hidden} 条历史记录未显示，可到网页端查看` : "";
@@ -1155,6 +1162,27 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
             await sendText(currentBot, peer, platformChoiceText(result.choice), platformChoiceButtons(result.choice));
           } else {
             await sendText(currentBot, peer, platformQueuedText(result));
+          }
+        }
+        return;
+      }
+
+      // 普通网页 / m3u8 视频链接：自动解析页面里的视频并下载
+      const webLinks = [
+        ...new Set(
+          (String(text).match(/https?:\/\/[^\s]+/gi) ?? [])
+            .map((s) => s.trim())
+            .filter((l) => !/^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\//i.test(l)),
+        ),
+      ];
+      if (webLinks.length) {
+        const includeImages = imageModeOn(userId);
+        await sendText(currentBot, peer, `🔗 收到 ${webLinks.length} 个网页/视频链接，正在解析…`);
+        for (const link of webLinks.slice(0, 5)) {
+          try {
+            await sendText(currentBot, peer, directText(await downloadFromLink(link, { includeImages })));
+          } catch (err) {
+            await sendText(currentBot, peer, `❌ ${esc(link)}\n${esc(errorText(err))}`);
           }
         }
         return;

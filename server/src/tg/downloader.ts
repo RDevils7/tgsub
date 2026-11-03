@@ -14,6 +14,8 @@ import { canNotifyCard, notifyCard } from "./notify";
 import { requestCacheTrim } from "../cache";
 import { parsePlatformLink } from "../platform/detect";
 import { downloadPlatform, platformName } from "../platform/ytdlp";
+import { downloadM3u8To, hostOf, pickProxy, plannedRoutes } from "./m3u8";
+import { isNetworkError, rememberRoute } from "./netroute";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -64,6 +66,8 @@ const stmtDone = db.prepare<[number, string, number, number, number]>(
 const stmtResetStuck = db.prepare(
   "UPDATE downloads SET status = 'queued', progress = 0 WHERE status = 'downloading'",
 );
+/** 记录这次实际走的网络线路（直连 / 代理），界面上用来告诉用户 */
+const stmtRoute = db.prepare<[string, number]>("UPDATE downloads SET net_route = ? WHERE id = ?");
 const stmtChannel = db.prepare<[number], { username: string | null; tg_id: string | null; title: string }>(
   "SELECT username, tg_id, title FROM channels WHERE id = ?",
 );
@@ -332,10 +336,10 @@ class DownloadQueue {
     return row.media_kind === "video" || row.media_kind === "gif" ? "video" : "other";
   }
 
-  /** 第三方平台（B站 / 小红书 / YouTube）走独立 yt-dlp 进程，与 Telegram 串行队列互不干扰 */
-  private isPlatform(id: number): boolean {
+  /** 第三方平台（B站/小红书/YouTube）与 m3u8 都是独立子进程下载，走同一条「外部并行车道」，不参与 Telegram 串行队列 */
+  private isExternal(id: number): boolean {
     const row = stmtGet.get(id);
-    return Boolean(row && row.source === "platform");
+    return Boolean(row && (row.source === "platform" || row.source === "m3u8"));
   }
 
   private pump(): void {
@@ -355,7 +359,7 @@ class DownloadQueue {
 
     while (true) {
       const activeIds = [...this.active];
-      const activePlatform = activeIds.filter((id) => this.isPlatform(id)).length;
+      const activePlatform = activeIds.filter((id) => this.isExternal(id)).length;
       const activeTg = activeIds.length - activePlatform;
       const freePlatform = platformSlots - activePlatform;
       const freeTg = tgSlots - activeTg;
@@ -367,19 +371,19 @@ class DownloadQueue {
         (id) =>
           !this.active.has(id) &&
           this.priority.has(id) &&
-          (this.isPlatform(id) ? freePlatform > 0 : freeTg > 0),
+          (this.isExternal(id) ? freePlatform > 0 : freeTg > 0),
       );
       if (prioIdx >= 0) chosen = prioIdx;
       // 2) 平台车道：独立并发，不受 Telegram 分阶段限制
       else if (freePlatform > 0) {
-        const idx = this.queue.findIndex((id) => !this.active.has(id) && this.isPlatform(id));
+        const idx = this.queue.findIndex((id) => !this.active.has(id) && this.isExternal(id));
         if (idx >= 0) chosen = idx;
       }
       // 3) Telegram 车道：串行 + 封面 / 正片分阶段，避免同连接被打断
       else if (freeTg > 0) {
-        const tgActiveKinds = activeIds.filter((id) => !this.isPlatform(id)).map((id) => this.kindOf(id));
+        const tgActiveKinds = activeIds.filter((id) => !this.isExternal(id)).map((id) => this.kindOf(id));
         const hasArtWaiting = () =>
-          this.queue.some((id) => !this.active.has(id) && !this.isPlatform(id) && this.kindOf(id) === "art");
+          this.queue.some((id) => !this.active.has(id) && !this.isExternal(id) && this.kindOf(id) === "art");
         /**
          * 三个阶段互不重叠：
          * 1) 空闲时先把封面图下载完（串行，一次一张）
@@ -399,7 +403,7 @@ class DownloadQueue {
           if (phase === "video") return kind !== "art";
           return (kind === "art") === hasArtWaiting();
         };
-        const idx = this.queue.findIndex((id) => !this.active.has(id) && !this.isPlatform(id) && accept(id));
+        const idx = this.queue.findIndex((id) => !this.active.has(id) && !this.isExternal(id) && accept(id));
         if (idx >= 0) chosen = idx;
       }
 
@@ -461,9 +465,13 @@ class DownloadQueue {
   private async run(id: number): Promise<void> {
     const row = stmtGet.get(id);
     if (!row || row.status !== "queued") return;
-    // 第三方链接（B站/小红书/YouTube）走 yt-dlp，其余逻辑（暂停/停止/重试/收尾）照旧
+    // 第三方链接（B站/小红书/YouTube）走 yt-dlp，m3u8 走 ffmpeg，其余逻辑（暂停/停止/重试/收尾）照旧
     if (row.source === "platform") {
       await this.runPlatform(id, row);
+      return;
+    }
+    if (row.source === "m3u8") {
+      await this.runM3u8(id, row);
       return;
     }
 
@@ -782,6 +790,140 @@ class DownloadQueue {
           : "";
       stmtFail.run(`${message}${hint}`.slice(0, 500), Date.now(), id);
       logger.error({ ...logContext, err: message }, `下载失败：${label}（${message}）`);
+    } finally {
+      this.platformAbort.delete(id);
+    }
+  }
+
+  /**
+   * m3u8 / 网页视频下载：用 ffmpeg 把 m3u8 拉成 mp4。
+   * 走「外部并行车道」（与 platform 一样用 platformAbort 中断），不参与 Telegram 串行队列。
+   */
+  private async runM3u8(id: number, row: Download): Promise<void> {
+    const startedAt = Date.now();
+    stmtSetStatus.run(startedAt, id);
+    this.live.set(id, {
+      startedAt,
+      downloaded: 0,
+      total: row.file_size,
+      speed: 0,
+      lastAt: startedAt,
+      lastBytes: 0,
+    });
+
+    const meta = decodeMeta(row.emby_json);
+    const label = meta?.series ?? row.save_name ?? row.file_name;
+    const dir = path.join(env.downloadDir, row.save_dir ?? "");
+    let m3u8: { url: string; referer?: string; origin?: string } | undefined;
+    try {
+      m3u8 = JSON.parse(row.emby_json || "{}").m3u8;
+    } catch {
+      m3u8 = undefined;
+    }
+    const outFile = path.join(dir, row.save_name ?? `${label}.mp4`);
+
+    const controller = new AbortController();
+    this.platformAbort.set(id, controller);
+
+    try {
+      if (!m3u8?.url) throw new Error("找不到 m3u8 地址（解析结果丢失，请重新发链接）");
+
+      // 线路：默认直连优先（直连不通再回退代理）。解析阶段走通的线路会被记住，
+      // 这次直接沿用，省掉一次失败尝试。
+      const proxy = pickProxy();
+      const routes = plannedRoutes(m3u8.url);
+      let lastError: Error | null = null;
+      let downloaded = false;
+
+      for (let i = 0; i < routes.length; i += 1) {
+        const route = routes[i];
+        // 实时写回线路，界面上能立刻看到「这条在走直连还是代理」
+        stmtRoute.run(route, id);
+        try {
+          await downloadM3u8To(m3u8.url, outFile, {
+            referer: m3u8.referer,
+            origin: m3u8.origin,
+            signal: controller.signal,
+            route,
+            proxy,
+            onProgress: (pct, bytes) => {
+              const now = Date.now();
+              const live = this.live.get(id);
+              if (live) {
+                live.downloaded = bytes;
+                live.lastAt = now;
+                live.lastBytes = bytes;
+              }
+              if (now - (this.lastProgressAt.get(id) ?? 0) < 700) return;
+              this.lastProgressAt.set(id, now);
+              stmtProgress.run(pct, bytes, id);
+            },
+          });
+          downloaded = true;
+          rememberRoute(hostOf(m3u8.url), route);
+          break;
+        } catch (err) {
+          if (controller.signal.aborted) throw err;
+          lastError = err as Error;
+          const message = lastError?.message ?? String(err);
+          const isLast = i === routes.length - 1;
+          if (isLast || !isNetworkError(message)) break;
+          logger.warn(
+            { id, route, err: message },
+            `按${route === "direct" ? "直连" : "代理"}下载失败，换另一条线路重试`,
+          );
+        }
+      }
+      if (!downloaded) throw lastError ?? new Error("下载失败");
+
+      const stat = await fs.promises.stat(outFile);
+      if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
+      stmtDone.run(stat.size, outFile, stat.size, Date.now(), id);
+      db.prepare("UPDATE downloads SET save_name = ?, file_name = ? WHERE id = ?").run(
+        path.basename(outFile),
+        path.basename(outFile),
+        id,
+      );
+      this.attempts.delete(id);
+      logger.info(
+        { id, file: relPathOf(outFile), size: stat.size },
+        `下载完成：${label} → ${relPathOf(outFile)}（${humanSize(stat.size)}）`,
+      );
+
+      if (getSettings().platform_meta) {
+        await finalizeMedia(outFile, row.emby_json);
+      }
+      queueEmbyUpdate(outFile, "Created");
+      requestCacheTrim();
+    } catch (err) {
+      // 用户点了暂停/停止：不是失败，别计入重试次数
+      if (controller.signal.aborted) {
+        await removePartialFiles(dir);
+        await this.applyCancel(id, this.cancelIntent.get(id) ?? "stop", row, null);
+        return;
+      }
+      const message = (err as Error)?.message || "下载失败";
+      const tried = this.attempts.get(id) ?? 0;
+      await removePartialFiles(dir);
+
+      if (tried < MAX_AUTO_RETRY) {
+        this.attempts.set(id, tried + 1);
+        logger.warn(
+          { id, err: message, attempt: tried + 1 },
+          `下载失败，稍后重试：${label}（${message}）`,
+        );
+        db.prepare(
+          "UPDATE downloads SET status = 'queued', progress = 0, downloaded_bytes = 0, started_at = NULL WHERE id = ?",
+        ).run(id);
+        setTimeout(() => {
+          if (!this.queue.includes(id)) this.queue.push(id);
+          this.pump();
+        }, 5000);
+        return;
+      }
+
+      stmtFail.run(message.slice(0, 500), Date.now(), id);
+      logger.error({ id, err: message }, `下载失败：${label}（${message}）`);
     } finally {
       this.platformAbort.delete(id);
     }

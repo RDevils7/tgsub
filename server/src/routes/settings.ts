@@ -136,6 +136,15 @@ settingsRouter.put(
         .join("\n");
     }
 
+    /* 网页 / m3u8 下载的线路：代理地址 + 直连优先策略 */
+    if (typeof body.m3u8_proxy === "string") patch.m3u8_proxy = normalizeProxyUrl(body.m3u8_proxy);
+    if (body.m3u8_proxy_mode !== undefined) {
+      const mode = String(body.m3u8_proxy_mode).trim().toLowerCase();
+      patch.m3u8_proxy_mode = (["auto", "always", "off"] as const).includes(mode as "auto")
+        ? (mode as "auto" | "always" | "off")
+        : current.m3u8_proxy_mode;
+    }
+
     /* 第三方平台（B站 / 小红书 / YouTube） */
     if (body.platform_enabled !== undefined) patch.platform_enabled = Boolean(body.platform_enabled);
     if (typeof body.platform_proxy === "string") patch.platform_proxy = normalizeProxyUrl(body.platform_proxy);

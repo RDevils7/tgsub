@@ -950,6 +950,81 @@ export default function Settings() {
             </p>
           </div>
         )}
+
+        {/* 网页 / m3u8 下载的线路：默认直连优先，不通才回退代理 */}
+        <div className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[12.5px] font-medium text-slate-200">网页 / m3u8 视频下载</p>
+            <Badge
+              className={
+                draft.m3u8_proxy_mode === "always"
+                  ? "border-sky-500/25 bg-sky-500/10 text-sky-300"
+                  : draft.m3u8_proxy_mode === "off"
+                    ? "border-white/10 bg-white/[0.03] text-slate-400"
+                    : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+              }
+            >
+              {draft.m3u8_proxy_mode === "always"
+                ? "强制走代理"
+                : draft.m3u8_proxy_mode === "off"
+                  ? "只直连"
+                  : "直连优先"}
+            </Badge>
+          </div>
+
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[132px_minmax(0,1fr)]">
+            <Field label="线路策略" hint="默认直连优先">
+              <select
+                className="field"
+                value={draft.m3u8_proxy_mode}
+                onChange={(e) => patch("m3u8_proxy_mode", e.target.value as "auto" | "always" | "off")}
+              >
+                <option value="auto">直连优先</option>
+                <option value="always">强制走代理</option>
+                <option value="off">只用直连</option>
+              </select>
+            </Field>
+            <Field
+              label="代理地址"
+              hint="留空则用环境变量 M3U8_BROWSER_PROXY / HTTPS_PROXY；SOCKS 会被转成本地桥给 ffmpeg 用"
+            >
+              <input
+                className="field font-mono text-[12.5px]"
+                placeholder="socks5://192.168.5.2:7890"
+                value={draft.m3u8_proxy}
+                onChange={(e) => patch("m3u8_proxy", e.target.value)}
+              />
+            </Field>
+          </div>
+
+          <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+            「直连优先」= 先不用代理直接连源站，连不上（超时 / DNS 失败）才自动改走代理，
+            并记住这个域名下次直接用代理。下载列表每条任务都会标出走的是直连还是代理。
+          </p>
+
+          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                patch("m3u8_proxy", "");
+                patch("m3u8_proxy_mode", "auto");
+                toast.push("已清空输入，点「保存线路」后生效", "info");
+              }}
+              disabled={!draft.m3u8_proxy && draft.m3u8_proxy_mode === "auto"}
+            >
+              恢复默认
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void saveSection("webproxy", ["m3u8_proxy", "m3u8_proxy_mode"])}
+              loading={savingSection === "webproxy"}
+            >
+              保存线路
+            </Button>
+          </div>
+        </div>
       </CollapsibleCard>
 
       {/* 扫描策略 */}
