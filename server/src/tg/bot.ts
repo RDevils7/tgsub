@@ -552,6 +552,8 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 · 把频道消息<b>转发</b>给机器人：自动识别并下载原消息（视频 / 文件照常）
 · B站 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
   原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条
+· <b>网页 / m3u8 视频</b>：直接把网页链接或 .m3u8 直链发给机器人，
+  自动解析页面里的视频并下载（支持 Referer / UA 防盗链）
 · <b>图片下载</b>：默认只下视频 / 文件；纯图片消息需先在菜单点
   「🖼 图片下载」开启，再发链接或转发
 点消息下方的按钮也能直接操作。`;
@@ -1155,6 +1157,27 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
             await sendText(currentBot, peer, platformChoiceText(result.choice), platformChoiceButtons(result.choice));
           } else {
             await sendText(currentBot, peer, platformQueuedText(result));
+          }
+        }
+        return;
+      }
+
+      // 普通网页 / m3u8 视频链接：自动解析页面里的视频并下载
+      const webLinks = [
+        ...new Set(
+          (String(text).match(/https?:\/\/[^\s]+/gi) ?? [])
+            .map((s) => s.trim())
+            .filter((l) => !/^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\//i.test(l)),
+        ),
+      ];
+      if (webLinks.length) {
+        const includeImages = imageModeOn(userId);
+        await sendText(currentBot, peer, `🔗 收到 ${webLinks.length} 个网页/视频链接，正在解析…`);
+        for (const link of webLinks.slice(0, 5)) {
+          try {
+            await sendText(currentBot, peer, directText(await downloadFromLink(link, { includeImages })));
+          } catch (err) {
+            await sendText(currentBot, peer, `❌ ${esc(link)}\n${esc(errorText(err))}`);
           }
         }
         return;
