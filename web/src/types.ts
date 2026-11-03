@@ -83,8 +83,35 @@ export interface DirectResult {
   autoAdded: boolean;
 }
 
-export type MessageLogKind = "hit" | "filtered" | "miss" | "empty";
+/* ------------------------------ 手动下载记录 ------------------------------ */
 
+export type ManualKind = "telegram" | "platform" | "web";
+export type ManualStatus = "ok" | "existing" | "empty" | "error" | "cancel";
+
+export interface ManualHistoryItem {
+  id: number;
+  link: string;
+  kind: ManualKind;
+  platform: string | null;
+  status: ManualStatus;
+  title: string | null;
+  note: string | null;
+  queued: number;
+  existing: number;
+  skipped: number;
+  save_dir: string | null;
+  error: string | null;
+  created_at: number;
+}
+
+export interface ManualHistoryResponse {
+  items: ManualHistoryItem[];
+  total: number;
+  /** 各状态的条数（不受筛选影响，全库统计） */
+  summary: Record<string, number>;
+}
+
+export type MessageLogKind = "hit" | "filtered" | "miss" | "empty";
 export interface MessageLog {
   id: number;
   channel_id: number;

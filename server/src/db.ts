@@ -136,6 +136,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_message_logs_unique
 CREATE INDEX IF NOT EXISTS idx_message_logs_created ON message_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_message_logs_kind ON message_logs(kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_message_logs_channel ON message_logs(channel_id, id DESC);
+
+/* 手动下载提交记录：Web「手动下载」页每提交一条链接就留一行，
+   用于回答「什么时候提交了什么链接、当时结果如何、为什么失败」。
+   kind 取值：telegram / platform / web
+   status 取值：ok(已入队) / existing(之前下过) / empty(没有可下内容) / error / cancel */
+CREATE TABLE IF NOT EXISTS manual_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  link        TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  platform    TEXT,
+  status      TEXT NOT NULL,
+  title       TEXT,
+  note        TEXT,
+  queued      INTEGER NOT NULL DEFAULT 0,
+  existing    INTEGER NOT NULL DEFAULT 0,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  save_dir    TEXT,
+  error       TEXT,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_manual_history_created ON manual_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_manual_history_status ON manual_history(status, id DESC);
 `);
 
 /** 轻量迁移：老库补列（SQLite 没有 ADD COLUMN IF NOT EXISTS） */

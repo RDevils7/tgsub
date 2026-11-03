@@ -25,6 +25,7 @@ import { cacheRouter } from "./routes/cache";
 import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
 import { platformRouter } from "./routes/platform";
+import { manualRouter } from "./routes/manual";
 import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
 import { startYtdlpAutoUpdate } from "./platform/updater";
@@ -82,6 +83,7 @@ app.use("/api/emby", embyRouter);
 app.use("/api/cache", cacheRouter);
 app.use("/api/logs", logsRouter);
 app.use("/api/platform", platformRouter);
+app.use("/api/manual", manualRouter);
 app.use("/api", systemRouter);
 
 app.use("/api", (_req, res) => {

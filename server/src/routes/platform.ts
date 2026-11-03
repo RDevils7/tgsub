@@ -7,6 +7,8 @@ import { parsePlatformLink, splitPlatformLinks, PlatformLink } from "../platform
 import { enqueuePlatformLink, platformRootDir, resolveChoice } from "../platform/jobs";
 import { clearYtdlpCache, probePlatform, ytdlpInfo } from "../platform/ytdlp";
 import { engineState, updateYtdlp } from "../platform/updater";
+import { recordManual } from "../manual/history";
+import { clamp, manualStatus, platformNote } from "../manual/note";
 
 /**
  * 第三方平台（B站 / 小红书 / YouTube）
@@ -91,19 +93,42 @@ platformRouter.post(
       return;
     }
 
-    const outcome = await enqueuePlatformLink(link, mode);
+    const outcome = await enqueuePlatformLink(link, mode).catch((err: unknown) => {
+      recordManual({
+        link: link!.url,
+        kind: "platform",
+        platform: link!.platform,
+        status: "error",
+        error: clamp((err as Error).message),
+      });
+      throw err;
+    });
     if (outcome.type === "playlist") {
+      // 还没真的下，等用户选完再记一条；用户点取消时由界面补记 status=cancel
       res.json({ needsChoice: true, choice: outcome.choice });
       return;
     }
+    const queued = outcome.tasks.filter((task) => !task.existing).length;
+    const existing = outcome.tasks.filter((task) => task.existing).length;
+    recordManual({
+      link: link.url,
+      kind: "platform",
+      platform: link.platform,
+      status: manualStatus({ queued, existing }),
+      title: outcome.tasks[0]?.title ?? null,
+      note: platformNote(outcome.tasks, outcome.playlist),
+      queued,
+      existing,
+      saveDir: outcome.tasks[0]?.saveDir ?? null,
+    });
     res.json({
       needsChoice: false,
       platform: link.platform,
       label: PLATFORM_LABEL[link.platform],
       url: link.url,
       playlist: outcome.playlist,
-      queued: outcome.tasks.filter((task) => !task.existing).length,
-      existing: outcome.tasks.filter((task) => task.existing).length,
+      queued,
+      existing,
       tasks: outcome.tasks,
     });
   }),

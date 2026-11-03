@@ -32,6 +32,9 @@ import type {
   MetadataExcludedItem,
   RenamePlanPreview,
   RenameExecuteResult,
+  ManualHistoryResponse,
+  ManualKind,
+  ManualStatus,
   DeleteMode,
   BrowseResult,
   FrameCandidate,
@@ -206,6 +209,34 @@ export const api = {
   }),
   /** 立即检查 yt-dlp 新版本，有就下载并切换 */
   platformUpdate: () => request<EngineUpdateResult>("/platform/update", { method: "POST" }),
+
+  /* ------------------------------ 手动下载记录 ------------------------------ */
+
+  /** 手动下载页底部的提交记录（服务端在提交时自动写，这里只读） */
+  manualHistory: (params: { limit?: number; offset?: number; status?: string; kind?: string; q?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.status) qs.set("status", params.status);
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.q) qs.set("q", params.q);
+    const query = qs.toString();
+    return request<ManualHistoryResponse>(`/manual/history${query ? `?${query}` : ""}`);
+  },
+  /** 客户端补记（合集弹窗点「取消」时用；正常提交由服务端记，别再调一次） */
+  manualRecord: (payload: {
+    link: string;
+    kind: ManualKind;
+    status: ManualStatus;
+    platform?: string | null;
+    title?: string | null;
+    note?: string | null;
+    error?: string | null;
+  }) => request<{ ok: boolean }>("/manual/history", { method: "POST", body: JSON.stringify(payload) }),
+  manualClear: (scope: "all" | "error" | "older" = "all") =>
+    request<{ ok: boolean; count: number }>(`/manual/history?scope=${scope}`, { method: "DELETE" }),
+  manualDelete: (id: number) =>
+    request<{ ok: boolean }>(`/manual/history/${id}`, { method: "DELETE" }),
 
   /* ------------------------------ Emby 入库 ------------------------------ */
   embyStatus: () => request<EmbyStatus>("/emby/status"),

@@ -2,7 +2,8 @@ import { useState } from "react";
 import { api } from "../api";
 import type { DirectResult, PlatformChoiceInfo, PlatformTaskResponse } from "../types";
 import { Badge, Button, Modal, StatusDot, useToast } from "../components/ui";
-import { IconDownload, IconLink, IconSend, IconSpark, IconVideo } from "../components/icons";
+import { IconLink, IconSend, IconSpark, IconVideo } from "../components/icons";
+import { ManualHistory } from "../components/ManualHistory";
 import { formatBytes, formatDuration } from "../utils";
 
 type LinkKind = "telegram" | "platform" | "web";
@@ -84,6 +85,8 @@ export default function Manual() {
   const [input, setInput] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
+  /** 每次提交完 +1，让底部「提交记录」重新拉一遍（记录是服务端写的，只差刷新） */
+  const [historyTick, setHistoryTick] = useState(0);
   /** 合集 / 多P 的二选一：弹窗时挂起 await，用户点按钮后 resolve */
   const [ask, setAsk] = useState<{
     link: string;
@@ -126,12 +129,25 @@ export default function Manual() {
           let res = await api.platformTask(entry.link);
           if (res.needsChoice) {
             // 合集 / 多P：先问再下，避免一条链接悄悄拉 200 个视频
+            const choice = res.choice;
             setEntries((prev) => prev.map((e) => (e.key === entry.key ? { ...e, status: "choosing" } : e)));
-            const mode = await askPlaylist(entry.link, res.choice);
+            const mode = await askPlaylist(entry.link, choice);
             if (mode === "cancel") {
               setEntries((prev) =>
                 prev.map((e) => (e.key === entry.key ? { ...e, status: "cancel", error: "已取消：合集没有下载" } : e)),
               );
+              // 服务端只记「真的去下了」的，取消这一步它不知道，由界面补记一条
+              void api
+                .manualRecord({
+                  link: entry.link,
+                  kind: "platform",
+                  platform: choice.platform,
+                  status: "cancel",
+                  title: choice.title,
+                  note: `合集 ${choice.count} 个，未下载`,
+                  error: "已取消：合集没有下载",
+                })
+                .catch(() => undefined);
               continue;
             }
             res = await api.platformTask(entry.link, mode);
@@ -165,6 +181,7 @@ export default function Manual() {
       parts.length ? `已入队 ${parts.join("、")}，去「下载记录」看进度` : "解析完成，没有新的下载任务",
       parts.length ? "success" : "info",
     );
+    setHistoryTick((tick) => tick + 1);
   };
 
   const okCount = entries.filter((e) => e.status === "ok").length;
@@ -291,12 +308,12 @@ export default function Manual() {
                     </Badge>
                   )}
                   {entry.kind === "platform" && (
-                    <Badge className="border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-200">
+                    <Badge className="border-violet-500/25 bg-violet-500/10 text-violet-300">
                       {PLATFORM_LABEL[entry.platform?.platform ?? ""] ?? "第三方"}
                     </Badge>
                   )}
                   {entry.kind === "web" && (
-                    <Badge className="border-sky-500/25 bg-sky-500/10 text-sky-200">网页 / m3u8</Badge>
+                    <Badge className="border-sky-500/25 bg-sky-500/10 text-info">网页 / m3u8</Badge>
                   )}
                   {entry.status === "ok" && (entry.result || entry.platform) && (
                     <Badge
@@ -440,18 +457,11 @@ export default function Manual() {
         </div>
       )}
 
-      {entries.length === 0 && (
-        <div className="card flex flex-col items-center justify-center gap-2 px-4 py-12 text-center">
-          <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-slate-500">
-            <IconDownload className="h-5 w-5" />
-          </span>
-          <p className="text-[13px] text-slate-300">还没有提交链接</p>
-          <p className="max-w-md text-[11.5px] leading-relaxed text-slate-500">
-            在上面粘贴 Telegram 消息链接或 B站 / 小红书 / YouTube 视频链接后点「开始下载」。
-            也可以用手机把链接发给 Telegram 机器人，同样会立即开始下载。
-          </p>
-        </div>
-      )}
+      {/* 提交记录放在最下面：链接 / 时间 / 状态都在，刷新页面也不丢 */}
+      <ManualHistory
+        version={historyTick}
+        onReuse={(link) => setInput((prev) => (prev.trim() ? `${prev.trimEnd()}\n${link}` : link))}
+      />
 
       <Modal
         open={Boolean(ask)}

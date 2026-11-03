@@ -765,7 +765,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
-直连失败记忆、网络类错误判定、host 与文案。合计 154 项，全部不依赖网络。
+直连失败记忆、网络类错误判定、host 与文案。合计 183 项，全部不依赖网络。
 
 ---
 
@@ -824,10 +824,66 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `renamePlanChecks()` 13 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 175 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 183 项。
 
 ---
 
+
+## 手动下载提交记录（1.3.1）
+
+「手动下载」页最下面加了「提交记录」：每提交一条链接就留一行，**链接、时间、类型、结果、失败原因**全在，
+刷新页面 / 换浏览器 / 关掉页面都不会丢。1.3.0 之前只有页面上那份「本次解析」列表，刷新一下就没了。
+
+### 记什么
+
+| 字段 | 说明 |
+| --- | --- |
+| `link` | 用户提交时的原始链接（网页 / m3u8 这类解析出真实地址的，也记原始输入） |
+| `kind` | `telegram` / `platform` / `web` |
+| `platform` | 第三方平台落 `bilibili` / `xiaohongshu` / `youtube`，界面显示成「B站 / 小红书 / YouTube」 |
+| `status` | `ok` 已入队 · `existing` 之前下过 · `empty` 没有可下内容 · `error` 失败 · `cancel` 合集取消 |
+| `title` / `note` | 视频标题 + 一行摘要（频道·#消息号·文件数 / UP主·时长·大小 / 保存目录） |
+| `queued` / `existing` / `skipped` | 这次入队 / 之前下过 / 被大小限制过滤的数量 |
+| `error` | 失败原因原文（截断 2000 字） |
+| `created_at` | 毫秒时间戳；列表里一小时以内显示「刚刚 / N 分钟前」，更早显示「11-03 20:41」，悬停看完整时间 |
+
+按 `id` 倒序翻页，最多留 2000 条（每写 100 条顺手扫一次旧行，不给库堆垃圾）。
+
+### 谁写这条记录
+
+**写在服务端真正办事的两个接口里**，所以关掉页面、手机提交、脚本调接口都会留痕：
+
+| 接口 | 写入时机 |
+| --- | --- |
+| `POST /api/downloads/link` | Telegram 消息链接 / 网页 / m3u8：成功写结果，失败在 `catch` 里写 `error` |
+| `POST /api/platform/task` | 第三方平台：真入队了写一条；遇到合集先回 `needsChoice` **不写**，等用户选完的第二次请求再写 |
+| `POST /api/manual/history` | 只给界面补记用：合集弹窗点「取消」时服务端并不知道，由前端补一条 `status=cancel` |
+
+> 监控历史页点「下载」走的是 `channelId + messageId` 分支，**不记** —— 那是补下载，不算手动提交。
+> 机器人提交也不进这张表（机器人有自己的 `/tasks` 回执）。
+
+### 界面
+
+- 筛选：全部 / 成功（`ok` + `existing`）/ 失败（`error`）/ 未入队（`empty` + `cancel`），可搜链接与标题；
+- 一行一条：时间 + 状态徽章 + 类型徽章 + 可点开的链接 + 标题 + 摘要 + 失败原因；
+- 悬停行尾出现「再提交」（把链接填回上面的输入框）与删除单条；
+- 「清空」弹窗两个选项：只清失败与未入队 / 全部清空。**只删这份历史**，不动下载队列和磁盘文件。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `server/src/manual/note.ts` | 纯逻辑：状态判定、链接归类、一行摘要、报错压缩。不 import db，自检直接调 |
+| `server/src/manual/history.ts` | 落库与查询：`recordManual` / `listManual`（多状态筛选 + 关键词 + 分页）/ `clearManual` / `deleteManual` |
+| `server/src/routes/manual.ts` | `GET/POST /api/manual/history`、`DELETE /api/manual/history[?scope=]`、`DELETE /api/manual/history/:id` |
+| `web/src/components/ManualHistory.tsx` | 列表卡片：筛选、搜索、分页、单条删除、清空确认 |
+
+### 自检
+
+`manualNoteChecks()` 8 项：状态优先级（入队 > 之前下过 > 没入队）、`t.me` 与网页的归类、
+两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 183 项。
+
+---
 
 ## Telegram 机器人
 
@@ -917,6 +973,11 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 | GET | `/api/metadata/video?key=` | 视频流（支持 Range，供页面拖进度条选帧） |
 | GET | `/api/metadata/extras?key=&file=` | 目录里的其它图片（只读，带后缀白名单） |
 | GET | `/api/metadata/tools/status` | ffmpeg / sharp 可用性（`refresh=1` 强制重新探测） |
+| POST | `/api/metadata/rename-series` | 改剧集名并把剧内所有文件一起重命名（`dryRun=1` 只出预览） |
+| POST | `/api/metadata/merge` | 把勾选的视频合并成一部剧，按原序号重排成连续集号（`dryRun=1` 只出预览） |
+| GET | `/api/manual/history` | 手动下载提交记录（`status` 可逗号多选、`kind`、`q`、`limit`/`offset`） |
+| POST | `/api/manual/history` | 客户端补记一条（合集弹窗点「取消」用；正常提交由服务端自动写） |
+| DELETE | `/api/manual/history?scope=all\|error\|older`、`/api/manual/history/:id` | 清空记录 / 删单条 |
 | GET / PUT | `/api/settings` | 读取 / 保存界面设置 |
 | GET | `/api/emby/status` | Emby 入库状态：是否启用、配置是否完整、最近通知记录 |
 | POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
@@ -978,6 +1039,9 @@ tgsub/
 │   │   ├── logger.ts           # pino 初始化（stdout + 文件 + 内存缓冲三路输出）
 │   │   ├── lib/logstore.ts     # 日志环形缓冲（2000 条）+ 落盘轮转（10MB）+ 查询解析
 │   │   ├── match.ts            # 关键词匹配引擎（包含 / 完整词 / 正则）
+│   │   ├── manual/             # 「手动下载」提交记录
+│   │   │   ├── note.ts         # 状态判定与一行摘要（纯函数，自检直接调）
+│   │   │   └── history.ts      # 落库 / 查询 / 清空，超过 2000 条自动清旧行
 │   │   ├── types.ts            # 共享类型与默认设置
 │   │   ├── tg/
 │   │   │   ├── client.ts       # MTProto 客户端、扫码登录、频道解析、重连退避
@@ -1000,7 +1064,7 @@ tgsub/
 │   │   │   ├── ffmpeg.ts       # ffmpeg 定位、媒体探测（ffmpeg -i 解析）、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
-│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / emby / logs / settings / system
+│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / manual / emby / logs / settings / system
 │   └── dist/                   # 构建产物（不提交）
 ├── web/
 │   └── src/

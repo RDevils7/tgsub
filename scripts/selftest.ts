@@ -56,6 +56,7 @@ import {
   sortEpisodeSources,
   type EpisodeSource,
 } from "../server/src/tg/renameplan";
+import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -2103,6 +2104,66 @@ async function mediaPathChecks(): Promise<void> {
   fs.rmSync(nodePath.dirname(root), { recursive: true, force: true });
 }
 
+/* ------------------------------------------------------------------ */
+/* 手动下载提交记录：状态判定与一行摘要                               */
+/* ------------------------------------------------------------------ */
+
+function manualNoteChecks(): void {
+  check("提交结果状态：入队 > 之前下过 > 没入队", () => {
+    assert.equal(manualStatus({ queued: 2, existing: 3 }), "ok");
+    assert.equal(manualStatus({ queued: 0, existing: 3 }), "existing");
+    assert.equal(manualStatus({ queued: 0, existing: 0 }), "empty");
+  });
+
+  check("链接归类：t.me 算 Telegram，其余算网页", () => {
+    assert.equal(kindOfLink("https://t.me/abc/123"), "telegram");
+    assert.equal(kindOfLink("http://t.me/c/1234567890/45"), "telegram");
+    assert.equal(kindOfLink("https://b23.tv/29inbIp"), "web");
+    assert.equal(kindOfLink("https://example.com/a/index.m3u8"), "web");
+  });
+
+  check("Telegram 摘要：频道 · 消息号 · 文件数 · 入队数", () => {
+    assert.equal(
+      directNote({ channelTitle: "某频道", messageId: 1234, files: 2, queued: 2, existing: 0, skipped: 0 }),
+      "某频道 · #1234 · 2 个文件 · 入队 2",
+    );
+  });
+
+  check("Telegram 摘要：之前下过的不写「入队」", () => {
+    assert.equal(
+      directNote({ channelTitle: "某频道", messageId: 7, files: 3, queued: 0, existing: 3, skipped: 0 }),
+      "某频道 · #7 · 3 个文件 · 已下过 3",
+    );
+  });
+
+  check("第三方平台摘要：合集 + UP 主 + 时长 + 大小", () => {
+    const note = platformNote(
+      [{ title: "x", uploader: "影视飓风", duration: 1122, filesize: 419430400 }],
+      { count: 12, mode: "one", capped: false },
+    );
+    assert.ok(note.startsWith("合集 12 个（只下第一个）"), note);
+    assert.ok(note.includes("影视飓风"), note);
+    assert.ok(note.includes("18:42"), note);
+    assert.ok(note.includes("400.0 MB"), note);
+  });
+
+  check("第三方平台摘要：单个视频不写合集", () => {
+    assert.equal(platformNote([{ uploader: "阿宇剪辑", duration: 178 }], null), "阿宇剪辑 · 2:58");
+  });
+
+  check("网页 / m3u8 摘要用保存目录", () => {
+    assert.equal(webNote({ saveDir: "m3u8/测试视频" }), "m3u8/测试视频/");
+    assert.equal(webNote({ saveDir: null }), "");
+  });
+
+  check("报错文案压缩成一行并截断", () => {
+    assert.equal(clamp("  a\n\n  b\t c  "), "a b c");
+    const long = clamp("错".repeat(400), 10);
+    assert.equal(long.length, 10);
+    assert.ok(long.endsWith("…"));
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -2116,6 +2177,7 @@ async function main(): Promise<void> {
     ["第三方平台用例", () => platformChecks()],
     ["yt-dlp 更新排期用例", () => updatePlanChecks()],
     ["剧集改名合并用例", () => renamePlanChecks()],
+    ["手动下载记录用例", () => manualNoteChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
   ];

@@ -7,6 +7,8 @@ import { Download } from "../types";
 import { downloader, withLiveProgress } from "../tg/downloader";
 import { downloadFromChannelMessage, downloadFromLink } from "../tg/direct";
 import { asyncHandler, assert, clampInt, parseId } from "../lib/http";
+import { recordManual } from "../manual/history";
+import { clamp, directNote, kindOfLink, manualStatus, webNote } from "../manual/note";
 
 export const downloadsRouter = Router();
 
@@ -62,7 +64,27 @@ downloadsRouter.post(
       return;
     }
     assert(link, 400, "请输入 Telegram 消息链接");
-    res.json({ item: await downloadFromLink(link) });
+
+    // 手动下载页的提交记录：成功失败都留一条，关掉页面也不丢
+    const kind = kindOfLink(link);
+    try {
+      const item = await downloadFromLink(link);
+      recordManual({
+        link,
+        kind,
+        status: manualStatus(item),
+        title: item.title,
+        note: kind === "web" ? webNote(item) : directNote(item),
+        queued: item.queued,
+        existing: item.existing,
+        skipped: item.skipped,
+        saveDir: item.saveDir,
+      });
+      res.json({ item });
+    } catch (err) {
+      recordManual({ link, kind, status: "error", error: clamp((err as Error).message) });
+      throw err;
+    }
   }),
 );
 
