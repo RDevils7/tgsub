@@ -79,6 +79,7 @@ import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyP
 import { parseCookie } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
+import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -2629,6 +2630,123 @@ function transferPlanChecks(): void {
   });
 }
 
+/** 元数据页的排列方式：目录与分集各一套，取值非法要能回落 */
+function sortChecks(): void {
+  const folder = (name: string, fileCount: number, totalSize: number, updatedAt: number) => ({
+    name,
+    fileCount,
+    totalSize,
+    updatedAt,
+  });
+  const file = (name: string, size: number, episode: number | null, updatedAt: number) => ({
+    name,
+    size,
+    episode,
+    updatedAt,
+  });
+
+  check("排序参数非法时回落到名称升序", () => {
+    assert.equal(normalizeSortKey("bogus"), "name");
+    assert.equal(normalizeSortKey(undefined), "name");
+    assert.equal(normalizeSortKey("size"), "size");
+    assert.equal(normalizeSortOrder("sideways"), "asc");
+    assert.equal(normalizeSortOrder("desc"), "desc");
+  });
+
+  check("目录按名称自然序：第2集排在 第10集 前面", () => {
+    const list = [folder("剧 第10集", 1, 10, 0), folder("剧 第2集", 1, 10, 0)];
+    const sorted = sortFolders(list, "name", "asc");
+    assert.deepEqual(
+      sorted.map((f) => f.name),
+      ["剧 第2集", "剧 第10集"],
+    );
+  });
+
+  check("目录按最近更新：降序是最新的在前", () => {
+    const list = [
+      folder("老剧", 3, 100, 1_000),
+      folder("新剧", 3, 100, 9_000),
+      folder("中剧", 3, 100, 5_000),
+    ];
+    assert.deepEqual(
+      sortFolders(list, "updated", "desc").map((f) => f.name),
+      ["新剧", "中剧", "老剧"],
+    );
+    assert.deepEqual(
+      sortFolders(list, "updated", "asc").map((f) => f.name),
+      ["老剧", "中剧", "新剧"],
+    );
+  });
+
+  check("目录按体积与集数", () => {
+    const list = [
+      folder("大", 5, 9_000, 0),
+      folder("小", 5, 1_000, 0),
+      folder("多集", 40, 5_000, 0),
+    ];
+    assert.deepEqual(
+      sortFolders(list, "size", "desc").map((f) => f.name),
+      ["大", "多集", "小"],
+    );
+    assert.deepEqual(
+      sortFolders(list, "episodes", "desc").map((f) => f.name),
+      ["多集", "大", "小"],
+    );
+  });
+
+  check("排序值相同时次级键仍是名称升序（降序也不反转）", () => {
+    const list = [folder("乙", 1, 100, 5), folder("甲", 1, 100, 5), folder("丙", 1, 100, 5)];
+    const sorted = sortFolders(list, "size", "desc");
+    assert.deepEqual(
+      sorted.map((f) => f.name),
+      ["丙", "甲", "乙"],
+    );
+  });
+
+  check("分集按集号排；认不出集号的永远垫底", () => {
+    const files = [
+      file("第10集.mp4", 1, 10, 0),
+      file("花絮.mp4", 1, null, 0),
+      file("第2集.mp4", 1, 2, 0),
+    ];
+    assert.deepEqual(
+      sortFiles(files, "episodes", "asc").map((f) => f.name),
+      ["第2集.mp4", "第10集.mp4", "花絮.mp4"],
+    );
+    // 降序时没集号的仍然垫底，不跟着倒到第一行
+    assert.deepEqual(
+      sortFiles(files, "episodes", "desc").map((f) => f.name),
+      ["第10集.mp4", "第2集.mp4", "花絮.mp4"],
+    );
+  });
+
+  check("分集按体积 / 最近更新", () => {
+    const files = [
+      file("a.mp4", 300, 1, 1_000),
+      file("b.mp4", 100, 2, 5_000),
+      file("c.mp4", 200, 3, 3_000),
+    ];
+    assert.deepEqual(
+      sortFiles(files, "size", "asc").map((f) => f.name),
+      ["b.mp4", "c.mp4", "a.mp4"],
+    );
+    assert.deepEqual(
+      sortFiles(files, "updated", "desc").map((f) => f.name),
+      ["b.mp4", "c.mp4", "a.mp4"],
+    );
+  });
+
+  check("排序不改入参（返回新数组）", () => {
+    const list = [folder("b", 1, 2, 0), folder("a", 1, 1, 0)];
+    const sorted = sortFolders(list, "name", "asc");
+    assert.notEqual(sorted, list);
+    assert.deepEqual(
+      list.map((f) => f.name),
+      ["b", "a"],
+    );
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -2651,6 +2769,7 @@ async function main(): Promise<void> {
     ["媒体删除路径用例", () => mediaPathChecks()],
     ["媒体来源分区用例", () => originChecks()],
     ["媒体移动复制用例", () => transferPlanChecks()],
+    ["媒体排列方式用例", () => sortChecks()],
   ];
   for (const [name, run] of suites) {
     try {

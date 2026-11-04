@@ -5,6 +5,7 @@ import { env } from "../env";
 import { Download } from "../types";
 import { isVideoFile, VIDEO_EXT_RE } from "./mediapath";
 import { dirMapOf, mergeOrigins, originOf, originRank, type MediaOrigin } from "./origin";
+import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders, type MediaSortKey, type SortOrder } from "./mediasort";
 
 /**
  * 媒体库目录树。
@@ -52,6 +53,8 @@ export interface MediaFileEntry {
   missing: boolean;
   /** 归档来源：telegram / B站 / 小红书 / YouTube / m3u8 / 外部目录 */
   origin: MediaOrigin;
+  /** 最近更新时间（毫秒）：磁盘 mtime 优先，文件没了就用下载完成时间 */
+  updatedAt: number;
 }
 
 export interface MediaFolderEntry {
@@ -77,6 +80,8 @@ export interface MediaFolderEntry {
   missing: boolean;
   /** 归档来源：这个文件夹里的内容属于哪个下载来源 */
   origin: MediaOrigin;
+  /** 最近更新时间（毫秒）：目录 mtime 与其中视频 mtime 取最大 */
+  updatedAt: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -351,7 +356,17 @@ const stmtDoneVideos = db.prepare<[], Download>(
  * 手动来源的归属记在 folder.sourceIds / sourcePaths 上，
  * 供前端显示「删除」按钮——删的是来源，不是磁盘文件。
  */
-export function collectFolders(): MediaFolderEntry[] {
+/**
+ * 收集媒体库目录树。
+ *
+ * sort/order 只影响返回顺序（以及每个目录里视频的排列），
+ * 不传就是默认的「名称升序」，其它调用方（详情、删除、来源列表）不受影响。
+ */
+export function collectFolders(
+  opts: { sort?: MediaSortKey; order?: SortOrder } = {},
+): MediaFolderEntry[] {
+  const sortKey = normalizeSortKey(opts.sort);
+  const sortOrder = normalizeSortOrder(opts.order);
   const folders = new Map<string, MediaFolderEntry>();
   const seenFiles = new Set<string>();
 
@@ -383,6 +398,7 @@ export function collectFolders(): MediaFolderEntry[] {
         sourcePaths: [],
         missing: !existsSync(key),
         origin: "other",
+        updatedAt: Math.round(statOf(key)?.mtimeMs ?? 0),
       };
       folders.set(key, folder);
       originSets.set(key, new Set());
@@ -415,6 +431,7 @@ export function collectFolders(): MediaFolderEntry[] {
       source: row ? "download" : "manual",
       missing: st === null,
       origin,
+      updatedAt: Math.round(st?.mtimeMs ?? row?.finished_at ?? 0),
     });
     folder.fileCount += 1;
     folder.totalSize += size;
@@ -478,17 +495,21 @@ export function collectFolders(): MediaFolderEntry[] {
     const set = originSets.get(folder.key);
     // 空壳目录（一个视频都没有）没有文件可看，就按目录自身的位置归档
     folder.origin = set && set.size > 0 ? mergeOrigins([...set]) : originOf(null, relOf(folder.dir), dirs);
-    folder.files.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+    // 目录 mtime 未必比里面的文件新（外部搬动、改文件内容都不动目录）—— 取两者最大值
+    for (const file of folder.files) {
+      if (file.updatedAt > folder.updatedAt) folder.updatedAt = file.updatedAt;
+    }
+    folder.files = sortFiles(folder.files, sortKey, sortOrder);
     if (folder.files.length > MAX_FILES_PER_FOLDER) {
       folder.files = folder.files.slice(0, MAX_FILES_PER_FOLDER);
       folder.fileCount = folder.files.length;
     }
   }
-  // 先按来源分区排序，同一来源内再按名称自然序
-  list.sort(
-    (a, b) => originRank(a.origin) - originRank(b.origin) || a.name.localeCompare(b.name, "zh-CN", { numeric: true }),
-  );
-  return list;
+  // 来源分区的先后是固定的；分区内部按用户选的排列方式。
+  // Array.prototype.sort 是稳定排序，第二次按分区排不会打乱第一次的结果。
+  const sorted = sortFolders(list, sortKey, sortOrder);
+  sorted.sort((a, b) => originRank(a.origin) - originRank(b.origin));
+  return sorted;
 }
 
 /* ------------------------------------------------------------------ */

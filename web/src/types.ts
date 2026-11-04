@@ -675,6 +675,8 @@ export interface MetadataFileItem {
   origin: MediaOrigin;
   /** 磁盘上已经找不到这个文件了 */
   missing: boolean;
+  /** 最近更新时间（毫秒） */
+  updatedAt: number;
   downloadId: number | null;
   channelTitle: string | null;
 }
@@ -690,6 +692,8 @@ export interface MetadataFolderItem {
   origin: MediaOrigin;
   /** 磁盘上已经找不到这个目录了（只剩数据库记录） */
   missing: boolean;
+  /** 最近更新时间（毫秒） */
+  updatedAt: number;
   /** 贡献该文件夹的手动来源 id（删除按钮据此回溯移除来源） */
   sourceIds: number[];
   /** 贡献该文件夹的手动来源路径 */

@@ -68,6 +68,37 @@ const IMAGE_SLOTS: Array<{ name: ImageName; label: string; ratio: string; aspect
  */
 const EPISODE_IMAGE_NAMES: ImageName[] = ["thumb"];
 
+/* ------------------------------ 排列方式 ------------------------------ */
+
+type SortKey = "name" | "updated" | "size" | "episodes";
+type SortOrder = "asc" | "desc";
+
+/** 剧集目录按「集数」排，目录里的视频按「集号」排，用同一个 key 就够了 */
+const SORT_OPTIONS: Array<{ key: SortKey; label: string; hint: string }> = [
+  { key: "name", label: "名称", hint: "按剧名 / 文件名的自然序（第2集排在 第10集 前面）" },
+  { key: "updated", label: "最近更新", hint: "最近改动过的排前面" },
+  { key: "size", label: "体积", hint: "按占用空间排" },
+  { key: "episodes", label: "集数", hint: "目录按集数、分集按集号排" },
+];
+
+const SORT_STORAGE_KEY = "tgsub:metadata:sort";
+
+/** 排列方式记在本机，换页面回来还是上次选的 */
+function readSortPref(): { key: SortKey; order: SortOrder } {
+  try {
+    const raw = window.localStorage.getItem(SORT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; order?: string };
+      const key = SORT_OPTIONS.some((o) => o.key === parsed.key) ? (parsed.key as SortKey) : "name";
+      const order: SortOrder = parsed.order === "desc" ? "desc" : "asc";
+      return { key, order };
+    }
+  } catch {
+    /* 隐私模式 / 坏数据：用默认值，不影响页面 */
+  }
+  return { key: "name", order: "asc" };
+}
+
 /** 按作用域取该显示哪些图片槽位 */
 function slotsOf(scope: ImageScope): typeof IMAGE_SLOTS {
   if (scope === "episode") return IMAGE_SLOTS.filter((s) => EPISODE_IMAGE_NAMES.includes(s.name));
@@ -134,6 +165,9 @@ export default function Metadata() {
   const [query, setQuery] = useState("");
   /** 来源分区筛选：空字符串 = 全部 */
   const [origin, setOrigin] = useState<MediaOrigin | "">("");
+  /** 剧集 / 分集的排列方式 */
+  const [sortKey, setSortKey] = useState<SortKey>(() => readSortPref().key);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(() => readSortPref().order);
   const [originGroups, setOriginGroups] = useState<MetadataOriginGroup[]>([]);
   const [items, setItems] = useState<MetadataFolderItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -176,6 +210,8 @@ export default function Metadata() {
           limit: pageSize,
           offset: target * pageSize,
           origin: origin || undefined,
+          sort: sortKey,
+          order: sortOrder,
         });
         setItems(res.items);
         setTotal(res.total);
@@ -194,7 +230,7 @@ export default function Metadata() {
         setLoading(false);
       }
     },
-    [pageSize, query, origin, toast],
+    [pageSize, query, origin, sortKey, sortOrder, toast],
   );
 
   useEffect(() => {
@@ -204,7 +240,16 @@ export default function Metadata() {
   // 换页 / 换来源 / 换搜索词时勾选会跨页失效，直接清空免得删错东西
   useEffect(() => {
     setChecked(new Set());
-  }, [page, origin, query]);
+  }, [page, origin, query, sortKey, sortOrder]);
+
+  // 排列方式记在本机，下次打开还是这个顺序
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify({ key: sortKey, order: sortOrder }));
+    } catch {
+      /* 隐私模式下写不进去，忽略 */
+    }
+  }, [sortKey, sortOrder]);
 
   const loadDetail = useCallback(
     async (key: string, silent = false) => {
@@ -451,6 +496,40 @@ export default function Metadata() {
               <span className="ml-1 tabular-nums text-[10.5px] opacity-70">{group.count}</span>
             </button>
           ))}
+        </div>
+
+        {/* 排列方式：剧集目录与分集各按同一维度排，顺序记在本机 */}
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] px-3 py-1.5">
+          <span className="text-[11px] text-slate-500">排列</span>
+          <select
+            value={sortKey}
+            onChange={(e) => {
+              setSortKey(e.target.value as SortKey);
+              setPage(0);
+            }}
+            className="field !w-auto !py-1 !text-[11.5px]"
+            title={SORT_OPTIONS.find((o) => o.key === sortKey)?.hint}
+          >
+            {SORT_OPTIONS.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => {
+              setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
+              setPage(0);
+            }}
+            className="rounded-md border border-white/[0.07] p-1 text-slate-400 transition hover:text-slate-200"
+            title={sortOrder === "asc" ? "当前升序，点一下改降序" : "当前降序，点一下改升序"}
+            aria-label="切换升序 / 降序"
+          >
+            <IconChevronDown
+              className={`h-3 w-3 transition-transform ${sortOrder === "asc" ? "rotate-180" : ""}`}
+            />
+          </button>
+          <span className="ml-auto text-[10.5px] tabular-nums text-slate-500">{total} 条</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">

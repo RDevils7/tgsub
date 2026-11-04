@@ -228,6 +228,14 @@
   - **复制**：副本落下后自动登记一条 `media_sources`，否则它不在 `downloads` 里、列表根本看不见。
   - **重名一律跳过不覆盖**，同一批内部重名也只搬第一个。
   - **合并**只在勾的全是视频时可用（勾了目录会禁用）。
+- **排列方式（1.3.4）**：来源标签下面一行「排列」= 4 挡 × 升降序，记在 `localStorage`
+  （`tgsub:metadata:sort`）。纯逻辑在 `tg/mediasort.ts` 的 `sortFolders()` / `sortFiles()`。
+  - 目录四挡：`name`（自然序）/ `updated`（目录 mtime 与文件 mtime 取最大）/ `size`（`totalSize`）/ `episodes`（`fileCount`）；
+  - 分集四挡：`name` / `updated` / `size` / `episodes`（这一挡对文件是**集号**）；
+  - 同值时次级键固定名称升序（降序也不反转），避免同体积条目每次刷新顺序跳动；
+  - 认不出集号的文件（花絮、预告）在「集数」挡**永远垫底**，升降序都一样；
+  - 来源分区的先后固定，排列只在分区内部生效（先排好序，再按 `originRank` 稳定排序一次）；
+  - 接口取值非法（`sort=xxx`）直接回落名称升序，不报错。
 - **残留记录可清理（1.3.4）**：`downloads` / `media_sources` 里还有、但磁盘上已经找不到的条目，
   列表与详情会标 `磁盘缺失`，删除不再被 404 挡住 —— 预览写明「本次只清理数据库里的记录」并列出将清除的
   下载记录条数，按钮变成「清理记录」。若该位置仍被上级来源目录覆盖，会补一条 `media_excluded` 隐藏登记，
@@ -820,7 +828,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
 直连失败记忆、网络类错误判定、host 与文案；`m3u8ParseChecks()` 8 项覆盖 HTML 实体还原、
-地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 239 项，全部不依赖网络。
+地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 247 项，全部不依赖网络。
 
 ---
 
@@ -879,11 +887,13 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `renamePlanChecks()` 13 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 239 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 247 项。
 
 `originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
 认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
 `transferPlanChecks()` 7 项：正常搬运、目标重名跳过、同批重名、原地搬运、移进自己、`isUnder`、路径前缀替换。
+`sortChecks()` 8 项：取值非法回落、名称自然序（第2集在前）、最近更新升降序、体积与集数、
+同值时名称次级键不被降序反转、分集按集号且无集号永远垫底、分集体积与更新时间、不改入参。
 
 ---
 
@@ -940,7 +950,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `manualNoteChecks()` 8 项：状态优先级（入队 > 之前下过 > 没入队）、`t.me` 与网页的归类、
-两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 239 项。
+两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 247 项。
 
 ---
 
@@ -1003,7 +1013,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `mediaDirChecks()` 11 项：默认值、平台 id 映射、拼接规则（空段 / 反斜杠 / 重复斜杠）、
-逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 239 项。
+逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 247 项。
 
 ---
 
@@ -1112,7 +1122,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 239 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 247 项。
 
 ---
 
@@ -1166,7 +1176,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 
 `queuePlanChecks()` 11 项：空闲只排正片、封面优先、脏数据不挡正片、正片期间不插封面、
 多车道下只接非封面、封面期间不启正片、插队优先、第三方与 Telegram 互不排队、
-双车道占满、空队列。机器人测试补 1 项：`/tasks` 不列已完成任务。合计 239 项。
+双车道占满、空队列。机器人测试补 1 项：`/tasks` 不列已完成任务。合计 247 项。
 
 ---
 
@@ -1245,7 +1255,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | GET | `/api/messages/:id/preview` | 悬停预览：完整正文 + 3 张封面 |
 | GET | `/api/messages/cover/:file` | 封面图（带文件名白名单校验，防目录穿越） |
 | DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
-| GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`、`origin` 来源分区）；返回 `origins` 分区统计，条目带 `origin` 与 `missing` |
+| GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`、`origin` 来源分区、`sort` + `order` 排列方式）；返回 `origins` 分区统计，条目带 `origin`、`missing` 与 `updatedAt` |
 | GET | `/api/metadata/sources`、POST、`DELETE /:id` | 手动添加的媒体来源（本地视频文件 / 视频目录） |
 | GET | `/api/metadata/delete/preview?key=&mode=` | 删除预览：会删哪些文件、保留哪些、会连带清掉哪些记录（`mode=purge\|unlink`） |
 | POST | `/api/metadata/delete` | 执行删除（body：`key` + `mode`）；`purge` 连磁盘文件一起删，`unlink` 只移出列表；目标已不存在时只清记录（`targetExists: false`） |
@@ -1352,6 +1362,7 @@ tgsub/
 │   │   │   ├── mediapath.ts    # 媒体路径纯函数：视频后缀、递归找视频、副产物命名（不碰数据库）
 │   │   │   ├── mediamanage.ts  # 删除管理：生成删除计划（视频+NFO+封面）、执行删除并同步数据库
 │   │   │   ├── origin.ts       # 来源归档：按 source + 相对下载根首段目录判定 telegram/B站/小红书/YouTube/m3u8/外部（纯函数）
+│   │   │   ├── mediasort.ts    # 排列方式：名称/最近更新/体积/集数 × 升降序，目录与分集各一套（纯函数）
 │   │   │   ├── transferplan.ts # 移动/复制规划：目标冲突、移进自己、路径前缀替换（纯函数）
 │   │   │   ├── transfer.ts     # 移动/复制执行：落盘 + 同步 downloads / media_sources / media_excluded
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）

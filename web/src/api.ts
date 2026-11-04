@@ -365,12 +365,23 @@ export const api = {
 
   /* ------------------------------ 元数据 ------------------------------ */
   /** 文件夹列表：一个文件夹一条记录，展开后是里面的每个视频 */
-  metadataItems: (params: { q?: string; limit?: number; offset?: number; origin?: string }) => {
+  metadataItems: (params: {
+    q?: string;
+    limit?: number;
+    offset?: number;
+    origin?: string;
+    /** 排列方式：name / updated / size / episodes */
+    sort?: string;
+    /** asc / desc */
+    order?: string;
+  }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
     if (params.origin) qs.set("origin", params.origin);
+    if (params.sort) qs.set("sort", params.sort);
+    if (params.order) qs.set("order", params.order);
     return request<{
       items: MetadataFolderItem[];
       total: number;

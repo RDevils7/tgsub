@@ -40,6 +40,7 @@ import {
   scanVideoFiles,
   type MediaFileEntry,
 } from "../tg/mediatree";
+import { normalizeSortKey, normalizeSortOrder } from "../tg/mediasort";
 import { ORIGIN_LABEL, ORIGIN_ORDER, type MediaOrigin } from "../tg/origin";
 import {
   executeDelete,
@@ -560,8 +561,11 @@ metadataRouter.get(
     const offset = clampInt(req.query.offset, 0, 1_000_000, 0);
     // 来源分区筛选：telegram / bilibili / xiaohongshu / youtube / m3u8 / manual / mixed / other
     const originFilter = String(req.query.origin ?? "").trim() as MediaOrigin | "";
+    // 排列方式：name(默认) / updated / size / episodes，order = asc / desc
+    const sortKey = normalizeSortKey(req.query.sort);
+    const sortOrder = normalizeSortOrder(req.query.order);
 
-    const folders = collectFolders();
+    const folders = collectFolders({ sort: sortKey, order: sortOrder });
     // 分区计数按「筛选前」的全量算，这样切到某个来源后仍能看到别的来源有多少条
     const counts = new Map<MediaOrigin, number>();
     for (const folder of folders) counts.set(folder.origin, (counts.get(folder.origin) ?? 0) + 1);
@@ -605,6 +609,8 @@ metadataRouter.get(
           origin: folder.origin,
           /** 磁盘上已经找不到这个目录了 */
           missing: folder.missing,
+          /** 最近更新时间（毫秒） */
+          updatedAt: folder.updatedAt,
           /** 贡献该文件夹的手动来源（删除按钮据此回溯移除来源） */
           sourceIds: folder.sourceIds,
           sourcePaths: folder.sourcePaths,
@@ -628,6 +634,7 @@ metadataRouter.get(
             source: file.source,
             origin: file.origin,
             missing: file.missing,
+            updatedAt: file.updatedAt,
             downloadId: file.downloadId,
             channelTitle: file.channelTitle,
           })),
@@ -1139,6 +1146,7 @@ function resolveSeriesFiles(target: Target): MediaFileEntry[] {
             source: target.download ? "download" : "manual",
             missing: target.missing,
             origin: "other",
+            updatedAt: 0,
           },
         ]
       : folder?.files ?? [];
