@@ -1,6 +1,6 @@
 {
   "name": "tgsub",
-  "version": "1.3.4",
+  "version": "1.3.3",
   "private": true,
   "description": "Telegram 频道关键词订阅下载器",
   "workspaces": [
