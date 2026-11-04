@@ -47,6 +47,7 @@ import {
   platformDirKey,
   sanitizeRelDir,
 } from "../server/src/tg/mediadir";
+import { pickNext, type JobRef } from "../server/src/tg/queueplan";
 import {
   cleanTitle,
   decodeHtmlEntities,
@@ -2429,6 +2430,84 @@ function manualNoteChecks(): void {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* 下载队列调度：车道分配与封面 / 正片分阶段                           */
+/* ------------------------------------------------------------------ */
+
+function queuePlanChecks(): void {
+  const tg = (id: number, kind: "art" | "video" | "other", priority = false): JobRef => ({
+    id,
+    external: false,
+    kind,
+    priority,
+  });
+  const ext = (id: number, priority = false): JobRef => ({ id, external: true, kind: "video", priority });
+  const pick = (queue: JobRef[], active: JobRef[] = [], platformSlots = 3) =>
+    pickNext({ queue, active, tgSlots: 1, platformSlots });
+
+  check("空闲时只有正片：直接开下", () => {
+    const r = pick([tg(1, "video")]);
+    assert.equal(r?.job.id, 1);
+  });
+
+  check("空闲时先下封面图，再下正片", () => {
+    const r = pick([tg(1, "video"), tg(2, "art")]);
+    assert.equal(r?.job.id, 2);
+    assert.equal(r?.reason, "cover");
+  });
+
+  check("没有可跑的封面图时不会被挡住", () => {
+    // 队列里唯一的「封面」被标成外部任务（老库脏数据 / 已失效的 .art- 行）
+    const dirty: JobRef = { id: 9, external: true, kind: "art", priority: false };
+    assert.equal(pick([dirty, tg(1, "video")])?.job.id, 9); // 外部车道先跑它
+    assert.equal(pick([dirty, tg(1, "video")], [], 0)?.job.id, 1); // 外部没空位时正片照下，不许干等
+  });
+
+  check("正片下载中：不插封面图（tgSlots=1 时车道已满）", () => {
+    assert.equal(pick([tg(2, "art")], [tg(1, "video")]), null);
+  });
+
+  check("正片下载中（多车道）：只接非封面图", () => {
+    const r = pickNext({
+      queue: [tg(2, "art"), tg(3, "video")],
+      active: [tg(1, "video")],
+      tgSlots: 2,
+      platformSlots: 3,
+    });
+    assert.equal(r?.job.id, 3);
+    assert.equal(r?.reason, "video");
+  });
+
+  check("封面图下载中：不启动正片", () => {
+    assert.equal(pick([tg(2, "video")], [tg(1, "art")]), null);
+  });
+
+  check("插队任务排到最后也能先跑", () => {
+    const r = pick([tg(1, "video"), tg(2, "video", true)]);
+    assert.equal(r?.job.id, 2);
+    assert.equal(r?.reason, "priority");
+  });
+
+  check("第三方车道与 Telegram 车道互不排队", () => {
+    const r = pick([tg(1, "video"), ext(2)]);
+    assert.equal(r?.job.id, 2);
+    assert.equal(r?.reason, "platform");
+  });
+
+  check("Telegram 在跑时第三方照样能并发", () => {
+    assert.equal(pick([tg(2, "video")], [tg(1, "video")]), null); // tg 车道满、没外部任务
+    assert.equal(pick([ext(3)], [tg(1, "video")])?.job.id, 3);
+  });
+
+  check("两条车道都占满时不再启动新任务", () => {
+    assert.equal(pick([], [tg(1, "video"), ext(2)], 1), null);
+  });
+
+  check("空队列返回 null（调度器据此结束这一轮）", () => {
+    assert.equal(pick([]), null);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -2444,6 +2523,7 @@ async function main(): Promise<void> {
     ["剧集改名合并用例", () => renamePlanChecks()],
     ["手动下载记录用例", () => manualNoteChecks()],
     ["分来源下载目录用例", () => mediaDirChecks()],
+    ["下载队列调度用例", () => queuePlanChecks()],
     ["管理界面登录用例", () => loginChecks()],
     ["m3u8 解析用例", () => m3u8ParseChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],

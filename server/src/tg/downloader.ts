@@ -27,8 +27,15 @@ import {
 } from "./m3u8";
 import { rememberRoute } from "./netroute";
 import { sanitizeRelDir } from "./mediadir";
+import { pickNext, type JobRef } from "./queueplan";
 
 const MAX_AUTO_RETRY = 1;
+
+/** 多久没有数据回传就认为「卡住」了（gramjs 偶尔连着但一个字节也不来） */
+const STALL_AFTER_MS = 5 * 60_000;
+/** 卡住后两次处置之间的间隔：先温和中断，再判失败释放车道 */
+const STALL_RETRY_MS = 2 * 60_000;
+const STALL_TEXT = "下载卡住已中断（长时间没有数据回传），可点重试";
 
 /** 日志里给人看的大小，省得在列表里自己换算字节 */
 function humanSize(bytes: number): string {
@@ -69,6 +76,10 @@ const stmtProgress = db.prepare<[number, number, number]>(
   "UPDATE downloads SET progress = ?, downloaded_bytes = ? WHERE id = ?",
 );
 const stmtFail = db.prepare<[string, number, number]>(
+  "UPDATE downloads SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+);
+/** 看门狗用：任务卡死且中断无效时直接判失败，把车道让出来 */
+const stmtFailStalled = db.prepare<[string, number, number]>(
   "UPDATE downloads SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
 );
 const stmtDone = db.prepare<[number, string, number, number, number]>(
@@ -132,6 +143,10 @@ class DownloadQueue {
   private jumpTarget: number | null = null;
   /** 第三方任务（yt-dlp）的中断句柄：暂停/停止时 abort 子进程 */
   private platformAbort = new Map<number, AbortController>();
+  /** 队列与数据库对账的最后时间（避免每秒查库） */
+  private lastReconcileAt = 0;
+  /** 卡死检测：任务 id → 最近处置时间与阶段（1 已尝试中断 / 2 已判失败） */
+  private stallWatch = new Map<number, { at: number; stage: 0 | 1 | 2 }>();
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
 
@@ -291,17 +306,22 @@ class DownloadQueue {
    * 组内还有「排队 / 下载中」的文件就先不发，等最后一个落盘再发，
    * 这样「消息里有多个视频」时也只在全部下完才通知一次。
    * 封面临时图（.art-）与重复文件名不进预览列表。
+   *
+   * 订阅扫描命中的消息同样会通知（1.3.3 起）：用户要的是「每条消息下完都有回音」，
+   * 扫描器那条「新入队 N 个文件」只说明入队，不说明结果。
    */
   private notifyMessageDone(channelId: number, messageId: number, groupKey: string | null): void {
     if (!canNotifyCard()) return;
     void (async () => {
       const key = groupKey ?? String(messageId);
-      // 只通知「显式发起」的下载（机器人链接 / 转发、网页手动下载）：
-      // 这类任务的 matched_keyword 为 NULL；定时扫描命中订阅时该字段非空，
-      // 若不区分会一次扫描几十条消息、卡片刷屏。
+      // 注意类型：grouped_id 是 TEXT，message_id 是 INTEGER。
+      // 直接写 COALESCE(grouped_id, message_id) = ? 时，单条消息（没有相册 id）
+      // 这边是整数、参数是字符串，SQLite 不会做类型转换 → 永远查不到行 →
+      // done 为空 → 直接 return，通知压根发不出去。1.3.2 的「下载完成没有通知」
+      // 就是这个原因，统一转成 TEXT 再比。
       const rows = db
         .prepare(
-          "SELECT save_name, file_name, status FROM downloads WHERE channel_id = ? AND COALESCE(grouped_id, message_id) = ? AND matched_keyword IS NULL",
+          "SELECT save_name, file_name, status FROM downloads WHERE channel_id = ? AND COALESCE(NULLIF(grouped_id, ''), CAST(message_id AS TEXT)) = ?",
         )
         .all(channelId, key) as Array<{ save_name: string | null; file_name: string; status: string }>;
       const pending = rows.filter((r) => r.status === "queued" || r.status === "downloading").length;
@@ -334,6 +354,60 @@ class DownloadQueue {
     })();
   }
 
+  /**
+   * 第三方链接（B站 / 小红书 / YouTube / 网页 m3u8）下完推一张完成卡片。
+   *
+   * 按 `save_dir` 聚合：一个合集会被展开成同一目录下的多集，等最后集落盘再发，
+   * 免得一次下 12 集弹 12 条消息。单条视频的目录里只有它自己，等于「一链一通知」。
+   */
+  private notifyExternalDone(row: Download): void {
+    if (!canNotifyCard()) return;
+    const dirKey = row.save_dir ?? "";
+    void (async () => {
+      const rows = db
+        .prepare(
+          "SELECT save_name, file_name, status, file_size, source_url FROM downloads WHERE source IN ('platform','m3u8') AND COALESCE(save_dir,'') = ?",
+        )
+        .all(dirKey) as Array<{
+        save_name: string | null;
+        file_name: string;
+        status: string;
+        file_size: number;
+        source_url: string | null;
+      }>;
+      if (rows.some((r) => r.status === "queued" || r.status === "downloading")) return;
+      const done = rows.filter((r) => r.status === "done");
+      if (!done.length) return;
+
+      const meta = decodeMeta(row.emby_json);
+      const parsed = row.source_url ? parsePlatformLink(row.source_url) : null;
+      const platform =
+        row.source === "m3u8" ? "网页视频" : parsed ? platformName(parsed.platform) : "第三方";
+      const total = done.reduce((sum, r) => sum + (r.file_size ?? 0), 0);
+      const seen = new Set<string>();
+      const preview: string[] = [];
+      for (const r of done) {
+        const name = r.save_name ?? r.file_name;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        preview.push(name);
+      }
+
+      const lines = ["✅ <b>下载完成</b>"];
+      lines.push(`🌐 ${esc(platform)}${meta?.series ? ` · ${esc(meta.series)}` : ""}`);
+      lines.push(
+        `📦 共 ${done.length} 个文件${total > 0 ? ` · ${humanSize(total)}` : ""}`,
+      );
+      const link = row.source_url ?? meta?.link ?? "";
+      if (link) lines.push(`🔗 ${esc(link)}`);
+      if (preview.length) {
+        lines.push("📄 文件预览：");
+        for (const name of preview.slice(0, 20)) lines.push(`· ${esc(name)}`);
+      }
+      await notifyCard({ text: lines.join("\n"), link });
+    })();
+  }
+
   stats(): { active: number; waiting: number } {
     this.prune();
     return { active: this.active.size, waiting: this.queue.length };
@@ -355,6 +429,20 @@ class DownloadQueue {
 
   private pump(): void {
     if (this.stopped) return;
+    // 调度循环里任何一次异常都不能让整个下载器停摆：
+    // 定时器每秒会再调一次，这里只记日志。历史上有用户反馈「一直排队中、
+    // 点插队才动」，其中最可能的一条就是某一轮 pump 抛错后没人再调度。
+    try {
+      this.pumpOnce();
+    } catch (err) {
+      logger.error({ err: (err as Error)?.message }, "调度循环出错，等待下一次重试");
+    }
+  }
+
+  private pumpOnce(): void {
+    this.reconcile();
+    this.watchdog();
+
     const { concurrency } = getSettings();
     /**
      * 两条车道，互不排队：
@@ -364,70 +452,106 @@ class DownloadQueue {
      * - 平台车道：B站 / 小红书 / YouTube 走独立 yt-dlp 子进程，跟 Telegram 连接完全无关，
      *   因此放在独立车道并行，并发数由 `concurrency` 控制（默认 3）。
      *   平台任务不再和 Telegram 排队，B站、小红书、YouTube 之间也能同时下。
+     *
+     * 「选谁」的规则全在 queueplan.ts（纯函数，自检直接覆盖），这里只负责
+     * 把内存状态喂给它、再把选中的任务启动起来。
      */
     const tgSlots = 1;
     const platformSlots = Math.max(1, Math.min(10, concurrency || 3));
+    const ref = (id: number): JobRef => ({
+      id,
+      external: this.isExternal(id),
+      kind: this.kindOf(id),
+      priority: this.priority.has(id),
+    });
 
     while (true) {
-      const activeIds = [...this.active];
-      const activePlatform = activeIds.filter((id) => this.isExternal(id)).length;
-      const activeTg = activeIds.length - activePlatform;
-      const freePlatform = platformSlots - activePlatform;
-      const freeTg = tgSlots - activeTg;
-
-      let chosen = -1;
-
-      // 1) 插队任务优先（按其类别占用对应车道）
-      const prioIdx = this.queue.findIndex(
-        (id) =>
-          !this.active.has(id) &&
-          this.priority.has(id) &&
-          (this.isExternal(id) ? freePlatform > 0 : freeTg > 0),
-      );
-      if (prioIdx >= 0) chosen = prioIdx;
-      // 2) 平台车道：独立并发，不受 Telegram 分阶段限制
-      else if (freePlatform > 0) {
-        const idx = this.queue.findIndex((id) => !this.active.has(id) && this.isExternal(id));
-        if (idx >= 0) chosen = idx;
+      const next = pickNext({
+        queue: this.queue.map(ref),
+        active: [...this.active].map(ref),
+        tgSlots,
+        platformSlots,
+      });
+      if (!next) break;
+      const chosen = this.queue.indexOf(next.job.id);
+      if (chosen < 0) {
+        // 队列与视图不同步（理论上不该发生）：丢掉这一条继续下一轮，别死循环
+        logger.warn({ id: next.job.id }, "选中的任务不在队列里，已跳过");
+        this.queue = this.queue.filter((id) => id !== next.job.id);
+        continue;
       }
-      // 3) Telegram 车道：串行 + 封面 / 正片分阶段，避免同连接被打断
-      else if (freeTg > 0) {
-        const tgActiveKinds = activeIds.filter((id) => !this.isExternal(id)).map((id) => this.kindOf(id));
-        const hasArtWaiting = () =>
-          this.queue.some((id) => !this.active.has(id) && !this.isExternal(id) && this.kindOf(id) === "art");
-        /**
-         * 三个阶段互不重叠：
-         * 1) 空闲时先把封面图下载完（串行，一次一张）
-         * 2) 封面图期间不启动正片
-         * 3) 正片下载期间不再插封面图
-         * 手动插队的任务跳过这套分阶段限制，插了就先下。
-         */
-        const phase: "art" | "video" | "idle" = tgActiveKinds.includes("art")
-          ? "art"
-          : tgActiveKinds.includes("video")
-            ? "video"
-            : "idle";
-        const accept = (id: number): boolean => {
-          if (this.priority.has(id)) return true;
-          const kind = this.kindOf(id);
-          if (phase === "art") return false;
-          if (phase === "video") return kind !== "art";
-          return (kind === "art") === hasArtWaiting();
-        };
-        const idx = this.queue.findIndex((id) => !this.active.has(id) && !this.isExternal(id) && accept(id));
-        if (idx >= 0) chosen = idx;
-      }
-
-      if (chosen < 0) break;
       const id = this.queue.splice(chosen, 1)[0];
       this.priority.delete(id);
       this.active.add(id);
+      this.stallWatch.delete(id);
       void this.run(id).finally(() => {
         this.active.delete(id);
         this.live.delete(id);
         this.cancelIntent.delete(id);
+        this.stallWatch.delete(id);
         this.pump();
       });
+    }
+  }
+
+  /**
+   * 内存队列与数据库对账。
+   *
+   * 队列是内存态：只要有一条路径漏了 `enqueue()`（重启边界、异常退出、
+   * 某次 pump 抛错被吞掉），任务就会永远停在「排队中」，用户在界面上
+   * 点「插队」才把它重新塞进队列 —— 1.3.2 的反馈正是这样。
+   *
+   * 这里在「没有活跃任务」时兜底：数据库里还有 queued 就重新载入。
+   * 每 3 秒最多查一次，空表时也只是一次带索引的 count 级查询。
+   */
+  private reconcile(): void {
+    if (this.queue.length || this.active.size) return;
+    const now = Date.now();
+    if (now - this.lastReconcileAt < 3000) return;
+    this.lastReconcileAt = now;
+    let ids: number[];
+    try {
+      ids = stmtQueued.all().map((r) => r.id);
+    } catch (err) {
+      logger.warn({ err: (err as Error)?.message }, "读取待下载任务失败");
+      return;
+    }
+    if (!ids.length) return;
+    this.queue = ids;
+    logger.warn({ count: ids.length }, "下载队列为空但数据库仍有待下载任务，已重新载入");
+  }
+
+  /**
+   * 卡死看门狗：Telegram 连接偶尔会「连着但一个字节都不来」，
+   * 这时 run() 的 Promise 永远不结束，车道一直被它占着，后面全排队。
+   * 连续 5 分钟没有数据回传 → 先让它让位（有零星数据时能中断）；
+   * 再等 2 分钟仍无进展 → 直接判失败释放车道，用户可以点重试。
+   */
+  private watchdog(): void {
+    const now = Date.now();
+    for (const id of this.active) {
+      if (this.isExternal(id)) continue;
+      const live = this.live.get(id);
+      if (!live) continue;
+      const quiet = now - live.lastAt;
+      if (quiet < STALL_AFTER_MS) {
+        this.stallWatch.delete(id);
+        continue;
+      }
+      const hit = this.stallWatch.get(id) ?? { at: 0, stage: 0 };
+      if (now - hit.at < STALL_RETRY_MS) continue;
+      const stage = Math.min(2, hit.stage + 1) as 0 | 1 | 2;
+      this.stallWatch.set(id, { at: now, stage });
+      if (stage === 1) {
+        logger.warn({ id, quiet }, "下载长时间没有数据回传，尝试中断并重新排队");
+        this.cancelIntent.set(id, "preempt");
+      } else {
+        stmtFailStalled.run(STALL_TEXT, Date.now(), id);
+        this.active.delete(id);
+        this.live.delete(id);
+        this.cancelIntent.delete(id);
+        logger.error({ id, quiet }, `下载卡住已中断，任务标记为失败以释放车道：可手动重试`);
+      }
     }
   }
 
@@ -772,6 +896,9 @@ class DownloadQueue {
       }
       queueEmbyUpdate(result.file, "Created");
       requestCacheTrim();
+      // 第三方链接下完也推一张卡片：以前只有 Telegram 消息会通知，
+      // B站 / 小红书 / YouTube 悄悄下完，用户只能自己去网页看
+      this.notifyExternalDone(row);
     } catch (err) {
       // 用户点了暂停/停止：不是失败，别计入重试次数
       if (controller.signal.aborted) {
@@ -958,6 +1085,8 @@ class DownloadQueue {
       }
       queueEmbyUpdate(outFile, "Created");
       requestCacheTrim();
+      // 网页 / m3u8 视频同样推一张完成卡片
+      this.notifyExternalDone(row);
     } catch (err) {
       // 用户点了暂停/停止：不是失败，别计入重试次数
       if (controller.signal.aborted) {

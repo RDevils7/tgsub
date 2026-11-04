@@ -60,7 +60,22 @@ async function main(): Promise<void> {
   check("/rmsub 删除订阅", removed.text.includes("已删除"));
 
   const tasks = await run("tasks");
-  check("/tasks 空库提示", tasks.text.includes("还没有下载任务"));
+  check("/tasks 空库提示", tasks.text.includes("没有进行中的下载"));
+
+  // 1.3.3：/tasks 只列进行中的任务，已完成的不再混进来
+  const { db: taskDb } = await import("../server/src/db");
+  const insertTask = taskDb.prepare(
+    "INSERT INTO downloads (channel_id, channel_title, message_id, file_name, status, progress, created_at) VALUES (0, '测试频道', ?, ?, ?, ?, ?)",
+  );
+  insertTask.run(1, "已完成.mp4", "done", 100, Date.now());
+  insertTask.run(2, "进行中.mp4", "queued", 0, Date.now());
+  const tasks2 = await run("tasks");
+  check(
+    "/tasks 只列进行中的任务",
+    tasks2.text.includes("进行中.mp4") && !tasks2.text.includes("已完成.mp4"),
+    tasks2.text,
+  );
+  taskDb.prepare("DELETE FROM downloads WHERE channel_title = '测试频道'").run();
 
   const queue = await run("queue");
   check("/queue 返回队列信息", queue.text.includes("下载队列"));

@@ -505,7 +505,7 @@ const COMMANDS: Array<{ command: string; description: string }> = [
   { command: "subs", description: "订阅规则列表" },
   { command: "sub", description: "新建订阅：/sub 关键词1,关键词2" },
   { command: "rmsub", description: "删除订阅：/rmsub 订阅ID" },
-  { command: "tasks", description: "最近下载任务" },
+  { command: "tasks", description: "进行中的下载" },
   { command: "queue", description: "下载队列" },
   { command: "dl", description: "按链接下载：/dl t.me/频道/123" },
   { command: "imagedl", description: "切换：是否下载纯图片消息" },
@@ -534,7 +534,7 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 
 <b>查看</b>
 /status 运行状态 · /channels 频道 · /subs 订阅
-/tasks 最近下载 · /queue 队列 · /stats 累计统计
+/tasks 进行中 · /queue 队列 · /stats 累计统计
 
 <b>操作</b>
 /scan 立即扫描全部频道
@@ -865,11 +865,12 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
     }
 
     case "tasks": {
-      // 进行中的任务（下载中 / 排队 / 暂停）永远全部列出，不被数量截断；
-      // 它们后面再补最近的已完成 / 失败记录，整体设上限避免刷屏。
+      // 只列「还在跑」的任务（下载中 / 排队 / 暂停）。
+      // 已完成的下载完成后本来就会推一张完成卡片，再堆进 /tasks 只会把
+      // 真正要看的几条挤到后面去；要看历史请到网页端「下载」页。
       const active = db
         .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY id DESC",
+          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status IN ('downloading','queued','paused') ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id ASC",
         )
         .all() as Array<{
         id: number;
@@ -881,40 +882,27 @@ async function execute(cmd: string, args: string[], ctx: BotCtx): Promise<BotRep
         created_at: number;
         net_route: string | null;
       }>;
-      const recent = db
-        .prepare(
-          "SELECT id, save_name, file_name, status, progress, file_size, created_at, net_route FROM downloads WHERE status NOT IN ('downloading','queued','paused') ORDER BY id DESC",
-        )
-        .all() as Array<{
-        id: number;
-        save_name: string | null;
-        file_name: string;
-        status: string;
-        progress: number;
-        file_size: number;
-        created_at: number;
-        net_route: string | null;
-      }>;
-      const MAX = 60;
-      const capRecent = Math.max(0, MAX - active.length);
-      const rows = [...active, ...recent.slice(0, capRecent)];
-      const hidden = Math.max(0, recent.length - capRecent);
-      if (!rows.length) return { text: "还没有下载任务" };
+      if (!active.length) {
+        return { text: "✨ 现在没有进行中的下载\n历史记录请到网页端「下载」页查看。" };
+      }
       const icon = (s: string): string =>
-        s === "done" ? "✅" : s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "paused" ? "⏸" : s === "failed" ? "❌" : "⏭";
+        s === "downloading" ? "⏳" : s === "queued" ? "🕒" : s === "paused" ? "⏸" : "⏭";
       // 线路标记：直连 / 代理 / 自动，旧的记录没有这个字段就不显示
       const routeTag = (r: string | null): string =>
         r === "direct" ? " · 直连" : r === "proxy" ? " · 代理" : r === "auto" ? " · 自动" : "";
+      const MAX = 60;
+      const rows = active.slice(0, MAX);
       const body = rows
         .map(
           (r) =>
             `${icon(r.status)} <b>#${r.id}</b> ${esc(r.save_name ?? r.file_name)}${
-              r.status === "downloading" ? ` ${r.progress}%` : ""
+              r.status === "downloading" ? ` ${r.progress}%` : r.status === "queued" ? " 等待中" : " 已暂停"
             } · ${fmtBytes(r.file_size)} · ${fmtTime(r.created_at)}${routeTag(r.net_route)}`,
         )
         .join("\n");
-      const footer = hidden > 0 ? `\n…还有 ${hidden} 条历史记录未显示，可到网页端查看` : "";
-      return { text: `🗂 <b>下载任务</b>（${active.length} 进行中）\n${body}${footer}` };
+      const hidden = active.length - rows.length;
+      const footer = hidden > 0 ? `\n…还有 ${hidden} 条未显示，可到网页端查看` : "";
+      return { text: `🗂 <b>进行中的下载</b>（${active.length} 条）\n${body}${footer}` };
     }
 
     case "queue": {
