@@ -82,7 +82,9 @@ export function MediaDeleteDialog({
     setBusy(true);
     try {
       const res = await api.deleteMetadata(target.key, mode);
-      if (mode === "purge") {
+      if (!res.targetExists) {
+        toast.push("磁盘上已经没有这个位置，已清理记录", "success");
+      } else if (mode === "purge") {
         toast.push(
           `已删除 ${res.removedFiles} 个文件（${formatBytes(res.removedBytes)}）` +
             (res.removedDownloads > 0 ? `，清除 ${res.removedDownloads} 条下载记录` : ""),
@@ -123,7 +125,7 @@ export function MediaDeleteDialog({
           </Button>
           <Button size="sm" variant="danger" onClick={() => void run()} loading={busy} disabled={!plan}>
             <IconTrash className="h-3.5 w-3.5" />
-            {purge ? "删除文件" : "从列表移除"}
+            {plan && !plan.targetExists ? "清理记录" : purge ? "删除文件" : "从列表移除"}
           </Button>
         </>
       }

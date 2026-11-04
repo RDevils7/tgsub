@@ -319,6 +319,20 @@ export const IconFolder = (p: Props) => (
   </Svg>
 );
 
+export const IconMove = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.3l1.8 2.2h7.5A2.2 2.2 0 0 1 20 9.4v7.4a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 16.8Z" />
+    <path d="M9 12.6h6M13 10.4l2.2 2.2L13 14.8" />
+  </Svg>
+);
+
+export const IconCopy = (p: Props) => (
+  <Svg {...p}>
+    <rect x="8.5" y="3.5" width="11" height="11" rx="2.2" />
+    <path d="M15.5 18.3A2.2 2.2 0 0 1 13.3 20.5H6.7a3.2 3.2 0 0 1-3.2-3.2V8.2A2.2 2.2 0 0 1 5.5 6" />
+  </Svg>
+);
+
 export const IconSun = (p: Props) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="4" />

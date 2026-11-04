@@ -77,6 +77,8 @@ import {
 import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
 import { parseCookie } from "../server/src/auth/cookie";
+import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
+import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -2508,6 +2510,125 @@ function queuePlanChecks(): void {
   });
 }
 
+/**
+ * 元数据页按来源分区：判定只依赖「下载记录的 source」与「相对下载根的第一段目录」，
+ * 目录名取自设置（用户改名后仍要能认出来）。
+ */
+function originChecks(): void {
+  const dirs = dirMapOf({});
+
+  check("不同来源的目录名有默认值", () => {
+    assert.equal(dirs.dir_telegram, "telegram");
+    assert.equal(dirs.dir_bilibili, "B站");
+    assert.equal(dirs.dir_m3u8, "m3u8");
+  });
+
+  check("空字符串回落默认目录（设置项被清空时不会认不出来）", () => {
+    const map = dirMapOf({ dir_bilibili: "", dir_youtube: null });
+    assert.equal(map.dir_bilibili, "B站");
+    assert.equal(map.dir_youtube, "youtube");
+  });
+
+  check("用户改过的目录名照样能认出来", () => {
+    const map = dirMapOf({ dir_bilibili: "影视/bili" });
+    // 首段是「影视」而不是 bili —— 与 setDir 的设定一致：只比对第一段
+    assert.equal(originOfRelPath("影视/bili/某剧/a.mp4", map), null);
+    const flat = dirMapOf({ dir_bilibili: "bili" });
+    assert.equal(originOfRelPath("bili/某剧/a.mp4", flat), "bilibili");
+  });
+
+  check("Telegram 下载直接归 telegram", () => {
+    assert.equal(originOf("telegram", "telegram/某剧/a.mp4", dirs), "telegram");
+  });
+
+  check("m3u8 下载归 m3u8", () => {
+    assert.equal(originOf("m3u8", "m3u8/某剧/a.mp4", dirs), "m3u8");
+  });
+
+  check("第三方平台按目录区分 B站 / 小红书 / YouTube", () => {
+    assert.equal(originOf("platform", "B站/UP主/某剧/a.mp4", dirs), "bilibili");
+    assert.equal(originOf("platform", "小红书/博主/某剧/a.mp4", dirs), "xiaohongshu");
+    assert.equal(originOf("platform", "youtube/频道/某剧/a.mp4", dirs), "youtube");
+  });
+
+  check("第三方平台认不出目录时归到其它", () => {
+    assert.equal(originOf("platform", "第三方/某剧/a.mp4", dirs), "other");
+    assert.equal(originOf("platform", null, dirs), "other");
+  });
+
+  check("手动登记的条目：下载根外的算外部目录，根内的按位置归档", () => {
+    assert.equal(originOf(null, null, dirs), "manual");
+    assert.equal(originOf(null, "D:\\别的盘\\某剧\\a.mp4", dirs), "manual");
+    assert.equal(originOf(null, "B站/UP主/某剧/a.mp4", dirs), "bilibili");
+  });
+
+  check("Windows 反斜杠路径也能判定", () => {
+    assert.equal(originOf("platform", "B站\\UP主\\某剧\\a.mp4", dirs), "bilibili");
+  });
+
+  check("多个来源合成：单个取自己，多个是 mixed", () => {
+    assert.equal(mergeOrigins(["telegram"]), "telegram");
+    assert.equal(mergeOrigins([]), "other");
+    assert.equal(mergeOrigins(["telegram", "bilibili"]), "mixed");
+  });
+}
+
+/** 移动 / 复制：路径规划与记录前缀替换 */
+function transferPlanChecks(): void {
+  const exists = (p: string) => p.endsWith("已存在");
+
+  check("正常搬运：目标目录下保持原名", () => {
+    const plan = planTransfer([{ path: "/dl/B站/某剧", kind: "folder" }], "/dl/telegram", () => false);
+    assert.equal(plan.items.length, 1);
+    // Windows 上 path.join 用反斜杠，比对前统一成正斜杠
+    assert.equal(plan.items[0].to.replace(/\\/g, "/").endsWith("/telegram/某剧"), true);
+  });
+
+  check("目标已有同名条目时跳过（不覆盖用户的影视文件）", () => {
+    const plan = planTransfer([{ path: "/dl/B站/某剧", kind: "folder" }], "/dl/已存在", () => true);
+    assert.equal(plan.items.length, 0);
+    assert.match(plan.skipped[0].reason, /同名/);
+  });
+
+  check("同一批里重名也只搬第一个", () => {
+    const plan = planTransfer(
+      [
+        { path: "/dl/B站/某剧", kind: "folder" },
+        { path: "/dl/小红书/某剧", kind: "folder" },
+      ],
+      "/dl/telegram",
+      () => false,
+    );
+    assert.equal(plan.items.length, 1);
+    assert.equal(plan.skipped.length, 1);
+  });
+
+  check("原地搬运跳过", () => {
+    const plan = planTransfer([{ path: "/dl/telegram/某剧", kind: "folder" }], "/dl/telegram", () => false);
+    assert.equal(plan.items.length, 0);
+    assert.match(plan.skipped[0].reason, /已经在这个目录/);
+  });
+
+  check("不能把目录移进它自己的子目录", () => {
+    const plan = planTransfer([{ path: "/dl/某剧", kind: "folder" }], "/dl/某剧/子目录", () => false);
+    assert.equal(plan.items.length, 0);
+    assert.match(plan.skipped[0].reason, /自己内部/);
+  });
+
+  check("under 判定：相等算在下面", () => {
+    assert.equal(isUnder("/dl/a", "/dl/a"), true);
+    assert.equal(isUnder("/dl/a/b", "/dl/a"), true);
+    assert.equal(isUnder("/dl/ab", "/dl/a"), false);
+  });
+
+  check("记录路径跟着搬：相等、子路径、无关", () => {
+    const norm = (v: string | null) => (v === null ? null : v.replace(/\\/g, "/"));
+    assert.equal(norm(replacePrefix("/dl/a/x.mp4", "/dl/a", "/dl/b")), "/dl/b/x.mp4");
+    assert.equal(norm(replacePrefix("/dl/a", "/dl/a", "/dl/b")), "/dl/b");
+    assert.equal(replacePrefix("/dl/ab/x.mp4", "/dl/a", "/dl/b"), null);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -2528,6 +2649,8 @@ async function main(): Promise<void> {
     ["m3u8 解析用例", () => m3u8ParseChecks()],
     ["ffmpeg 解析用例", () => ffmpegProbeChecks()],
     ["媒体删除路径用例", () => mediaPathChecks()],
+    ["媒体来源分区用例", () => originChecks()],
+    ["媒体移动复制用例", () => transferPlanChecks()],
   ];
   for (const [name, run] of suites) {
     try {

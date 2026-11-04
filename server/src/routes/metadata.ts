@@ -30,6 +30,7 @@ import {
   collectFolders,
   deriveEpisodeInfo,
   findDownloadByPath,
+  findSourceByPath,
   isAllowedPath,
   isVideoFile,
   listExcluded,
@@ -39,6 +40,7 @@ import {
   scanVideoFiles,
   type MediaFileEntry,
 } from "../tg/mediatree";
+import { ORIGIN_LABEL, ORIGIN_ORDER, type MediaOrigin } from "../tg/origin";
 import {
   executeDelete,
   planDelete,
@@ -52,6 +54,8 @@ import {
   type RenamePlan,
 } from "../tg/renameplan";
 import { executeRenamePlan } from "../tg/seriesrename";
+import { planTransfer, type TransferAction } from "../tg/transferplan";
+import { executeTransfer } from "../tg/transfer";
 import {
   applyFields,
   buildNfo,
@@ -122,6 +126,8 @@ interface Target {
   video: string | null;
   /** 关联的下载记录（手动选择的文件没有） */
   download: Download | null;
+  /** 磁盘上已经找不到这个位置了（数据库里还有记录） */
+  missing: boolean;
 }
 
 /**
@@ -158,7 +164,14 @@ function firstVideoInDir(dir: string): string | null {
   }
 }
 
-function resolveTarget(key: string): Target {
+/**
+ * 解析 URL 里的路径标识。
+ *
+ * allowMissing：磁盘上已经没有这个文件/目录时也照常返回。
+ * 元数据页的记录来自 downloads 与 media_sources，文件被外部删掉之后记录还在 ——
+ * 删除操作必须能处理这种「只剩记录」的条目，否则用户永远清不掉它。
+ */
+function resolveTarget(key: string, opts: { allowMissing?: boolean } = {}): Target {
   const abs = decodePath(key);
   const resolved = path.resolve(abs);
   assert(isAllowedPath(resolved), 403, "该路径不在允许操作的范围内");
@@ -168,7 +181,30 @@ function resolveTarget(key: string): Target {
   } catch {
     stat = null;
   }
-  assert(stat, 404, "文件或目录不存在");
+
+  if (!stat) {
+    assert(opts.allowMissing, 404, "文件或目录不存在");
+    // 类型优先按登记信息判断：来源登记的 kind 最准，其次看下载记录，最后看扩展名
+    const source = findSourceByPath(resolved);
+    const kind: "file" | "folder" = source
+      ? source.kind === "dir"
+        ? "folder"
+        : "file"
+      : findDownloadByPath(resolved)
+        ? "file"
+        : isVideoFile(resolved)
+          ? "file"
+          : "folder";
+    return {
+      kind,
+      path: resolved,
+      dir: kind === "folder" ? resolved : path.dirname(resolved),
+      base: kind === "folder" ? null : path.basename(resolved, path.extname(resolved)),
+      video: null,
+      download: findDownloadByPath(resolved) ?? null,
+      missing: true,
+    };
+  }
 
   if (stat.isDirectory()) {
     return {
@@ -179,6 +215,7 @@ function resolveTarget(key: string): Target {
       // 剧集层级截图用第一集
       video: firstVideoInDir(resolved),
       download: null,
+      missing: false,
     };
   }
   const dir = path.dirname(resolved);
@@ -190,6 +227,7 @@ function resolveTarget(key: string): Target {
     base,
     video: resolved,
     download: findDownloadByPath(resolved) ?? null,
+    missing: false,
   };
 }
 
@@ -520,15 +558,27 @@ metadataRouter.get(
     const q = String(req.query.q ?? "").trim();
     const limit = clampInt(req.query.limit, 1, 500, 30);
     const offset = clampInt(req.query.offset, 0, 1_000_000, 0);
+    // 来源分区筛选：telegram / bilibili / xiaohongshu / youtube / m3u8 / manual / mixed / other
+    const originFilter = String(req.query.origin ?? "").trim() as MediaOrigin | "";
 
     const folders = collectFolders();
+    // 分区计数按「筛选前」的全量算，这样切到某个来源后仍能看到别的来源有多少条
+    const counts = new Map<MediaOrigin, number>();
+    for (const folder of folders) counts.set(folder.origin, (counts.get(folder.origin) ?? 0) + 1);
+    const origins = ORIGIN_ORDER.filter((origin) => (counts.get(origin) ?? 0) > 0).map((origin) => ({
+      origin,
+      label: ORIGIN_LABEL[origin],
+      count: counts.get(origin) ?? 0,
+    }));
+
+    const byOrigin = originFilter ? folders.filter((folder) => folder.origin === originFilter) : folders;
     const filtered = q
-      ? folders.filter(
+      ? byOrigin.filter(
           (folder) =>
             folder.name.toLowerCase().includes(q.toLowerCase()) ||
             folder.files.some((file) => file.name.toLowerCase().includes(q.toLowerCase())),
         )
-      : folders;
+      : byOrigin;
     const total = filtered.length;
     const page = filtered.slice(offset, offset + limit);
 
@@ -551,6 +601,10 @@ metadataRouter.get(
           fileCount: folder.fileCount,
           totalSize: folder.totalSize,
           source: folder.source,
+          /** 归档来源（决定它显示在哪个分区） */
+          origin: folder.origin,
+          /** 磁盘上已经找不到这个目录了 */
+          missing: folder.missing,
           /** 贡献该文件夹的手动来源（删除按钮据此回溯移除来源） */
           sourceIds: folder.sourceIds,
           sourcePaths: folder.sourcePaths,
@@ -572,6 +626,8 @@ metadataRouter.get(
                 : file.series,
             nfoExists: names.includes(`${sanitizeSegment(file.base, 120)}.nfo`),
             source: file.source,
+            origin: file.origin,
+            missing: file.missing,
             downloadId: file.downloadId,
             channelTitle: file.channelTitle,
           })),
@@ -579,7 +635,7 @@ metadataRouter.get(
       }),
     );
 
-    res.json({ items, total, limit, offset });
+    res.json({ items, total, limit, offset, origins });
   }),
 );
 
@@ -665,7 +721,7 @@ metadataRouter.get(
   asyncHandler(async (req, res) => {
     const key = String(req.query.key ?? "");
     assert(key, 400, "缺少路径标识");
-    const target = resolveTarget(key);
+    const target = resolveTarget(key, { allowMissing: true });
     const mode = normalizeDeleteMode(req.query.mode);
     res.json(planDelete(target.path, target.kind, mode));
   }),
@@ -677,17 +733,20 @@ metadataRouter.post(
   asyncHandler(async (req, res) => {
     const key = String(req.body?.key ?? "");
     assert(key, 400, "缺少路径标识");
-    const target = resolveTarget(key);
+    const target = resolveTarget(key, { allowMissing: true });
     const mode = normalizeDeleteMode(req.body?.mode);
     const plan = planDelete(target.path, target.kind, mode);
     const result = await executeDelete(plan);
 
-    // 真的删掉了文件才通知 Emby，让它把这一条从库里摘掉
+    // 真的删掉了文件才通知 Emby，让它把这一条从库里摘掉；
+    // 目标本来就不在磁盘上时也要通知一次 —— Emby 那边可能还留着旧条目
     if (mode === "purge" && result.removedVideos > 0) {
       for (const item of plan.items) {
         if (item.kind !== "video") continue;
         queueEmbyUpdate(item.path, "Deleted", false);
       }
+    } else if (mode === "purge" && !result.targetExists) {
+      queueEmbyUpdate(target.kind === "folder" ? target.path : target.dir, "Deleted", false);
     }
 
     logger.info(
@@ -695,6 +754,71 @@ metadataRouter.post(
       "已删除媒体条目",
     );
     res.json(result);
+  }),
+);
+
+/* ------------------------------ 移动 / 复制 ------------------------------ */
+
+/**
+ * 批量移动 / 复制媒体条目。
+ *
+ * 一个 entry 可以是整个剧集目录，也可以是单个视频；目标目录只接受
+ * 允许操作的范围内（下载根内或已登记来源）—— 否则移动完元数据页就管不到它了。
+ */
+metadataRouter.post(
+  "/transfer",
+  asyncHandler(async (req, res) => {
+    const rawKeys: unknown = req.body?.keys;
+    const keys = Array.isArray(rawKeys) ? rawKeys.map((k) => String(k)).filter(Boolean) : [];
+    assert(keys.length > 0, 400, "请先选择要搬运的条目");
+    const action: TransferAction = req.body?.action === "copy" ? "copy" : "move";
+
+    const rawDest = String(req.body?.dest ?? "").trim();
+    assert(rawDest, 400, "请选择目标目录");
+    const destRoot = path.isAbsolute(rawDest) ? path.resolve(rawDest) : path.resolve(env.downloadDir, rawDest);
+    assert(isAllowedPath(destRoot), 403, "目标目录不在允许操作的范围内");
+
+    const destStat = await fs.promises.stat(destRoot).catch(() => null);
+    assert(destStat?.isDirectory(), 404, "目标目录不存在，请先创建它");
+
+    const inputs: Array<{ path: string; kind: "file" | "folder" }> = [];
+    const invalid: Array<{ from: string; reason: string }> = [];
+    for (const key of keys) {
+      try {
+        const target = resolveTarget(key, { allowMissing: true });
+        if (target.missing) {
+          invalid.push({ from: target.path, reason: "源文件已经不在了" });
+          continue;
+        }
+        inputs.push({ path: target.path, kind: target.kind });
+      } catch (err) {
+        invalid.push({ from: key, reason: (err as Error).message });
+      }
+    }
+
+    const plan = planTransfer(inputs, destRoot, (target) => fs.existsSync(target));
+    const results = [];
+    for (const item of plan.items) {
+      const result = await executeTransfer(item, action);
+      results.push(result);
+      if (result.ok) {
+        if (action === "move") queueEmbyUpdate(result.from, "Deleted", false);
+        queueEmbyUpdate(result.to, "Modified", false);
+      }
+    }
+
+    const skipped = [...invalid, ...plan.skipped];
+    logger.info(
+      { action, dest: destRoot, total: results.length, ok: results.filter((r) => r.ok).length },
+      action === "copy" ? "已复制媒体条目" : "已移动媒体条目",
+    );
+    res.json({
+      ok: results.every((r) => r.ok),
+      action,
+      dest: destRoot,
+      results,
+      skipped,
+    });
   }),
 );
 
@@ -760,7 +884,8 @@ metadataRouter.get(
   asyncHandler(async (req, res) => {
     const key = String(req.query.key ?? "");
     assert(key, 400, "缺少路径标识");
-    const target = resolveTarget(key);
+    // 记录还在、文件没了也要能打开：右侧详情会显示「磁盘上找不到」并给出删除入口
+    const target = resolveTarget(key, { allowMissing: true });
     const ffmpeg = await ffmpegInfo();
     const paths = nfoPaths(target);
 
@@ -786,6 +911,7 @@ metadataRouter.get(
           base: first.base,
           video: first.path,
           download: null,
+          missing: first.missing,
         });
         showFields.title = derived.showtitle || derived.originaltitle || first.series;
         showFields.originaltitle = derived.originaltitle || first.series;
@@ -852,6 +978,8 @@ metadataRouter.get(
         base: target.base,
         name: path.basename(target.path),
         dirName: path.basename(target.dir),
+        /** 磁盘上找不到这个位置：只能清记录，不能编辑/生成 */
+        missing: target.missing,
       },
       paths: {
         dir: target.dir,
@@ -1009,6 +1137,8 @@ function resolveSeriesFiles(target: Target): MediaFileEntry[] {
             channelTitle: target.download?.channel_title ?? null,
             messageId: target.download?.message_id ?? null,
             source: target.download ? "download" : "manual",
+            missing: target.missing,
+            origin: "other",
           },
         ]
       : folder?.files ?? [];
@@ -1081,6 +1211,7 @@ metadataRouter.post(
           base: file.base,
           video: file.path,
           download: row ?? null,
+          missing: file.missing,
         });
         fields.showtitle = info.series;
         fields.originaltitle = info.series;

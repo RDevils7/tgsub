@@ -26,10 +26,12 @@ import type {
   ProxyStatus,
   MetadataDetail,
   MetadataFolderItem,
+  MetadataOriginGroup,
   MetadataSource,
   MetadataDeletePlan,
   MetadataDeleteResult,
   MetadataExcludedItem,
+  MetadataTransferResponse,
   RenamePlanPreview,
   RenameExecuteResult,
   ManualHistoryResponse,
@@ -363,15 +365,27 @@ export const api = {
 
   /* ------------------------------ 元数据 ------------------------------ */
   /** 文件夹列表：一个文件夹一条记录，展开后是里面的每个视频 */
-  metadataItems: (params: { q?: string; limit?: number; offset?: number }) => {
+  metadataItems: (params: { q?: string; limit?: number; offset?: number; origin?: string }) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.offset) qs.set("offset", String(params.offset));
-    return request<{ items: MetadataFolderItem[]; total: number; limit: number; offset: number }>(
-      `/metadata/items?${qs}`,
-    );
+    if (params.origin) qs.set("origin", params.origin);
+    return request<{
+      items: MetadataFolderItem[];
+      total: number;
+      limit: number;
+      offset: number;
+      /** 各来源分区的条目数（按筛选前的全量统计） */
+      origins: MetadataOriginGroup[];
+    }>(`/metadata/items?${qs}`);
   },
+  /** 批量移动 / 复制：keys 可以是剧集目录，也可以是单个视频 */
+  transferMetadata: (keys: string[], action: "move" | "copy", dest: string) =>
+    request<MetadataTransferResponse>("/metadata/transfer", {
+      method: "POST",
+      body: JSON.stringify({ keys, action, dest }),
+    }),
   /** 手动添加的媒体来源 */
   metadataSources: () => request<{ items: MetadataSource[] }>("/metadata/sources"),
   addMetadataSource: (path: string, title?: string) =>

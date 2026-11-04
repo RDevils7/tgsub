@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
 import type {
@@ -7,8 +7,10 @@ import type {
   FrameCandidate,
   ImageName,
   ImageScope,
+  MediaOrigin,
   MetadataDetail,
   MetadataFolderItem,
+  MetadataOriginGroup,
   MetadataSource,
   MetadataExcludedItem,
   NfoFields,
@@ -17,6 +19,8 @@ import type {
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { CropDialog } from "../components/CropDialog";
 import { MediaDeleteDialog, type DeleteTarget } from "../components/MediaDeleteDialog";
+import { TransferDialog, type TransferTarget } from "../components/TransferDialog";
+import { BatchDeleteDialog } from "../components/BatchDeleteDialog";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
 import {
   IconAlert,
@@ -26,11 +30,13 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconCode,
+  IconCopy,
   IconCrop,
   IconDownload,
   IconEdit,
   IconFolder,
   IconImage,
+  IconMove,
   IconPhoto,
   IconPlus,
   IconRefresh,
@@ -126,6 +132,9 @@ export default function Metadata() {
   const [pageSize, setPageSize] = usePageSize("metadata", 20);
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
+  /** 来源分区筛选：空字符串 = 全部 */
+  const [origin, setOrigin] = useState<MediaOrigin | "">("");
+  const [originGroups, setOriginGroups] = useState<MetadataOriginGroup[]>([]);
   const [items, setItems] = useState<MetadataFolderItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -149,10 +158,12 @@ export default function Metadata() {
   const [addOpen, setAddOpen] = useState(false);
   /** 待删除的媒体条目（剧集目录 / 单集视频） */
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  /** 勾选的视频（跨文件夹合并成一部剧用，存的是路径标识） */
+  /** 勾选的条目（视频或剧集目录，存的是路径标识） */
   const [checked, setChecked] = useState<Set<string>>(() => new Set());
   const [mergeOpen, setMergeOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [transfer, setTransfer] = useState<TransferTarget | null>(null);
+  const [batchDelete, setBatchDelete] = useState<DeleteTarget[] | null>(null);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -160,9 +171,15 @@ export default function Metadata() {
     async (target: number, silent = false) => {
       if (!silent) setLoading(true);
       try {
-        const res = await api.metadataItems({ q: query.trim(), limit: pageSize, offset: target * pageSize });
+        const res = await api.metadataItems({
+          q: query.trim(),
+          limit: pageSize,
+          offset: target * pageSize,
+          origin: origin || undefined,
+        });
         setItems(res.items);
         setTotal(res.total);
+        setOriginGroups(res.origins);
         const last = Math.max(0, Math.ceil(res.total / pageSize) - 1);
         if (target > last) setPage(last);
         setSelected((prev) => {
@@ -177,12 +194,17 @@ export default function Metadata() {
         setLoading(false);
       }
     },
-    [pageSize, query, toast],
+    [pageSize, query, origin, toast],
   );
 
   useEffect(() => {
     void fetchList(page);
   }, [fetchList, page]);
+
+  // 换页 / 换来源 / 换搜索词时勾选会跨页失效，直接清空免得删错东西
+  useEffect(() => {
+    setChecked(new Set());
+  }, [page, origin, query]);
 
   const loadDetail = useCallback(
     async (key: string, silent = false) => {
@@ -329,6 +351,41 @@ export default function Metadata() {
    */
   const scopes: ImageScope[] = isFolderTarget ? ["series"] : ["episode"];
 
+  /** 勾选的具体条目（目录或视频），批量操作都基于它 */
+  const checkedEntries: DeleteTarget[] = [];
+  for (const folder of items) {
+    if (checked.has(folder.key)) {
+      checkedEntries.push({ key: folder.key, kind: "folder", name: folder.name, path: folder.dir });
+    }
+    for (const file of folder.files) {
+      if (checked.has(file.key)) {
+        checkedEntries.push({ key: file.key, kind: "file", name: file.name, path: file.path });
+      }
+    }
+  }
+  /** 合并只对视频有意义：勾了剧集目录就没法按集号重排 */
+  const onlyFiles = checkedEntries.length > 0 && checkedEntries.every((entry) => entry.kind === "file");
+
+  /**
+   * 列表分组：选了某个来源就只显示这一组（不重复显示分组标题），
+   * 选「全部」时按来源分区展示，顺序以后端返回的 origins 为准。
+   */
+  const groups: Array<{ origin: MediaOrigin; label: string; folders: MetadataFolderItem[] }> = origin
+    ? [
+        {
+          origin,
+          label: originGroups.find((g) => g.origin === origin)?.label ?? origin,
+          folders: items,
+        },
+      ]
+    : originGroups
+        .map((group) => ({
+          origin: group.origin,
+          label: group.label,
+          folders: items.filter((folder) => folder.origin === group.origin),
+        }))
+        .filter((group) => group.folders.length > 0);
+
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
       {/* 左侧：文件夹树（一个文件夹一条记录，展开看里面的每个视频） */}
@@ -361,6 +418,41 @@ export default function Metadata() {
           </Button>
         </div>
 
+        {/* 来源分区：Telegram / B站 / 小红书 / YouTube / 网页(m3u8) / 外部目录 */}
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.06] px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <button
+            onClick={() => {
+              setOrigin("");
+              setPage(0);
+            }}
+            className={`shrink-0 rounded-lg border px-2 py-[3px] text-[11.5px] transition ${
+              origin === ""
+                ? "border-brand-500/30 bg-brand-500/15 text-brand-200"
+                : "border-white/[0.07] text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            全部
+            <span className="ml-1 tabular-nums text-[10.5px] opacity-70">{originGroups.reduce((n, g) => n + g.count, 0)}</span>
+          </button>
+          {originGroups.map((group) => (
+            <button
+              key={group.origin}
+              onClick={() => {
+                setOrigin(group.origin);
+                setPage(0);
+              }}
+              className={`shrink-0 rounded-lg border px-2 py-[3px] text-[11.5px] transition ${
+                origin === group.origin
+                  ? "border-brand-500/30 bg-brand-500/15 text-brand-200"
+                  : "border-white/[0.07] text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {group.label}
+              <span className="ml-1 tabular-nums text-[10.5px] opacity-70">{group.count}</span>
+            </button>
+          ))}
+        </div>
+
         <div className="min-h-0 flex-1 overflow-y-auto">
           {loading && items.length === 0 && (
             <div className="flex items-center justify-center gap-2 py-10 text-[12.5px] text-slate-500">
@@ -382,7 +474,16 @@ export default function Metadata() {
           )}
 
           <ul className="divide-y divide-white/[0.05]">
-            {items.map((folder) => {
+            {groups.map((group) => (
+              <Fragment key={group.origin}>
+                {/* 分组标题：只在「全部」视图里出现，选了具体来源就不重复占位 */}
+                {origin === "" && (
+                  <li className="sticky top-0 z-[1] flex items-center gap-2 border-b border-white/[0.06] bg-ink-850/95 px-3 py-1.5 backdrop-blur">
+                    <span className="text-[11px] font-medium text-slate-300">{group.label}</span>
+                    <span className="tabular-nums text-[10.5px] text-slate-500">{group.folders.length}</span>
+                  </li>
+                )}
+                {group.folders.map((folder) => {
               const open = expanded.has(folder.key);
               const active = selected?.key === folder.key;
               return (
@@ -393,6 +494,15 @@ export default function Metadata() {
                       active ? "bg-brand-500/[0.12]" : "hover:bg-white/[0.03]"
                     }`}
                   >
+                    {/* 勾选后可整体移动 / 复制 / 删除 */}
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand-500"
+                      checked={checked.has(folder.key)}
+                      onChange={() => toggleCheck(folder.key)}
+                      aria-label={`选择 ${folder.name}`}
+                      title="勾选后可移动、复制或批量删除"
+                    />
                     <button
                       onClick={() => toggleExpand(folder.key)}
                       className="mt-1 shrink-0 rounded p-0.5 text-slate-500 transition hover:text-slate-300"
@@ -429,6 +539,11 @@ export default function Metadata() {
                           <span className="rounded bg-white/[0.06] px-1.5 py-[1px] tabular-nums text-slate-400">
                             {folder.fileCount} 个视频
                           </span>
+                          {folder.missing && (
+                            <span className="rounded bg-err/15 px-1.5 py-[1px] text-err" title="磁盘上找不到这个目录了，只能删记录">
+                              磁盘缺失
+                            </span>
+                          )}
                           <span className={folder.nfoExists ? "text-ok/80" : "text-warn/80"}>
                             {folder.nfoExists ? "tvshow.nfo" : "无 tvshow.nfo"}
                           </span>
@@ -541,30 +656,73 @@ export default function Metadata() {
                   )}
                 </li>
               );
-            })}
+                })}
+              </Fragment>
+            ))}
           </ul>
         </div>
 
-        {/* 勾选后浮出的操作条：把不同文件夹里的分集并成一部剧。
+        {/* 勾选后浮出的操作条：合并 / 移动 / 复制 / 删除。
             挂到 body 上 —— 页面容器带 animate-fade-up（transform 常驻），
             里面的 fixed 会以容器为基准定位，滚到视口外就看不见了。 */}
         {checked.size > 0 &&
           createPortal(
-            <div className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-[min(92vw,520px)] items-center gap-2 rounded-2xl border border-brand-500/30 bg-ink-850/95 px-4 py-2.5 shadow-card backdrop-blur">
-              <span className="text-[11.5px] text-slate-300">
-                已选 <span className="tabular-nums font-semibold text-white">{checked.size}</span> 个视频
+            <div className="fixed inset-x-0 bottom-5 z-40 mx-auto flex w-[min(94vw,660px)] flex-wrap items-center gap-1.5 rounded-2xl border border-brand-500/30 bg-ink-850/95 px-3.5 py-2.5 shadow-card backdrop-blur">
+              <span className="mr-1 text-[11.5px] text-slate-300">
+                已选 <span className="tabular-nums font-semibold text-white">{checkedEntries.length}</span> 项
               </span>
               <Button
                 size="sm"
                 variant="primary"
-                className="ml-auto"
                 onClick={() => setMergeOpen(true)}
-                title="把这些视频按集号排序，重命名成一部剧"
+                disabled={!onlyFiles}
+                title={
+                  onlyFiles
+                    ? "把这些视频按集号排序，重命名成一部剧"
+                    : "合并只能针对视频分集，勾选剧集目录请改用「移动」"
+                }
               >
                 <IconSpark className="h-3.5 w-3.5" />
-                合并为剧集
+                合并
               </Button>
-              <Button size="sm" onClick={() => setChecked(new Set())} title="清空选择">
+              <Button
+                size="sm"
+                onClick={() =>
+                  setTransfer({
+                    keys: checkedEntries.map((entry) => entry.key),
+                    action: "move",
+                    names: checkedEntries.map((entry) => entry.name),
+                  })
+                }
+                title="把选中的剧集目录 / 视频整体搬到另一个目录"
+              >
+                <IconMove className="h-3.5 w-3.5" />
+                移动
+              </Button>
+              <Button
+                size="sm"
+                onClick={() =>
+                  setTransfer({
+                    keys: checkedEntries.map((entry) => entry.key),
+                    action: "copy",
+                    names: checkedEntries.map((entry) => entry.name),
+                  })
+                }
+                title="复制一份副本到另一个目录，原文件保留"
+              >
+                <IconCopy className="h-3.5 w-3.5" />
+                复制
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setBatchDelete(checkedEntries)}
+                title="批量删除选中的条目"
+              >
+                <IconTrash className="h-3.5 w-3.5" />
+                删除
+              </Button>
+              <Button size="sm" className="ml-auto" onClick={() => setChecked(new Set())} title="清空选择">
                 清空
               </Button>
             </div>,
@@ -639,6 +797,11 @@ export default function Metadata() {
                   <Badge className="border-white/10 bg-white/[0.04] text-slate-400">
                     {detail.target.kind === "folder" ? "剧集目录" : "单集视频"}
                   </Badge>
+                  {detail.target.missing && (
+                    <Badge className="border-err/25 bg-err/10 text-err">
+                      <IconAlert className="h-3 w-3" /> 磁盘上找不到，只能清理记录
+                    </Badge>
+                  )}
                   {detail.download && (
                     <Badge className="border-white/10 bg-white/[0.04] text-slate-400">
                       {detail.download.channel_title}
@@ -826,6 +989,26 @@ export default function Metadata() {
         target={deleteTarget}
         onClose={() => setDeleteTarget(null)}
         onDone={async () => {
+          await fetchList(page, true);
+        }}
+      />
+
+      {/* 移动 / 复制到另一个目录 */}
+      <TransferDialog
+        target={transfer}
+        onClose={() => setTransfer(null)}
+        onDone={async () => {
+          setChecked(new Set());
+          await fetchList(page, true);
+        }}
+      />
+
+      {/* 批量删除勾选的条目 */}
+      <BatchDeleteDialog
+        items={batchDelete}
+        onClose={() => setBatchDelete(null)}
+        onDone={async () => {
+          setChecked(new Set());
           await fetchList(page, true);
         }}
       />

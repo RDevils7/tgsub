@@ -42,6 +42,14 @@ export interface DeletePlan {
   target: string;
   targetKind: "file" | "folder";
   mode: DeleteMode;
+  /**
+   * 目标在磁盘上是否还在。
+   *
+   * 元数据页的记录来自 downloads 与 media_sources 两张表，文件被外部删掉
+   * （手动删、挂载盘换了、容器路径变了）之后记录仍然在 —— 这时删除操作
+   * 只该清理记录，不能再因为「文件不存在」把用户挡在门外。
+   */
+  targetExists: boolean;
   /** 会被删除的文件 */
   items: DeleteItem[];
   /** 不会被删除、但列出来让用户知情的其它文件 */
@@ -61,6 +69,8 @@ export interface DeletePlan {
 export interface DeleteResult {
   ok: boolean;
   mode: DeleteMode;
+  /** 目标在磁盘上本来就不存在：本次只清理了数据库记录 */
+  targetExists: boolean;
   /** 实际删除的磁盘文件数 */
   removedFiles: number;
   /** 实际删除的字节数 */
@@ -138,20 +148,24 @@ const under = isUnderPath;
 
 export function planDelete(targetPath: string, kind: "file" | "folder", mode: DeleteMode): DeletePlan {
   const target = path.resolve(targetPath);
+  const targetExists = exists(target);
   const items: DeleteItem[] = [];
   const kept: DeleteItem[] = [];
   const warnings: string[] = [];
 
   if (kind === "file") {
-    items.push({ path: target, name: path.basename(target), kind: "video", size: statSize(target) });
-    const art = episodeArtifacts(target);
-    if (exists(art.nfo)) {
-      items.push({ path: art.nfo, name: path.basename(art.nfo), kind: "nfo", size: statSize(art.nfo) });
+    // 目标已经不在了就别列进「将删除的文件」，否则预览会显示一个 0 字节的幽灵文件
+    if (targetExists) {
+      items.push({ path: target, name: path.basename(target), kind: "video", size: statSize(target) });
+      const art = episodeArtifacts(target);
+      if (exists(art.nfo)) {
+        items.push({ path: art.nfo, name: path.basename(art.nfo), kind: "nfo", size: statSize(art.nfo) });
+      }
+      for (const img of art.images) {
+        items.push({ path: img, name: path.basename(img), kind: "image", size: statSize(img) });
+      }
     }
-    for (const img of art.images) {
-      items.push({ path: img, name: path.basename(img), kind: "image", size: statSize(img) });
-    }
-  } else {
+  } else if (targetExists) {
     const videos = collectVideos(target);
     for (const video of videos) {
       items.push({ path: video, name: path.basename(video), kind: "video", size: statSize(video) });
@@ -217,8 +231,10 @@ export function planDelete(targetPath: string, kind: "file" | "folder", mode: De
 
   // 提示
   const plannedSet = new Set(items.map((item) => item.path));
-  const otherCount = kind === "folder" ? countOtherFiles(target, plannedSet) : 0;
-  if (mode === "purge") {
+  const otherCount = kind === "folder" && targetExists ? countOtherFiles(target, plannedSet) : 0;
+  if (!targetExists) {
+    warnings.push("磁盘上已经找不到这个位置了，本次只清理数据库里的记录。");
+  } else if (mode === "purge") {
     warnings.push("磁盘文件会被真正删除，无法恢复。");
   } else {
     warnings.push("磁盘文件保留，只是不再显示和管理。");
@@ -238,6 +254,7 @@ export function planDelete(targetPath: string, kind: "file" | "folder", mode: De
     target,
     targetKind: kind,
     mode,
+    targetExists,
     items,
     kept,
     totalSize,
@@ -280,10 +297,30 @@ async function removeEmptyDirs(dir: string): Promise<number> {
 }
 
 /**
+ * 删除记录之后，是否还有「上级目录型」来源覆盖这个位置。
+ *
+ * 例：登记了来源 `D:\短剧`，其中 `D:\短剧\合租室友` 被外部删掉了。
+ * 把记录清干净也没用 —— 下次展开 `D:\短剧` 时，那个空壳目录又会被
+ * 重新登记出来（collectFolders 在「一层都没拆出来」时会补一条）。
+ * 所以这种情况必须写一条隐藏登记把它压住。
+ */
+function hasAncestorSource(target: string): boolean {
+  const abs = path.resolve(target);
+  for (const source of listSources()) {
+    if (source.kind !== "dir") continue;
+    const root = path.resolve(source.path);
+    if (root !== abs && abs.startsWith(root + path.sep)) return true;
+  }
+  return false;
+}
+
+/**
  * 执行删除。
  *
  * purge  —— 删磁盘文件（视频 + NFO + 图片）+ 清数据库
  * unlink —— 只清数据库 + 登记隐藏
+ *
+ * 目标本来就不在磁盘上时（记录残留），两种模式都只清记录，不再报错。
  */
 export async function executeDelete(plan: DeletePlan): Promise<DeleteResult> {
   const failed: string[] = [];
@@ -324,8 +361,12 @@ export async function executeDelete(plan: DeletePlan): Promise<DeleteResult> {
     for (const id of plan.sourceIds) removedSources += stmt.run(id).changes;
   }
 
-  // 隐藏登记：unlink 写一条隐藏；purge 反而要把之前的隐藏清掉（文件真没了）
-  if (plan.mode === "unlink") {
+  // 隐藏登记：
+  //   unlink              → 写一条隐藏，压住还在磁盘上的文件
+  //   purge 且目标缺失    → 若还有上级来源覆盖，也得压住，否则空壳会重新冒出来
+  //   其余                → 文件真删了，把旧的隐藏登记一并清掉
+  const needsHide = plan.mode === "unlink" || (!plan.targetExists && hasAncestorSource(plan.target));
+  if (needsHide) {
     excludePath(plan.target);
   } else {
     restorePath(plan.target);
@@ -334,6 +375,7 @@ export async function executeDelete(plan: DeletePlan): Promise<DeleteResult> {
   return {
     ok: failed.length === 0,
     mode: plan.mode,
+    targetExists: plan.targetExists,
     removedFiles,
     removedBytes,
     removedVideos,

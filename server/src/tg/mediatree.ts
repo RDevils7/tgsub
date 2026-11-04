@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { db } from "../db";
+import { db, getSettings } from "../db";
 import { env } from "../env";
 import { Download } from "../types";
 import { isVideoFile, VIDEO_EXT_RE } from "./mediapath";
+import { dirMapOf, mergeOrigins, originOf, originRank, type MediaOrigin } from "./origin";
 
 /**
  * 媒体库目录树。
@@ -47,6 +48,10 @@ export interface MediaFileEntry {
   messageId: number | null;
   /** 来源：download = 项目下载，manual = 手动选择 */
   source: "download" | "manual";
+  /** 磁盘上已经找不到这个文件了（数据库里还有记录） */
+  missing: boolean;
+  /** 归档来源：telegram / B站 / 小红书 / YouTube / m3u8 / 外部目录 */
+  origin: MediaOrigin;
 }
 
 export interface MediaFolderEntry {
@@ -68,6 +73,10 @@ export interface MediaFolderEntry {
   sourceIds: number[];
   /** 贡献该文件夹的手动来源路径（去重后） */
   sourcePaths: string[];
+  /** 磁盘上已经找不到这个目录了（只剩数据库记录） */
+  missing: boolean;
+  /** 归档来源：这个文件夹里的内容属于哪个下载来源 */
+  origin: MediaOrigin;
 }
 
 /* ------------------------------------------------------------------ */
@@ -308,12 +317,24 @@ export function isSeasonDir(name: string): boolean {
   return SEASON_DIR_RE.test(String(name ?? "").trim());
 }
 
-function statSize(file: string): number {
+function statOf(file: string): fs.Stats | null {
   try {
-    return fs.statSync(file).size;
+    return fs.statSync(file);
   } catch {
-    return 0;
+    return null;
   }
+}
+
+function existsSync(file: string): boolean {
+  try {
+    return fs.existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
+function statSize(file: string): number {
+  return statOf(file)?.size ?? 0;
 }
 
 const stmtDoneVideos = db.prepare<[], Download>(
@@ -334,6 +355,18 @@ export function collectFolders(): MediaFolderEntry[] {
   const folders = new Map<string, MediaFolderEntry>();
   const seenFiles = new Set<string>();
 
+  // 来源判定要按设置里的目录名来 —— 用户改了「B站」这个目录，归档也得跟着走
+  const dirs = dirMapOf(getSettings() as unknown as Record<string, unknown>);
+  const downloadRoot = path.resolve(env.downloadDir);
+  /** 相对下载根的路径；在下载根之外（手动登记的外部目录）返回 null */
+  const relOf = (abs: string): string | null => {
+    const rel = path.relative(downloadRoot, abs);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+    return rel;
+  };
+  /** 每个文件夹里出现过哪些来源 */
+  const originSets = new Map<string, Set<MediaOrigin>>();
+
   const ensureFolder = (dir: string): MediaFolderEntry => {
     const key = path.resolve(dir);
     let folder = folders.get(key);
@@ -348,8 +381,11 @@ export function collectFolders(): MediaFolderEntry[] {
         source: "manual",
         sourceIds: [],
         sourcePaths: [],
+        missing: !existsSync(key),
+        origin: "other",
       };
       folders.set(key, folder);
+      originSets.set(key, new Set());
     }
     return folder;
   };
@@ -360,7 +396,10 @@ export function collectFolders(): MediaFolderEntry[] {
     seenFiles.add(abs);
     const dirName = path.basename(path.dirname(abs));
     const info = deriveEpisodeInfo(path.basename(abs), dirName);
-    const size = row?.file_size ?? statSize(abs);
+    const st = statOf(abs);
+    const size = row?.file_size ?? st?.size ?? 0;
+    const origin = originOf(row?.source ?? null, relOf(abs), dirs);
+    originSets.get(folder.key)?.add(origin);
     folder.files.push({
       path: abs,
       name: path.basename(abs),
@@ -374,6 +413,8 @@ export function collectFolders(): MediaFolderEntry[] {
       channelTitle: row?.channel_title ?? null,
       messageId: row?.message_id ?? null,
       source: row ? "download" : "manual",
+      missing: st === null,
+      origin,
     });
     folder.fileCount += 1;
     folder.totalSize += size;
@@ -434,13 +475,19 @@ export function collectFolders(): MediaFolderEntry[] {
 
   const list = [...folders.values()];
   for (const folder of list) {
+    const set = originSets.get(folder.key);
+    // 空壳目录（一个视频都没有）没有文件可看，就按目录自身的位置归档
+    folder.origin = set && set.size > 0 ? mergeOrigins([...set]) : originOf(null, relOf(folder.dir), dirs);
     folder.files.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
     if (folder.files.length > MAX_FILES_PER_FOLDER) {
       folder.files = folder.files.slice(0, MAX_FILES_PER_FOLDER);
       folder.fileCount = folder.files.length;
     }
   }
-  list.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+  // 先按来源分区排序，同一来源内再按名称自然序
+  list.sort(
+    (a, b) => originRank(a.origin) - originRank(b.origin) || a.name.localeCompare(b.name, "zh-CN", { numeric: true }),
+  );
   return list;
 }
 

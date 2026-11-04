@@ -219,6 +219,20 @@
   勾选多个视频（可跨文件夹）后点「合并为剧集」，集号按原序号重排成连续的 E01…EN。
   两者都先出预览表再执行，重命名走两阶段（先临时名再落最终名）避免互相覆盖，失败按当前实际位置回滚。
 
+- **按来源分区 + 批量搬运（1.3.4）**：左侧列表顶部一排来源标签（`Telegram` / `B站` / `小红书` / `YouTube` /
+  `网页·m3u8` / `外部目录`），带各自条目数；选「全部」时按来源分组、每组一个吸顶标题，点某个标签就只看这一组。
+  来源判定 = `downloads.source` + 文件相对下载根的第一段目录（目录名取设置里的 5 个 `dir_*`，改名后仍能认出）。
+  勾选剧集目录或单集后底部浮出「合并 / 移动 / 复制 / 删除」。
+  - **移动**：整目录搬走（含 NFO 与封面），`downloads.file_path`、`media_sources.path`、`media_excluded.path`
+    一起换成新前缀；Emby 收到「旧路径已删 + 新路径已加」两条通知。跨盘时自动退化成「复制 + 删源」。
+  - **复制**：副本落下后自动登记一条 `media_sources`，否则它不在 `downloads` 里、列表根本看不见。
+  - **重名一律跳过不覆盖**，同一批内部重名也只搬第一个。
+  - **合并**只在勾的全是视频时可用（勾了目录会禁用）。
+- **残留记录可清理（1.3.4）**：`downloads` / `media_sources` 里还有、但磁盘上已经找不到的条目，
+  列表与详情会标 `磁盘缺失`，删除不再被 404 挡住 —— 预览写明「本次只清理数据库里的记录」并列出将清除的
+  下载记录条数，按钮变成「清理记录」。若该位置仍被上级来源目录覆盖，会补一条 `media_excluded` 隐藏登记，
+  否则下次展开上级目录那个空壳又会冒出来。
+
 ### 亮色 / 暗色主题
 
 - 顶部工具栏有「亮色 / 暗色」切换按钮，选择记在浏览器 `localStorage`，刷新后保持。
@@ -419,13 +433,13 @@ docker compose down                 # 停止容器，数据保留在 ./data 与 
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布构建的镜像 |
-| `v1.3.3` | 打 `v1.3.3` 标签时产生的固定版本（建议生产环境锁定） |
+| `v1.3.4` | 打 `v1.3.4` 标签时产生的固定版本（建议生产环境锁定） |
 
 > 只发布 `latest` 与 `v<版本号>` 两个标签：push 到 `main` 只跑测试、不推镜像，
 > 不再产生 `main` / `sha-xxx` / `1.0` / `1.0.4` 等派生标签。
 
 ```bash
-# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.3.3
+# 锁定版本部署：把 compose 里 image: 一行改成 rdevils7/tgsub:v1.3.4
 docker compose up -d
 ```
 
@@ -806,7 +820,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `netRouteChecks()` 7 项：内部代理识别、候选代理挑选、三种策略的线路顺序、线路记忆排序、
 直连失败记忆、网络类错误判定、host 与文案；`m3u8ParseChecks()` 8 项覆盖 HTML 实体还原、
-地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 222 项，全部不依赖网络。
+地址归一化、从 HTML 抽地址、标题去站名后缀、签名失效与换线路判定。合计 239 项，全部不依赖网络。
 
 ---
 
@@ -865,7 +879,11 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 `renamePlanChecks()` 13 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 222 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 239 项。
+
+`originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
+认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
+`transferPlanChecks()` 7 项：正常搬运、目标重名跳过、同批重名、原地搬运、移进自己、`isUnder`、路径前缀替换。
 
 ---
 
@@ -922,7 +940,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `manualNoteChecks()` 8 项：状态优先级（入队 > 之前下过 > 没入队）、`t.me` 与网页的归类、
-两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 222 项。
+两种 Telegram 摘要、合集与非合集的平台摘要、网页摘要用保存目录、报错压成一行并截断。合计 239 项。
 
 ---
 
@@ -985,7 +1003,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 ### 自检
 
 `mediaDirChecks()` 11 项：默认值、平台 id 映射、拼接规则（空段 / 反斜杠 / 重复斜杠）、
-逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 222 项。
+逐段清洗、下载根内绝对路径自动转相对、`..` 与非法字符与超深层级拒绝。合计 239 项。
 
 ---
 
@@ -1094,7 +1112,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 222 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 239 项。
 
 ---
 
@@ -1148,7 +1166,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 
 `queuePlanChecks()` 11 项：空闲只排正片、封面优先、脏数据不挡正片、正片期间不插封面、
 多车道下只接非封面、封面期间不启正片、插队优先、第三方与 Telegram 互不排队、
-双车道占满、空队列。机器人测试补 1 项：`/tasks` 不列已完成任务。合计 222 项。
+双车道占满、空队列。机器人测试补 1 项：`/tasks` 不列已完成任务。合计 239 项。
 
 ---
 
@@ -1227,10 +1245,11 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | GET | `/api/messages/:id/preview` | 悬停预览：完整正文 + 3 张封面 |
 | GET | `/api/messages/cover/:file` | 封面图（带文件名白名单校验，防目录穿越） |
 | DELETE | `/api/messages?scope=all\|miss` | 清空监控历史，`scope=miss` 只清未命中的记录 |
-| GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`） |
+| GET | `/api/metadata/items` | 可编辑的媒体列表，按**文件夹**聚合（`q`、`limit`、`offset`、`origin` 来源分区）；返回 `origins` 分区统计，条目带 `origin` 与 `missing` |
 | GET | `/api/metadata/sources`、POST、`DELETE /:id` | 手动添加的媒体来源（本地视频文件 / 视频目录） |
 | GET | `/api/metadata/delete/preview?key=&mode=` | 删除预览：会删哪些文件、保留哪些、会连带清掉哪些记录（`mode=purge\|unlink`） |
-| POST | `/api/metadata/delete` | 执行删除（body：`key` + `mode`）；`purge` 连磁盘文件一起删，`unlink` 只移出列表 |
+| POST | `/api/metadata/delete` | 执行删除（body：`key` + `mode`）；`purge` 连磁盘文件一起删，`unlink` 只移出列表；目标已不存在时只清记录（`targetExists: false`） |
+| POST | `/api/metadata/transfer` | 批量移动 / 复制（body：`keys[]` + `action=move\|copy` + `dest`）；移动会同步 `downloads`/`media_sources`/`media_excluded` 路径 |
 | GET | `/api/metadata/excluded`、POST `/excluded/restore` | 被「仅从列表移除」隐藏的条目 / 取消隐藏 |
 | GET | `/api/metadata/browse?path=` | 服务端目录浏览（列子目录与视频文件，供「手动添加」对话框用） |
 | GET | `/api/metadata/detail?key=` | 元数据详情：NFO 字段、图片清单、视频探测信息、ffmpeg 状态 |
@@ -1332,6 +1351,9 @@ tgsub/
 │   │   │   ├── mediatree.ts    # 媒体目录树：下载文件 + 手动来源按文件夹聚合
 │   │   │   ├── mediapath.ts    # 媒体路径纯函数：视频后缀、递归找视频、副产物命名（不碰数据库）
 │   │   │   ├── mediamanage.ts  # 删除管理：生成删除计划（视频+NFO+封面）、执行删除并同步数据库
+│   │   │   ├── origin.ts       # 来源归档：按 source + 相对下载根首段目录判定 telegram/B站/小红书/YouTube/m3u8/外部（纯函数）
+│   │   │   ├── transferplan.ts # 移动/复制规划：目标冲突、移进自己、路径前缀替换（纯函数）
+│   │   │   ├── transfer.ts     # 移动/复制执行：落盘 + 同步 downloads / media_sources / media_excluded
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
 │   │   │   ├── emby.ts         # nfo 生成、三张封面裁剪合成
 │   │   │   ├── nfo.ts          # NFO 解析与就地改写（只替换目标标签）

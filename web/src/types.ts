@@ -635,6 +635,29 @@ export type ImageScope = "series" | "episode";
  * 元数据页的一条记录 = 一个文件夹（剧集级）。
  * 展开后子级是文件夹里的每个视频文件（单集级）。
  */
+/**
+ * 媒体归档来源。
+ *
+ * 由后端按「下载记录 source + 相对下载根的第一段目录」推断，
+ * 目录名来自设置里的 5 个下载目录，用户改了目录名这里跟着变。
+ */
+export type MediaOrigin =
+  | "telegram"
+  | "bilibili"
+  | "xiaohongshu"
+  | "youtube"
+  | "m3u8"
+  | "manual"
+  | "mixed"
+  | "other";
+
+/** 分区统计：某一来源下有多少个剧集目录 */
+export interface MetadataOriginGroup {
+  origin: MediaOrigin;
+  label: string;
+  count: number;
+}
+
 export interface MetadataFileItem {
   /** 路径标识（base64url 编码的绝对路径） */
   key: string;
@@ -648,6 +671,10 @@ export interface MetadataFileItem {
   title: string;
   nfoExists: boolean;
   source: "download" | "manual";
+  /** 归档来源，决定它显示在哪个分区 */
+  origin: MediaOrigin;
+  /** 磁盘上已经找不到这个文件了 */
+  missing: boolean;
   downloadId: number | null;
   channelTitle: string | null;
 }
@@ -659,6 +686,10 @@ export interface MetadataFolderItem {
   fileCount: number;
   totalSize: number;
   source: "download" | "manual" | "mixed";
+  /** 归档来源：telegram / bilibili / xiaohongshu / youtube / m3u8 / manual / mixed */
+  origin: MediaOrigin;
+  /** 磁盘上已经找不到这个目录了（只剩数据库记录） */
+  missing: boolean;
   /** 贡献该文件夹的手动来源 id（删除按钮据此回溯移除来源） */
   sourceIds: number[];
   /** 贡献该文件夹的手动来源路径 */
@@ -749,6 +780,8 @@ export interface MetadataDeletePlan {
   target: string;
   targetKind: "file" | "folder";
   mode: DeleteMode;
+  /** 目标在磁盘上是否还在；false 表示本次只清理数据库记录 */
+  targetExists: boolean;
   /** 会被删除的文件 */
   items: MetadataDeleteItem[];
   /** 不会被删除、但列出来让用户知情的其它文件 */
@@ -766,6 +799,8 @@ export interface MetadataDeletePlan {
 export interface MetadataDeleteResult {
   ok: boolean;
   mode: DeleteMode;
+  /** 目标本来就不在磁盘上：本次只清了记录 */
+  targetExists: boolean;
   removedFiles: number;
   removedBytes: number;
   removedVideos: number;
@@ -773,6 +808,27 @@ export interface MetadataDeleteResult {
   removedDownloads: number;
   removedSources: number;
   failed: string[];
+}
+
+/** 移动 / 复制的单条结果 */
+export interface MetadataTransferResult {
+  from: string;
+  to: string;
+  ok: boolean;
+  error?: string;
+  /** 同步过来的下载记录数 */
+  downloads: number;
+  /** 同步过来的来源登记数 */
+  sources: number;
+}
+
+export interface MetadataTransferResponse {
+  ok: boolean;
+  action: "move" | "copy";
+  dest: string;
+  results: MetadataTransferResult[];
+  /** 没执行的项目及原因 */
+  skipped: Array<{ from: string; reason: string }>;
 }
 
 /** 被「仅从列表移除」隐藏的条目 */
@@ -858,6 +914,8 @@ export interface MetadataDetail {
     base: string | null;
     name: string;
     dirName: string;
+    /** 磁盘上找不到这个位置（只剩数据库记录） */
+    missing: boolean;
   };
   paths: { dir: string; video: string | null; base: string | null; dirName: string };
   /**
