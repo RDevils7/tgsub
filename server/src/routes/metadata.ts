@@ -50,12 +50,13 @@ import {
 } from "../tg/mediamanage";
 import {
   buildRenamePlan,
+  canRenameDir,
   samePath,
   seriesDirName,
   type EpisodeSource,
   type RenamePlan,
 } from "../tg/renameplan";
-import { executeRenamePlan } from "../tg/seriesrename";
+import { executeRenamePlan, type RenameOutcome } from "../tg/seriesrename";
 import { nfoTraceOf } from "../tg/nfotrace";
 import { planTransfer, type TransferAction } from "../tg/transferplan";
 import { executeTransfer } from "../tg/transfer";
@@ -937,6 +938,37 @@ metadataRouter.get(
   }),
 );
 
+/**
+ * 某个目录的「剧集信息」：移动视频时「一键更新为当前剧集信息」用它。
+ *
+ * 剧名优先取 tvshow.nfo 的 title / showtitle，没有就退回目录名；
+ * videoCount 让界面判断这个目录是不是已经是一个剧集。
+ */
+metadataRouter.get(
+  "/series-info",
+  asyncHandler(async (req, res) => {
+    const raw = String(req.query.dir ?? "").trim();
+    assert(raw, 400, "缺少目录");
+    const dir = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(env.downloadDir, raw);
+    assert(isAllowedPath(dir), 403, "目录不在允许操作的范围内");
+    const stat = await fs.promises.stat(dir).catch(() => null);
+    assert(stat?.isDirectory(), 404, "目录不存在");
+
+    const showRaw = await readText(path.join(dir, "tvshow.nfo"));
+    const fields = fieldsFromNfo(showRaw ? parseNfo(showRaw) : null);
+    let title = (fields.title || fields.showtitle || "").trim();
+    if (!title) title = path.basename(dir);
+
+    res.json({
+      ok: true,
+      dir,
+      title,
+      hasNfo: Boolean(showRaw),
+      videoCount: scanVideoFiles(dir).length,
+    });
+  }),
+);
+
 /* ------------------------------ 详情 ------------------------------ */
 
 metadataRouter.get(
@@ -1092,6 +1124,20 @@ metadataRouter.get(
 
 /* ------------------------------ 保存字段 ------------------------------ */
 
+/** 保存时联动改名的结果（失败不影响 NFO 已保存的事实） */
+interface MetaRenameResult {
+  applied: boolean;
+  /** 改名后的剧集目录标识与路径 */
+  key?: string;
+  dir?: string;
+  /** 目录本身是否也搬了位置 */
+  dirMoved?: boolean;
+  moved?: number;
+  sidecars?: number;
+  nfoUpdated?: number;
+  error?: string;
+}
+
 metadataRouter.put(
   "/meta",
   asyncHandler(async (req, res) => {
@@ -1129,8 +1175,52 @@ metadataRouter.put(
     await writeTextAtomic(file, next);
     const meta = kind === "episode" && target.download ? syncEmbyJson(target.download, fields) : null;
 
+    /**
+     * 保存后同步改名。
+     *
+     * 改的是「剧名」这一层：剧集目录取 title，单集取 showtitle。
+     * 只写 NFO 不改磁盘的话，Emby 仍按旧文件名识别、列表里的目录名也没变，
+     * 用户看到的就是「名字没改成功」。
+     *
+     * 保护：目录名和旧剧名对不上时（平台目录、外部大目录）只改文件名不动目录，
+     * 否则一次改名会把 `telegram`、`D:\影片` 这种上层目录也一起改掉。
+     */
+    let rename: MetaRenameResult | null = null;
+    if (req.body?.renameFiles === true) {
+      const seriesDir = kind === "show" ? target.path : target.dir;
+      const oldTitle = (
+        kind === "show" ? base.title || base.originaltitle : base.showtitle || base.originaltitle
+      ).trim();
+      const newTitle = (
+        kind === "show" ? fields.title || fields.originaltitle : fields.showtitle || fields.originaltitle
+      ).trim();
+      const dirIsSeries = canRenameDir(path.basename(seriesDir), oldTitle);
+      if (newTitle && newTitle !== oldTitle) {
+        try {
+          const outcome = await renameSeriesDir(seriesDir, newTitle, { renameDir: dirIsSeries });
+          // 单集保存：选中态要落在「这一集的新文件」上，而不是整个目录
+          const own =
+            kind === "episode"
+              ? outcome.movedFiles.find((m) => samePath(m.from, target.path))
+              : null;
+          rename = {
+            applied: true,
+            key: own ? encodePath(own.to) : outcome.key,
+            dir: outcome.dir,
+            dirMoved: outcome.dirMoved,
+            moved: outcome.result.moved,
+            sidecars: outcome.result.sidecars,
+            nfoUpdated: outcome.nfoUpdated,
+          };
+        } catch (err) {
+          // 元数据已经写进 NFO 了，改名失败只作为警告返回，别让整次保存白干
+          rename = { applied: false, error: (err as Error).message };
+        }
+      }
+    }
+
     logger.info({ path: target.path, kind }, "已保存元数据");
-    res.json({ ok: true, nfo: next, fields, meta });
+    res.json({ ok: true, nfo: next, fields, meta, rename });
   }),
 );
 
@@ -1777,6 +1867,137 @@ async function refreshSeriesMeta(plan: RenamePlan): Promise<number> {
   return changed;
 }
 
+const stmtSaveDirs = db.prepare<[], { id: number; save_dir: string }>(
+  "SELECT id, save_dir FROM downloads WHERE save_dir IS NOT NULL AND save_dir <> ''",
+);
+const stmtSetSaveDir = db.prepare<[string, number]>("UPDATE downloads SET save_dir = ? WHERE id = ?");
+
+/**
+ * 目录改名后同步 `downloads.save_dir`。
+ *
+ * 它是相对下载根的路径（`telegram/剧名`），不是绝对路径 —— transfer 那层的
+ * 前缀替换管不到它，漏了的话以后按 save_dir 查重 / 决定落位时还指着旧目录名。
+ */
+function syncSaveDir(oldDir: string, newDir: string): number {
+  const root = path.resolve(env.downloadDir);
+  const rel = path.relative(root, oldDir);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return 0;
+  const from = rel.split(path.sep).join("/");
+  const to = path.relative(root, newDir).split(path.sep).join("/");
+  if (from === to) return 0;
+  let changed = 0;
+  for (const row of stmtSaveDirs.all()) {
+    const value = String(row.save_dir).replace(/\\/g, "/");
+    if (value !== from && !value.startsWith(`${from}/`)) continue;
+    stmtSetSaveDir.run(`${to}${value.slice(from.length)}`, row.id);
+    changed += 1;
+  }
+  return changed;
+}
+
+export interface SeriesRenameOutcome {
+  plan: RenamePlan;
+  result: RenameOutcome;
+  /** 被重写的 NFO 份数（tvshow.nfo + 各集 nfo） */
+  nfoUpdated: number;
+  /** 改名后的剧集目录 */
+  dir: string;
+  key: string;
+  /** 目录本身是否也搬了位置 */
+  dirMoved: boolean;
+  /** save_dir 跟着改的下载记录数 */
+  saveDirs: number;
+  /**
+   * 旧绝对路径 → 改名后的绝对路径。
+   *
+   * 保存单集元数据时用它把选中态切到「这一集的新位置」，
+   * 而不是笼统地切到剧集目录。
+   */
+  movedFiles: Array<{ from: string; to: string }>;
+}
+
+/**
+ * 剧集改名执行链：`/rename-series` 与「保存元数据时同步改名」共用。
+ *
+ * 三步，顺序有讲究：
+ *  1. 先在原目录内把每一集改成 `<新剧名>S01E0N.ext`（两阶段重命名，新旧名互不覆盖）；
+ *  2. 目录名也变了才把整个目录搬到 `<父目录>/<新目录名>` —— 走 transfer 那层，
+ *     顺便把 downloads.file_path、media_sources.path、隐藏登记一起换掉；
+ *  3. 最后按新位置的实际情况重写 tvshow.nfo 与各集 nfo（剧名 / 季 / 集号）。
+ *
+ * `renameDir: false` 时只改文件名、不动目录 —— 保存元数据时用来保护
+ * 那些目录名本来就不等于剧名的位置（平台目录、外部大目录）。
+ */
+export async function renameSeriesDir(
+  dir: string,
+  title: string,
+  opts: { renameDir?: boolean } = {},
+): Promise<SeriesRenameOutcome> {
+  const dirName = seriesDirName(title);
+  const sameDir = samePath(path.basename(dir), dirName);
+  const targetDir = opts.renameDir === false || sameDir ? dir : path.join(path.dirname(dir), dirName);
+  // 目标目录已存在且不是自己：说明会和另一部剧混在一起，让用户先处理
+  assert(
+    samePath(targetDir, dir) || !fs.existsSync(targetDir),
+    409,
+    `目标目录已存在：${targetDir}。如果是想合并，请用「合并为剧集」`,
+  );
+  assert(isAllowedPath(targetDir), 403, "目标目录不在允许操作的范围内");
+
+  const sources = episodeSourcesOf(dir);
+  assert(sources.length > 0, 400, "这个目录里没有视频文件，无法重命名");
+
+  // 第一步：原目录内改名
+  const inner = buildRenamePlan({
+    sources,
+    title,
+    targetDir: dir,
+    existingNames: fs.readdirSync(dir),
+  });
+  assert(
+    inner.conflicts.length === 0,
+    409,
+    `目标位置已有同名文件：${inner.conflicts.slice(0, 5).join("、")}`,
+  );
+  const result = await executeRenamePlan(inner);
+
+  // 第二步：目录名也变了 → 整目录搬走
+  let finalDir = dir;
+  let saveDirs = 0;
+  if (!samePath(targetDir, dir)) {
+    const transfer = await executeTransfer(
+      { from: dir, to: targetDir, kind: "folder", name: dirName },
+      "move",
+    );
+    assert(transfer.ok, 500, `文件已按新剧名重命名，但目录改名失败：${transfer.error ?? "未知原因"}`);
+    saveDirs = syncSaveDir(dir, targetDir);
+    finalDir = targetDir;
+  }
+
+  // 第三步：按新位置重写 NFO（文件已就位，这一步只为内容正确）
+  const finalPlan = buildRenamePlan({
+    sources: episodeSourcesOf(finalDir),
+    title,
+    targetDir: finalDir,
+  });
+  const nfoUpdated = await refreshSeriesMeta(finalPlan);
+
+  return {
+    plan: finalPlan,
+    result,
+    nfoUpdated,
+    dir: finalDir,
+    key: encodePath(finalDir),
+    dirMoved: !samePath(finalDir, dir),
+    saveDirs,
+    // 文件名不随目录变，所以「旧路径 → 新目录 + 同一个文件名」就是这一集的新位置
+    movedFiles: inner.items.map((item) => ({
+      from: item.from,
+      to: path.join(finalDir, path.basename(item.to)),
+    })),
+  };
+}
+
 /**
  * 剧集改名：目录名与目录内每一集的文件名一起改，集号按原顺序重排成连续的 E01…EN。
  *
@@ -1800,7 +2021,6 @@ metadataRouter.post(
     const targetDir = samePath(path.basename(target.path), dirName)
       ? target.path
       : path.join(parent, dirName);
-    // 目标目录已存在且不是自己：说明会和另一部剧混在一起，让用户先处理
     assert(
       samePath(targetDir, target.path) || !fs.existsSync(targetDir),
       409,
@@ -1822,18 +2042,16 @@ metadataRouter.post(
       res.json({ ok: true, dryRun: true, plan, count: plan.items.length });
       return;
     }
-    assert(plan.conflicts.length === 0, 409, `目标位置已有同名文件：${plan.conflicts.slice(0, 5).join("、")}`);
 
-    const result = await executeRenamePlan(plan);
-    const nfoUpdated = await refreshSeriesMeta(plan);
+    const outcome = await renameSeriesDir(target.path, title);
     res.json({
       ok: true,
-      result,
-      nfoUpdated,
-      key: encodePath(plan.targetDir),
-      dir: plan.targetDir,
-      title: plan.title,
-      plan,
+      result: outcome.result,
+      nfoUpdated: outcome.nfoUpdated,
+      key: outcome.key,
+      dir: outcome.dir,
+      title,
+      plan: outcome.plan,
     });
   }),
 );
@@ -1853,6 +2071,11 @@ metadataRouter.post(
     const title = String(req.body?.title ?? "").trim();
     assert(title, 400, "请填写剧集名称");
     const dryRun = Boolean(req.body?.dryRun);
+    // 用户在「确认顺序」面板里排好的顺序（绝对路径）；没给就按集号自动排
+    const rawOrder: unknown = req.body?.order;
+    const order = Array.isArray(rawOrder)
+      ? rawOrder.map((p) => String(p)).filter(Boolean)
+      : undefined;
 
     const files: string[] = [];
     for (const k of keys) {
@@ -1906,6 +2129,7 @@ metadataRouter.post(
       title,
       targetDir,
       existingNames: fs.existsSync(targetDir) ? fs.readdirSync(targetDir) : [],
+      order,
     });
 
     if (dryRun) {

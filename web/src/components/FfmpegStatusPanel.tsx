@@ -5,7 +5,7 @@ import { Badge, Button, Spinner, StatusDot } from "./ui";
 import { IconAlert, IconCheck, IconRefresh } from "./icons";
 
 /**
- * ffmpeg 的实际状态：现在到底在用哪个二进制、什么版本、ffprobe 有没有。
+ * ffmpeg 的实际状态：现在到底在用哪个二进制、什么版本、从哪来的。
  *
  * 之前设置页只有一个输入框，填没填对全靠猜 —— 截帧失败时才知道路径不对。
  * 这里直接把解析结果摆出来（内置包 / 环境变量 / PATH / 手填路径都会标注来源）。
@@ -73,9 +73,7 @@ export default function FfmpegStatusPanel({ configuredPath = "" }: { configuredP
           <div className="flex flex-wrap items-baseline gap-x-2">
             <dt className="shrink-0 text-[11.5px] text-slate-500">版本</dt>
             <dd className="font-mono text-[11.5px] text-slate-300">ffmpeg {info.version ?? "未知"}</dd>
-            <span className="text-[11px] text-slate-600">
-              · ffprobe {info.ffprobe ? "可用" : "未找到（自动改用 ffmpeg -i 解析）"}
-            </span>
+            <span className="text-[11px] text-slate-600">· 媒体信息走 ffmpeg -i 解析</span>
           </div>
         </dl>
       ) : (

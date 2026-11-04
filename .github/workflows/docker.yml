@@ -147,9 +147,9 @@ jobs:
           echo "NAS 场景（root 属主挂载目录）校验通过"
           docker rm -f tgsub-nas
 
-      - name: 验证镜像内置 ffmpeg 可用（已剥离 ffprobe，探测走 ffmpeg -i 解析）
+      - name: 验证镜像内置 ffmpeg 可用（探测走 ffmpeg -i 解析）
         run: |
-          # 镜像不再内置 ffprobe 二进制（省 75MB），元数据探测改用 ffmpeg -i 解析。
+          # 镜像只有一个媒体二进制：元数据探测走 ffmpeg -i 解析。
           # 这里确认 ffmpeg 仍在、且 -i 能正常输出媒体信息。
           docker run --rm --entrypoint sh tgsub:smoke -c '
             set -e

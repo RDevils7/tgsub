@@ -31,7 +31,6 @@ export type OverviewNavKey =
   | "channels"
   | "subscriptions"
   | "downloads"
-  | "emby"
   | "logs"
   | "manual"
   | "metadata";

@@ -47,6 +47,11 @@ export interface CollapsibleCardProps {
   /** 标题右侧的内容（徽章、开关等），点击不会触发折叠 */
   extra?: ReactNode;
   defaultOpen?: boolean;
+  /**
+   * 不画自己的卡片外壳（边框、底色、圆角）。
+   * 几块内容要装进同一个框里时用，外侧由父级 `<section class="card divide-y">` 兜住。
+   */
+  flat?: boolean;
   children: ReactNode;
 }
 
@@ -59,6 +64,7 @@ export default function CollapsibleCard({
   desc,
   extra,
   defaultOpen = false,
+  flat = false,
   children,
 }: CollapsibleCardProps) {
   const [open, setOpen] = useState(() => readOpen(id, defaultOpen));
@@ -86,7 +92,7 @@ export default function CollapsibleCard({
   }, [id]);
 
   return (
-    <section className="card overflow-hidden">
+    <section className={flat ? "overflow-hidden" : "card overflow-hidden"}>
       <div
         role="button"
         tabIndex={0}

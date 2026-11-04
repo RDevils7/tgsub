@@ -15,6 +15,7 @@ import { disconnectClient } from "../tg/client";
 import { getBotState, restartBot } from "../tg/bot";
 import { getBuiltinApp } from "../tg/credentials";
 import { normalizeEmbyUrl } from "../tg/embyapi";
+import { resetEmbyViewCache } from "../tg/embyview";
 import { normalizeProxyUrl } from "../lib/netprobe";
 import { withLiveProgress } from "../tg/downloader";
 import { AppSettings, Download, PLATFORM_IDS } from "../types";
@@ -203,6 +204,14 @@ settingsRouter.put(
 
     // 换了 yt-dlp 路径要重新探测，否则界面还显示旧的「未安装」
     if (before.ytdlp_path !== next.ytdlp_path) clearYtdlpCache();
+
+    // Emby 地址 / Key 变了：媒体库页缓存的用户 ID 与海报都失效，清掉重新取
+    if (
+      before.emby_url !== next.emby_url ||
+      (typeof body.emby_api_key === "string" && body.emby_api_key !== MASK)
+    ) {
+      resetEmbyViewCache();
+    }
 
     if (
       before.api_id !== next.api_id ||

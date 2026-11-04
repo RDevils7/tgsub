@@ -172,13 +172,59 @@
 下载完成的最后一件事是通知 Emby：把文件路径 POST 给 `/Library/Media/Updated`，Emby 只对这条路径做增量扫描，
 新集几十秒内出现在媒体库里 —— 不必等它的定时任务，也不用去后台手点「扫描媒体库」。
 
-- **配置位置**：「Emby 入库」独立页面（1.2.0 起从设置页拆出，侧边栏直达）。地址 / API Key / 路径映射与 Emby 自身的看板配置互不影响，关掉开关即完全停止。
+- **配置位置**：设置页「Emby 媒体信息」卡片（1.3.5 起从独立页面收回设置页）。地址 / API Key / 路径映射与 Emby 自身的看板配置互不影响，关掉开关即完全停止。
 - **路径映射必须有**：容器里是 `/downloads`，Emby 看到的是宿主目录（群晖 `/volume1/...`）。
   不映射时 Emby 照样返回 204，只是静默忽略 —— 媒体库里始终不出新集，这是最容易误判成「通知没生效」的情况。
 - **合批**：相邻几集通常连着下完，攒 2.5 秒合并成一次请求（单次最多 50 条路径），只触发一次增量扫描。
 - **失败不牵连下载**：网络抖动或 Emby 正在重启时重试一次并记 warn 日志，下载任务本身仍然标记成功。
 - **兜底与补推**：页面上的「让 Emby 全库扫描」用于补历史文件；「补推路径」可对单个老剧集目录补一次通知。
 - **密钥安全**：API Key 与 session / bot token 一样用 `SESSION_SECRET` 加密落盘，`/api/settings` 只回掩码与是否已配置。
+
+### 媒体库（本地目录浏览与播放，1.3.5）
+
+侧边栏第二位「**媒体库**」展示**你自己选的目录**（默认下载目录）里的剧集，点剧集看分集、点某一集直接播。
+这一页**不依赖 Emby**：NFO、封面、视频全在本地磁盘上，Emby 没配也照样能看。
+配置类的东西（媒体信息生成、入库通知、ffmpeg 路径）统一放在设置页「Emby 媒体信息」——
+这三块（媒体信息 / 入库通知 / Emby 端还要做三件事）装在**同一个卡片框**里，块之间用分隔线，
+不再各占一张卡（`CollapsibleCard` 与 `EmbyNotifyPanel` 的 `flat` 属性，外层由 `section.card divide-y` 兜住）。
+
+- **看的是哪个目录**：默认下载根，可以用「选择目录」逐层浏览切换，也接受设置里那 5 个来源目录与手动登记的外部来源。
+  选择结果记在浏览器本地，刷新后还停在原处。只认「下载根内或已登记来源」，别的路径服务端直接 403。
+- **一屏 = 这个目录下的剧集**：目录里每个「自己装了视频的文件夹」算一部剧（`collectSeriesDirs` 的同一套判定），
+  卡片显示封面、集数角标、来源徽章、`年份 · 集数 · 体积`。排序可选「最近更新 / 名称」，同样记在本地。
+- **目录里直接放的视频**（没归进任何剧集文件夹）不会消失，作为「单集」卡片一起列出来，点了直接播。
+- **封面找法**（`findSeriesArt`）：`poster` → `folder` → `cover` → `show`（.jpg/.jpeg/.png/.webp），
+  都没有就退回第一集的缩略图 `<base>-thumb.jpg`；再没有才显示占位。所以哪怕从没生成过海报，卡片也不是空白。
+- **剧集页**：海报 + 标题、年份、集数、总大小、类型、评分、简介（全来自 `tvshow.nfo`，没有就退回目录名），
+  下面一张分集表 —— 每集一张 16:9 缩略图（右下角压时长），旁边是集号、NFO 里的标题、**本集简介**、
+  分辨率、大小、编码、更新时间，整行可点直接播。
+- **单集缩略图**（`existingEpisodeThumb` / `generateEpisodeThumb`）：三级来源，从便宜到贵往下退：
+  1. 下载时已经生成好的 `<base>-thumb.jpg`（还有同名 `.jpg/.png/.webp`）—— 直接发，不抽帧；
+  2. `data/cache/episode-thumbs/` 里的抽帧缓存 —— key 是 `sha1(路径 + 大小 + mtime)`，文件被替换自动失效；
+  3. 现场用 ffmpeg 抽一帧：跳过片头取 12% 处（不早于第 3 秒、不晚于结尾前 1 秒），不足 5 秒的短片取第 0 帧，
+     首选时点抽不出画面时自动退回第 0 帧。抽完落缓存，同一文件不再重复抽。
+  同一文件的并发请求合并成一次抽帧（海报墙滑过去会打好几个请求），抽不出来就 404，
+  前端显示占位图标 —— 视频损坏也只是一格没图，不影响整页。
+- **播放三种情况**（`playModeOf`）：
+  - `direct`：mp4 / webm 且编码是 h264 / vp9 / av1，`/api/media/stream` 按 Range 直出，能拖进度条；
+  - `remux`：mkv / ts / avi 这类容器，但编码能解 —— 服务端用 ffmpeg `-c copy` 换成 fragmented MP4 管道输出，
+    能正常播，**但没有进度条**（实时转封装没有总长度），界面上写清楚了；
+  - `unsupported`：HEVC / H.265 这类浏览器普遍不支持的编码，列表里直接标灰并说明，点了不会假装能播。
+    媒体库工具条上的「HEVC 试播」开关可以关掉这层拦阻（见下）。
+- **换封装只在真出数据后才发响应头**：ffmpeg 一个字节都没出就退出（文件损坏、编码不认识）时返回 500 + 最后一行 stderr，
+  而不是「200 + 空白」，播放器不会对着空流转圈。客户端关页面时子进程立刻 `SIGKILL`，不留僵尸 ffmpeg。
+- **探测缓存**：`ffmpeg -i` 的解析结果按 `路径 + 大小 + mtime` 缓存，最多 800 条，
+  并发上限 4 —— 一季几十集不会同时把机器打满，二次进入秒开。
+- **可播边界说明**：浏览器解码能力由浏览器决定，服务端只做换封装不做转码。真遇到播不了的编码，
+  弹窗里有「下载」按钮，可以拉下来用本地播放器看。
+- **HEVC 试播（`hevc=1`）**：工具条右侧的「HEVC 试播」开关，本质是「我这台浏览器能解 HEVC，别再拦着」——
+  Safari、装了 HEVC 扩展的 Edge、带硬解的系统确实能放，多数 Windows 上的 Chrome 不能，
+  所以这件事**按浏览器存 localStorage**（`tgsub.media.hevc`），不跟着账号走。
+  打开后 `/library`、`/series` 带上 `hevc=1`，`playModeOf` 把 HEVC 按容器判成 `direct`（mp4/m4v）或
+  `remux`（mkv/ts 等），分集行标一个「试播」角标；换封装时额外加 `-tag:v hvc1`，
+  不加的话 Apple 系只认 `hev1`，会判成解不了。真的解不出来时 `<video>` 报错，
+  弹窗直说「这台浏览器解不了 HEVC」，而不是一直转圈。
+- **开关不影响别人**：存在浏览器本地，同账号换台机器、换浏览器互不干扰；关掉后分集立刻恢复标灰。
 
 ### 元数据编辑
 
@@ -239,6 +285,19 @@
   勾选多个视频（可跨文件夹）后点「合并为剧集」，集号按原序号重排成连续的 E01…EN。
   两者都先出预览表再执行，重命名走两阶段（先临时名再落最终名）避免互相覆盖，失败按当前实际位置回滚。
 
+- **保存元数据时同步改名（1.3.5）**：在「基本信息」里改了剧名（剧集层是 `title`，单集层是 `showtitle`），
+  保存条上会出现「同时把磁盘上的名字改成「新剧名」」的勾选，**默认勾选**：
+  - 剧集目录：文件夹名、每集文件名（`新剧名S01E0N.ext`）、`tvshow.nfo` 与各集 `.nfo` 里的剧名/季/集号
+    一起改；单集 `.nfo` 与 `-thumb.jpg` 跟着视频改名。
+  - 单集：文件名里的剧名前缀一起改；所在文件夹名等于原剧名时文件夹也一起改，否则只改文件名。
+  - 数据库同步：`downloads.file_path / save_name / save_dir`、`media_sources.path`、`media_excluded.path`
+    一并换到新位置；结束后给 Emby 发 `UpdateType=Modified`。
+  - **保护**：目录名不等于原剧名时（平台目录 `telegram` / `B站`、用户自己的 `D:\影片`）一律不动目录 ——
+    否则一次改名会把上层结构整个搬走。这种位置只改文件名，且文件名的剧名前缀仍会更新。
+  - 取消勾选则只写 NFO，磁盘上的文件夹与文件名保持原样（适合只想改显示名的场景）。
+  - 改名失败不影响已保存的 NFO：接口把失败原因放在 `rename.error` 里返回，界面提示「文件未改名：…」，
+    用户处理完冲突（目标目录已存在同名剧）再保存一次即可。
+
 - **按来源分区 + 批量搬运（1.3.3）**：左侧列表顶部一排来源标签（`Telegram` / `B站` / `小红书` / `YouTube` /
   `网页·m3u8` / `外部目录`），带各自条目数；选「全部」时按来源分组、每组一个吸顶标题，点某个标签就只看这一组。
   来源判定 = `downloads.source` + 文件相对下载根的第一段目录（目录名取设置里的 5 个 `dir_*`，改名后仍能认出）。
@@ -297,13 +356,13 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
   「复制诊断」把版本、工具、服务、目录拼成纯文本，贴给维护者即可定位问题。
 - **服务状态**（9 项）：Telegram 账号、机器人、自动扫描、下载队列、Emby 入库、网络代理、
   网页下载线路、管理界面登录、第三方平台；点卡片直达对应页面。
-- **工具链**（8 个组件）：Node.js、ffmpeg、ffprobe、yt-dlp、Chromium（Playwright）、sharp、
+- **工具链**（7 个组件）：Node.js、ffmpeg、yt-dlp、Chromium（Playwright）、sharp、
   SQLite / better-sqlite3、Telegram SDK，逐项给出**版本 / 状态 / 绝对路径 / 来源 / 用途**，点路径可复制。
   - 路径口径与设置页一致（设置指定 → 环境变量 → 内置包 → PATH），显示的是**实际生效**的那个；
   - Chromium 版本优先取 `playwright-core/browsers.json` 的 `browserVersion`：
     Windows 上 `chrome.exe --version` 只会吐 crashpad 错误日志，不能当主来源；
     浏览器真正在跑时才用 `browser.version()` 覆盖。**绝不为了展示而启动浏览器**（常驻约 150MB）。
-  - 可选组件（ffprobe / sharp / Chromium）缺失只标「留意」而非「异常」，因为它们都有降级方案；
+  - 可选组件（sharp / Chromium）缺失只标「留意」而非「异常」，因为它们都有降级方案；
     「未启用」的功能不计入待处理列表，避免天天误报。
 - **存储与目录**：下载磁盘占用进度条、数据 / 下载 / 数据库三个路径的大小与可写状态，
   以及 5 个分来源目录的相对与绝对路径、待创建 / 可写 / 配置有误。
@@ -378,7 +437,7 @@ flowchart TB
 | Telegram | [gramjs](https://github.com/gram-js/gramjs)（MTProto，支持 SOCKS4/5 代理、扫码登录、bot 双模式） |
 | 存储 | SQLite（better-sqlite3，WAL 模式） |
 | 前端 | React 18 + Vite 6 + TailwindCSS 3（无 UI 框架） |
-| 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg 静态二进制（截帧；媒体探测用 `ffmpeg -i` 解析，不带 ffprobe） |
+| 图像 / 视频 | sharp（可选，封面裁剪）、内置 ffmpeg 静态二进制（截帧、换封装、媒体信息探测） |
 | 日志 | pino（结构化 JSON） |
 | 部署 | Docker 多阶段构建 + docker compose（单容器，Express 同时托管前端） |
 
@@ -922,6 +981,22 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 - 目标目录里已有的视频也会纳入排序，避免新文件从 E01 开始把老集覆盖掉
 - 搬完把搬空的源目录删掉
 
+### 三、移动时「更新为当前剧集信息」（1.3.5）
+
+左侧勾选视频 → 底部「移动」→ 选目标剧集目录，勾上「更新为当前剧集信息」：
+
+- 剧名默认取目标目录 `tvshow.nfo` 的 title / showtitle，没有就退回目录名，可改；
+- 弹出**排序确认**：搬进去的视频 + 目标目录里已有的视频一起列出，按集号自动排，
+  每行右侧的 ↑↓ 可调整；顺序决定 E01…EN，确认前能看到每个文件最终叫什么；
+- 确认后执行：视频搬进目标目录并改名，单集 NFO / 缩略图跟着改名，
+  目标已存在的集顺延编号，剧集级 `tvshow.nfo` 与封面保住；更新 `downloads` 记录并通知 Emby；
+- **安全前提**：源目录里若还有本次不搬的视频（说明那还是一部在用的剧），
+  不会把它的 `tvshow.nfo` / 封面搬走，避免把另一部剧的元数据偷到目标目录。
+
+> 只有勾选的全是**视频**时才有这个开关（勾了剧集目录走普通移动）。
+> 这条路径复用「合并」的执行链（`buildRenamePlan` + `executeRenamePlan`），
+> 只是多传一个 `order`（用户确认的绝对路径顺序），后端据此编号而不是按集号自动排。
+
 ### 顺序为什么不会乱：两阶段重命名
 
 把 `A.mp4` 排到第 1、`B.mp4` 排到第 2 时，B 的新名字可能正好等于 A 的旧名字，
@@ -936,21 +1011,30 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 
 | 文件 | 职责 |
 | --- | --- |
-| `server/src/tg/renameplan.ts` | 纯逻辑：集号排序（集号 → 自然序 → 路径兜底）、新文件名生成、临时名规划、目标冲突检测。不碰磁盘与数据库 |
-| `server/src/tg/seriesrename.ts` | 执行：两阶段重命名、副产物与剧集级封面跟随、跨盘 copy+unlink、更新 `downloads.file_path/save_name`、清理空目录、通知 Emby |
-| `server/src/routes/metadata.ts` | `POST /metadata/rename-series`、`POST /metadata/merge`（都支持 `dryRun` 出预览） |
+| `server/src/tg/renameplan.ts` | 纯逻辑：集号排序（集号 → 自然序 → 路径兜底）、按用户确认顺序（`applyOrder`）重排、新文件名生成、临时名规划、目标冲突检测。不碰磁盘与数据库 |
+| `server/src/tg/seriesrename.ts` | 执行：两阶段重命名、副产物与剧集级封面跟随、跨盘 copy+unlink、更新 `downloads.file_path/save_name`、清理空目录、通知 Emby；源目录仍有未搬视频时不搬走它的剧集级封面 |
+| `server/src/routes/metadata.ts` | `POST /metadata/rename-series`、`POST /metadata/merge`（都支持 `dryRun` 出预览，`merge` 还接受 `order`）、`GET /metadata/series-info`（移动时取目标剧集名） |
 
 ### 自检
 
-`renamePlanChecks()` 13 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
+`renamePlanChecks()` 16 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
+按用户确认顺序（`applyOrder`）重排 / 未覆盖文件垫尾 / `buildRenamePlan` 按 `order` 编号、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 269 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 307 项。
 
 `originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
 认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
 `transferPlanChecks()` 7 项：正常搬运、目标重名跳过、同批重名、原地搬运、移进自己、`isUnder`、路径前缀替换。
 `sortChecks()` 8 项：取值非法回落、名称自然序（第2集在前）、最近更新升降序、体积与集数、
 同值时名称次级键不被降序反转、分集按集号且无集号永远垫底、分集体积与更新时间、不改入参。
+
+`embyViewChecks()` 5 项：Emby 条目转卡片时的评分四舍五入、缺字段给 null（不显示成 0）、
+`RunTimeTicks` → 分钟、季集号与已看进度按秒、容器与分辨率取第一个媒体源里的视频轨。
+
+`mediaLibChecks()` 13 项：封面槽位优先级、无海报回退第一集缩略图、都没有给 null、
+mp4/h264 直出、mkv/ts/avi 换封装、HEVC 默认判为不支持、HEVC 强制尝试后按容器分直出/换封装、
+试播开关只放行 HEVC 别的怪编码照拦、`isTrialCodec` 只认 hevc/h265、探测不到编码时按容器兜底且大小写不敏感、
+单集图优先用 `-thumb`、没有 `-thumb` 才退同名图（再没有给 null）、抽帧时点跳过片头且短片退回第 0 帧。
 
 ---
 
@@ -1118,6 +1202,23 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 统一 `HttpOnly` + `SameSite=Lax` + `Path=/`。库里的 `expires_at` 是真正的门槛 ——
 就算有人手工改 cookie 的 `Max-Age`，过期行也查不出来。
 
+#### 凭据兜底：cookie 之外还有请求头（1.3.5）
+
+有些环境根本存不住 cookie：浏览器隐私设置拦掉、页面嵌在沙箱 iframe（opaque origin）里、
+反向代理把 `Set-Cookie` 吞掉。表现就是**「点登录没反应，一直回登录页」**——
+日志里能看到一长串「管理界面登录成功」，可前端永远拿不到登录态。
+
+所以登录类接口（`setup` / `login` / `PUT account`）除写 cookie 外，**响应体里也带 `token`**；
+前端把它存进 `localStorage`（`tgsub.session`），此后每个请求都带 `X-Tgsub-Session` 头。
+服务端 `currentSession()` 两种都认：先看 cookie，再逐个试同名 cookie，最后看请求头。
+
+- 同名 cookie 可能有**多个**（换过访问地址、旧版本写过一份），浏览器先发哪个不由我们定 ——
+  所以 `parseCookies()` 把同名的全解出来挨个校验，任一对得上就认，不再「只取第一个」；
+- 登录页提交成功后会**当场核对一次** `state`，万一还是未登录，直接提示
+  「浏览器没有保存登录状态」而不是把人弹回登录页反复点；
+- `GET /api/session/state` 一律 `Cache-Control: no-store`，避免浏览器拿到登录前的旧状态；
+- 退出登录时 cookie 与本地 token 一起清，不会出现「退出了又自动登录」。
+
 #### 防爆破
 
 同一 IP 连续失败 5 次锁 5 分钟（`TOO_MANY_ATTEMPTS`），提示里带剩余次数。
@@ -1144,7 +1245,7 @@ environment:
 | 文件 | 职责 |
 | --- | --- |
 | `server/src/auth/password.ts` | 纯逻辑：scrypt 哈希 / 校验、用户名与密码规则、二次确认 |
-| `server/src/auth/cookie.ts` | 纯逻辑：手写 cookie 解析（同名子串、引号、URL 编码） |
+| `server/src/auth/cookie.ts` | 纯逻辑：手写 cookie 解析（同名子串、引号、URL 编码、同名多值 `parseCookies`） |
 | `server/src/auth/service.ts` | 账号读写、会话增删查、失败限流、`requireLogin` 中间件 |
 | `server/src/routes/login.ts` | `/api/session/*` 接口 |
 | `web/src/pages/Login.tsx` | 登录页 / 初始化页（浅灰底 + 居中白卡，配色写死不跟随主题，不含图片） |
@@ -1179,7 +1280,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析。合计 269 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 307 项。
 
 ---
 
@@ -1344,6 +1445,18 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
 | POST | `/api/emby/refresh` | 让 Emby 立刻全库扫描（兜底用） |
 | POST | `/api/emby/notify` | 手动补推一个路径（相对路径按下载目录解析） |
+| GET | `/api/media/library` | 列目录里的剧集（`dir` 可省，默认下载根；可选 `hevc=1`）：`series` / `loose` / `roots` / `isSeries` |
+| GET | `/api/media/series` | 一部剧的详情与全部分集（`dir` 必填，可选 `hevc=1`），每集带 `plot`（单集 NFO 简介）、`playMode`、`trial`（HEVC 试播才可播）、可塞进 `<video>` 的 `streamUrl` 和 `thumbUrl` |
+| GET | `/api/media/art` | 剧集封面（`dir` + `kind=poster\|landscape`），服务端按固定槽位查找，只回图片 |
+| GET | `/api/media/thumb` | 单集缩略图（`path` = 视频路径，必须过 `isVideoFile` + 允许路径）：有现成 `-thumb` 图直接发，没有就抽帧并缓存；抽不出来回 404 + 原因 |
+| GET | `/api/media/stream` | 播放本地视频：直出透传 `Range` / `206`；`mode=remux` 或容器不兼容时用 ffmpeg 换封装成 fMP4（HEVC 自动加 `-tag:v hvc1`） |
+| GET | `/api/media/roots` | 可切换的库位置（下载根 + 各平台目录 + 已登记来源） |
+| GET | `/api/emby/library` | 媒体库分区列表；没配置时返回 `ok:false` + `error`（不抛 4xx） |
+| GET | `/api/emby/items` | 条目列表：`libraryId` / `parentId`（剧集分集）/ `search` / `types` / `start` / `limit` |
+| GET | `/api/emby/items/:id` | 单条详情（含最新已看进度） |
+| GET | `/api/emby/play/:id` | 播放信息：返回本站可直接播放的代理地址（含 `MediaSourceId`） |
+| GET | `/api/emby/stream/:id` | 视频流代理，透传 `Range` / `206` / `Content-Range` |
+| GET | `/api/emby/image/:id` | 海报代理（`type` / `tag` / `maxWidth`），带内存缓存 |
 | GET | `/api/network` | 当前代理解析结果、支持的协议、可供探测的站点 |
 | POST | `/api/network/test` | 联网测试：经当前（或传入的）代理探测 Telegram / Google / GitHub / 百度，返回状态码与耗时 |
 | GET | `/api/ffmpeg` | ffmpeg 实际路径、来源与版本（`?refresh=1` 强制重新检测） |
@@ -1421,6 +1534,7 @@ tgsub/
 │   │   │   ├── mediamanage.ts  # 删除管理：生成删除计划（视频+NFO+封面）、执行删除并同步数据库
 │   │   │   ├── origin.ts       # 来源归档：按 source + 相对下载根首段目录判定 telegram/B站/小红书/YouTube/m3u8/外部（纯函数）
 │   │   │   ├── mediasort.ts    # 排列方式：名称/最近更新/体积/集数 × 升降序，目录与分集各一套（纯函数）
+│   │   │   ├── medialib.ts     # 本地媒体库：列剧集 / 列分集（含单集简介）/ 找封面 / 单集缩略图 / 判定怎么播；探测与抽帧都带缓存（不依赖 Emby）
 │   │   │   ├── transferplan.ts # 移动/复制规划：目标冲突、移进自己、路径前缀替换（纯函数）
 │   │   │   ├── transfer.ts     # 移动/复制执行：落盘 + 同步 downloads / media_sources / media_excluded
 │   │   │   ├── covers.ts       # 封面缓存（预览与下载共用同一组图）
@@ -1429,11 +1543,11 @@ tgsub/
 │   │   │   ├── ffmpeg.ts       # ffmpeg 定位、媒体探测（ffmpeg -i 解析）、截帧
 │   │   │   ├── bot.ts          # Telegram 机器人命令层与推送
 │   │   │   └── notify.ts       # 通知
-│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / manual / emby / logs / settings / system
+│   │   └── routes/             # auth / channels / subscriptions / downloads / messages / metadata / media / manual / emby / logs / settings / system
 │   └── dist/                   # 构建产物（不提交）
 ├── web/
 │   └── src/
-│       ├── pages/              # 概览、频道、订阅、监控历史、手动下载、下载记录、元数据、日志、设置
+│       ├── pages/              # 概览、媒体库、频道、订阅、监控历史、手动下载、下载记录、元数据、日志、设置
 │       ├── components/         # UI 基础组件、图标、Toast
 │       ├── hooks/useTheme.ts   # 亮色 / 暗色主题（localStorage 持久化）
 │       ├── api.ts / types.ts / utils.ts
@@ -1454,12 +1568,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.4`（镜像 `rdevils7/tgsub:v1.3.4` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.5-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.5`（镜像 `rdevils7/tgsub:v1.3.5` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.6-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.5-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.5`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.5` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.6-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.6-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.6`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.6` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.7-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。
@@ -1557,12 +1671,12 @@ curl http://127.0.0.1:6789/api/health
 **元数据页点「抽帧」提示未找到 ffmpeg**
 项目依赖里已经带了 `@ffmpeg-installer/ffmpeg` 的静态二进制，正常安装无需额外配置。
 若提示找不到，按顺序检查：`node_modules/@ffmpeg-installer` 是否完整（`npm ci` 可修复）；Docker 部署时是否用了自定义镜像把 devDependencies 之外的东西裁掉；
-再不行到「设置 → Emby 媒体库 → ffmpeg 路径」手动填一个绝对路径，保存后回元数据页点右上角刷新即可。
+再不行到「设置 → Emby 媒体信息 → ffmpeg 路径」手动填一个绝对路径，保存后回元数据页点右上角刷新即可。
 
-> **关于 ffprobe**：镜像里**不再内置** `@ffprobe-installer`（它单独就占 75MB，是镜像体积最大的一层，
-> 也是从慢速镜像站拉取时卡在 99% 的直接原因）。媒体探测（时长 / 分辨率 / 编码 / 码率 / 帧率）
-> 改由 `server/src/tg/ffmpeg.ts` 的 `parseFfmpegProbe()` 解析 `ffmpeg -i` 的 stderr 输出，
-> 字段与 ffprobe 完全一致。若用户自备 ffprobe，程序仍会优先使用它。
+> **关于媒体探测**：整条链路只有 ffmpeg 一个媒体二进制，不依赖任何额外的探测程序。
+> 时长 / 分辨率 / 编码 / 码率 / 帧率由 `server/src/tg/ffmpeg.ts` 的 `parseFfmpegProbe()`
+> 解析 `ffmpeg -i` 的 stderr 得到（`ffmpeg -i` 没有输出目标时必定以退出码 1 结束，
+> 要的信息全在 stderr 里，所以那里按「收输出」而不是「判成功」处理）。
 
 **重启后提示未登录 / 每次重启都要重新扫码**
 正常情况下**只需扫码一次**：session 加密写入数据库（另有一份备份），重启进程、重建容器都会自动复用。为此有五层保护：

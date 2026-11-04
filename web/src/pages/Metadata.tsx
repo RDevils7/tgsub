@@ -189,6 +189,8 @@ export default function Metadata() {
   const [fields, setFields] = useState<NfoFields>(EMPTY_FIELDS);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  /** 保存时是否同步把磁盘上的文件夹 / 文件名一起改掉（默认开） */
+  const [syncRename, setSyncRename] = useState(true);
   const [genNfo, setGenNfo] = useState(false);
   const [genImages, setGenImages] = useState(false);
 
@@ -355,12 +357,24 @@ export default function Metadata() {
     if (!detail) return;
     setSaving(true);
     try {
-      const res = await api.saveMetaFields(detail.target.key, kind, fields);
-      toast.push(kind === "episode" ? "单集元数据已保存" : "剧集信息已保存", "success");
+      const res = await api.saveMetaFields(detail.target.key, kind, fields, syncRename);
       setFields(res.fields);
       setDirty(false);
-      await loadDetail(detail.target.key, true);
-      await fetchList(page, true);
+      const rename = res.rename;
+      if (rename?.applied && rename.key) {
+        toast.push(
+          `已保存，并重命名 ${rename.moved ?? 0} 个文件${rename.dirMoved ? "（文件夹也已改名）" : ""}`,
+          "success",
+        );
+        // 目录 / 文件名都变了，旧 key 已经失效，切到新位置
+        await fetchList(page, true);
+        setSelected({ key: rename.key, kind: detail.target.kind });
+      } else {
+        toast.push(kind === "episode" ? "单集元数据已保存" : "剧集信息已保存", "success");
+        if (rename && !rename.applied) toast.push(`文件未改名：${rename.error ?? "未知原因"}`, "info");
+        await loadDetail(detail.target.key, true);
+        await fetchList(page, true);
+      }
     } catch (err) {
       toast.push((err as Error).message, "error");
     } finally {
@@ -899,6 +913,7 @@ export default function Metadata() {
                     keys: checkedEntries.map((entry) => entry.key),
                     action: "move",
                     names: checkedEntries.map((entry) => entry.name),
+                    kinds: checkedEntries.map((entry) => entry.kind),
                   })
                 }
                 title="把选中的剧集目录 / 视频整体搬到另一个目录"
@@ -913,6 +928,7 @@ export default function Metadata() {
                     keys: checkedEntries.map((entry) => entry.key),
                     action: "copy",
                     names: checkedEntries.map((entry) => entry.name),
+                    kinds: checkedEntries.map((entry) => entry.kind),
                   })
                 }
                 title="复制一份副本到另一个目录，原文件保留"
@@ -1142,7 +1158,9 @@ export default function Metadata() {
                   fields={fields}
                   dirty={dirty}
                   saving={saving}
+                  syncRename={syncRename}
                   onChange={update}
+                  onSyncRename={setSyncRename}
                   onSave={() => void save()}
                   onOpenRaw={() => setTab("nfo")}
                 />
@@ -1277,7 +1295,9 @@ function BasicTab({
   fields,
   dirty,
   saving,
+  syncRename,
   onChange,
+  onSyncRename,
   onSave,
   onOpenRaw,
 }: {
@@ -1286,7 +1306,9 @@ function BasicTab({
   fields: NfoFields;
   dirty: boolean;
   saving: boolean;
+  syncRename: boolean;
   onChange: (patch: Partial<NfoFields>) => void;
+  onSyncRename: (value: boolean) => void;
   onSave: () => void;
   onOpenRaw: () => void;
 }) {
@@ -1295,6 +1317,11 @@ function BasicTab({
   const locked = Boolean(slot && !slot.editable);
   /** 剧集目录下的视频信息来自第一集，标注一下免得误解 */
   const fromFirst = detail.video?.source === "first";
+
+  /** 剧名是否被改过 —— 改过才提示「同步重命名磁盘上的名字」 */
+  const oldTitle = (kind === "show" ? detail.fields.show.title : detail.fields.episode.showtitle) || "";
+  const newTitle = (kind === "show" ? fields.title : fields.showtitle).trim();
+  const nameChanged = Boolean(newTitle) && newTitle !== oldTitle.trim();
 
   return (
     <div className="space-y-4">
@@ -1394,15 +1421,38 @@ function BasicTab({
         />
       </div>
 
-      <div className="sticky bottom-0 -mx-4 flex items-center justify-between gap-2 border-t border-white/[0.06] bg-ink-850/95 px-4 py-3 backdrop-blur">
-        <span className="text-[11.5px] text-slate-500">
-          {dirty
-            ? "有未保存的修改"
-            : detail.download
-              ? `已同步 · ${formatDateTime(detail.download.finished_at)} 下载`
-              : "手动来源 · 已与磁盘同步"}
-        </span>
-        <div className="flex items-center gap-2">
+      <div className="sticky bottom-0 -mx-4 flex items-end justify-between gap-2 border-t border-white/[0.06] bg-ink-850/95 px-4 py-3 backdrop-blur">
+        <div className="min-w-0">
+          <span className="text-[11.5px] text-slate-500">
+            {dirty
+              ? "有未保存的修改"
+              : detail.download
+                ? `已同步 · ${formatDateTime(detail.download.finished_at)} 下载`
+                : "手动来源 · 已与磁盘同步"}
+          </span>
+          {nameChanged && (
+            <label
+              className="mt-1 flex cursor-pointer items-start gap-1.5 text-[11px] leading-snug text-slate-400"
+              title={
+                kind === "show"
+                  ? "剧名改了，连带把文件夹与每一集的文件名一起改掉"
+                  : "剧名改了，连带把文件名里的剧名前缀一起改掉（文件夹名等于原剧名时也会一起改）"
+              }
+            >
+              <input
+                type="checkbox"
+                className="mt-[1px] h-3.5 w-3.5 shrink-0 accent-brand-400"
+                checked={syncRename}
+                onChange={(e) => onSyncRename(e.target.checked)}
+              />
+              <span>
+                同时把磁盘上的名字改成「<span className="text-slate-200">{newTitle}</span>」
+                {kind === "show" ? "（文件夹 + 文件）" : "（文件，必要时含文件夹）"}
+              </span>
+            </label>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <Button size="sm" onClick={onOpenRaw} title="用原始 XML 编辑">
             <IconCode className="h-3.5 w-3.5" />
             原文

@@ -16,6 +16,7 @@ import { Badge, Button, Field, Spinner, StatusDot, Toggle, useToast } from "../c
 import PlatformPanel from "../components/PlatformPanel";
 import CollapsibleCard from "../components/CollapsibleCard";
 import AccountPanel from "../components/AccountPanel";
+import EmbySettingsPanel from "../components/EmbySettingsPanel";
 import {
   IconAlert,
   IconBot,
@@ -1254,6 +1255,9 @@ export default function Settings() {
 
       {/* 第三方平台：B站 / 小红书 / YouTube，引擎 yt-dlp */}
       <PlatformPanel />
+
+      {/* Emby 媒体库：媒体信息生成、入库通知与 Emby 端配置说明 */}
+      <EmbySettingsPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
       <CollapsibleCard

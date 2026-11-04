@@ -5,17 +5,16 @@ import { getSettings } from "../db";
 import { logger } from "../logger";
 
 /**
- * FFmpeg / ffprobe 定位与调用。
+ * FFmpeg 定位与调用。
  *
  * 解析顺序：
- *   1. 界面设置里的 ffmpeg_path（显式指定优先，找不到 ffprobe 就按同目录猜）
- *   2. 环境变量 FFMPEG_PATH / FFPROBE_PATH
+ *   1. 界面设置里的 ffmpeg_path（显式指定优先）
+ *   2. 环境变量 FFMPEG_PATH
  *   3. npm 平台包 @ffmpeg-installer（随项目安装，开箱可用）
  *   4. 系统 PATH 里的 ffmpeg
  *
- * ffprobe 是**可选**的：镜像里不再内置 @ffprobe-installer 二进制
- * （它单独就占 75MB，是镜像体积的大头）。当 ffprobe 不可用时，
- * probeVideo 会改用 `ffmpeg -i` 的 stderr 输出解析出同样的信息。
+ * 只用 ffmpeg 这一个二进制：媒体信息（时长 / 分辨率 / 编码 / 码率）走
+ * `ffmpeg -i` 的 stderr 解析（见 parseFfmpegProbe），不需要额外的探测程序。
  *
  * 视频截图失败不会影响下载主流程：拿不到二进制时接口会返回明确的原因，
  * 界面提示用户安装或填路径。
@@ -24,7 +23,6 @@ import { logger } from "../logger";
 export interface FfmpegInfo {
   available: boolean;
   ffmpeg: string | null;
-  ffprobe: string | null;
   source: "settings" | "env" | "bundled" | "path" | null;
   version: string | null;
   error: string | null;
@@ -41,19 +39,9 @@ function isFile(p: string): boolean {
   }
 }
 
-function siblingProbe(bin: string): string | null {
-  const dir = path.dirname(bin);
-  const base = path.basename(bin).toLowerCase();
-  const ext = path.extname(bin);
-  const candidate = base.startsWith("ffmpeg")
-    ? path.join(dir, base.replace(/^ffmpeg/, "ffprobe") + (ext || ""))
-    : "";
-  return candidate && isFile(candidate) ? candidate : null;
-}
-
 /** 同步解析一次路径候选，实际可用性由 run() 验证 */
-function resolveCandidates(): Array<{ ffmpeg: string; ffprobe: string | null; source: FfmpegInfo["source"] }> {
-  const out: Array<{ ffmpeg: string; ffprobe: string | null; source: FfmpegInfo["source"] }> = [];
+function resolveCandidates(): Array<{ ffmpeg: string; source: FfmpegInfo["source"] }> {
+  const out: Array<{ ffmpeg: string; source: FfmpegInfo["source"] }> = [];
 
   let setting = "";
   try {
@@ -62,41 +50,22 @@ function resolveCandidates(): Array<{ ffmpeg: string; ffprobe: string | null; so
     setting = "";
   }
   if (setting && isFile(setting)) {
-    out.push({ ffmpeg: setting, ffprobe: siblingProbe(setting), source: "settings" });
+    out.push({ ffmpeg: setting, source: "settings" });
   }
   const envPath = String(process.env.FFMPEG_PATH || "").trim();
   if (envPath && isFile(envPath)) {
-    out.push({
-      ffmpeg: envPath,
-      ffprobe: String(process.env.FFPROBE_PATH || "").trim() || siblingProbe(envPath),
-      source: "env",
-    });
+    out.push({ ffmpeg: envPath, source: "env" });
   }
-  for (const mod of ["@ffmpeg-installer/ffmpeg"]) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const resolved = require(mod) as { path?: string };
-      if (resolved?.path && isFile(resolved.path)) {
-        // ffprobe 是可选的：镜像里不再内置 @ffprobe-installer 二进制。
-        // 用户若自行装了同名包，或与 ffmpeg 同目录存在，就用它的；
-        // 否则留空，由 probeVideo 回退到 `ffmpeg -i` 解析。
-        let probe: string | null = null;
-        try {
-          // 用变量传模块名，避免打包期把这个可选依赖变成硬依赖
-          const optMod = "@ffprobe-installer/ffprobe";
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const p = require(optMod) as { path?: string };
-          if (p?.path && isFile(p.path)) probe = p.path;
-        } catch {
-          probe = siblingProbe(resolved.path);
-        }
-        out.push({ ffmpeg: resolved.path, ffprobe: probe, source: "bundled" });
-      }
-    } catch {
-      /* 没装就是没装，继续下一种 */
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const resolved = require("@ffmpeg-installer/ffmpeg") as { path?: string };
+    if (resolved?.path && isFile(resolved.path)) {
+      out.push({ ffmpeg: resolved.path, source: "bundled" });
     }
+  } catch {
+    /* 没装就是没装，继续下一种 */
   }
-  out.push({ ffmpeg: "ffmpeg", ffprobe: "ffprobe", source: "path" });
+  out.push({ ffmpeg: "ffmpeg", source: "path" });
   return out;
 }
 
@@ -149,15 +118,7 @@ export async function ffmpegInfo(force = false): Promise<FfmpegInfo> {
     try {
       const banner = await run(cand.ffmpeg, ["-version"], 8000);
       const version = /ffmpeg version (\S+)/i.exec(banner)?.[1] ?? null;
-      let ffprobe = cand.ffprobe;
-      if (ffprobe) {
-        try {
-          await run(ffprobe, ["-version"], 8000);
-        } catch {
-          ffprobe = null;
-        }
-      }
-      cached = { available: true, ffmpeg: cand.ffmpeg, ffprobe, source: cand.source, version, error: null };
+      cached = { available: true, ffmpeg: cand.ffmpeg, source: cand.source, version, error: null };
       cachedKey = key;
       return cached;
     } catch (err) {
@@ -167,7 +128,6 @@ export async function ffmpegInfo(force = false): Promise<FfmpegInfo> {
   cached = {
     available: false,
     ffmpeg: null,
-    ffprobe: null,
     source: null,
     version: null,
     error: lastError || "未找到 ffmpeg",
@@ -207,8 +167,7 @@ export interface VideoProbe {
  *     Stream #0:0[0x1](und): Video: h264 (High), yuv420p(tv, progressive), 1920x1080 [SAR 1:1 DAR 16:9], 1000 kb/s, 25 fps, 25 tbr, 12800 tbn
  *     Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 128 kb/s
  *
- * 镜像里不再内置 ffprobe 二进制（单独就占 75MB），没有它时走这条路，
- * 解析出来的字段与 ffprobe 保持一致。
+ * 这是本项目唯一的媒体信息探测路径：只有这一条，没有第二套回退。
  *
  * 导出供自检直接验证解析逻辑（不依赖真实二进制）。
  */
@@ -225,8 +184,8 @@ export function parseFfmpegProbe(stderr: string): VideoProbe | null {
   }
 
   // 总码率：Duration 行末尾的 bitrate
-  // ffmpeg 报的是 kb/s，ffprobe 报的是 bit/s —— 这里统一成 bit/s，
-  // 与 ffprobe 路径保持同一量纲，避免界面上一会儿显示 396 一会儿显示 398201。
+  // ffmpeg 报的是 kb/s，VideoProbe.bitrate 统一用 bit/s，
+  // 避免界面上一会儿显示 396 一会儿显示 398201。
   const bitrate = /Duration:[^\n]*?bitrate:\s*(\d+)\s*kb\/s/.exec(stderr)?.[1];
 
   // 视频流：编码 / 分辨率 / 帧率
@@ -257,54 +216,12 @@ export function parseFfmpegProbe(stderr: string): VideoProbe | null {
 }
 
 /**
- * 读取时长/分辨率/编码，失败返回 null（不影响编辑）。
+ * 读取时长 / 分辨率 / 编码，失败返回 null（不影响编辑）。
  *
- * 优先走 ffprobe（用户自备或在设置里指定了路径），
- * 没有 ffprobe 时回退到 `ffmpeg -i` 解析，两条路字段一致。
+ * 只走 `ffmpeg -i` 解析（容器里的时长为空、编码是 hevc 这些都能读出来）。
  */
 export async function probeVideo(file: string): Promise<VideoProbe | null> {
   const info = await ffmpegInfo();
-
-  if (info.ffprobe) {
-    try {
-      const raw = await run(
-        info.ffprobe,
-        ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file],
-        20_000,
-      );
-      const data = JSON.parse(raw) as {
-        format?: { duration?: string; bit_rate?: string; size?: string; format_name?: string };
-        streams?: Array<{
-          codec_type?: string;
-          codec_name?: string;
-          width?: number;
-          height?: number;
-          avg_frame_rate?: string;
-          r_frame_rate?: string;
-        }>;
-      };
-      const video = (data.streams ?? []).find((s) => s.codec_type === "video");
-      const audio = (data.streams ?? []).find((s) => s.codec_type === "audio");
-      const fpsRaw = video?.avg_frame_rate || video?.r_frame_rate || "";
-      const [num, den] = fpsRaw.split("/").map(Number);
-      const fps = num && den ? Math.round((num / den) * 100) / 100 : null;
-      return {
-        duration: data.format?.duration ? Number(data.format.duration) : null,
-        width: video?.width ?? null,
-        height: video?.height ?? null,
-        videoCodec: video?.codec_name ?? null,
-        audioCodec: audio?.codec_name ?? null,
-        bitrate: data.format?.bit_rate ? Number(data.format.bit_rate) : null,
-        fps,
-        container: data.format?.format_name ?? null,
-        sizeBytes: data.format?.size ? Number(data.format.size) : null,
-      };
-    } catch (err) {
-      logger.warn({ err: (err as Error).message, file }, "ffprobe 读取失败，改用 ffmpeg 解析");
-      // 不直接返回 null，继续尝试 ffmpeg 回退
-    }
-  }
-
   if (!info.ffmpeg) return null;
   try {
     const { stderr } = await runCapture(info.ffmpeg, ["-hide_banner", "-i", file], 20_000);

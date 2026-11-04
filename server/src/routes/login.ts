@@ -28,6 +28,18 @@ function withCookie(req: Request, res: Response, payload: { token: string; expir
 }
 
 /**
+ * 登录类响应统一带上 token，并且一律不缓存。
+ *
+ * 为什么响应体里也给 token：有些环境根本存不住 cookie —— 浏览器隐私设置拦掉、
+ * 嵌在沙箱 iframe 里（opaque origin）、或者反向代理把 Set-Cookie 吞了。
+ * 这种时候前端把 token 放 `X-Tgsub-Session` 头里照样能进，
+ * 总比「点登录没反应、一直回登录页」好。
+ */
+function noStore(res: Response): void {
+  res.setHeader("Cache-Control", "no-store");
+}
+
+/**
  * 界面启动时第一个请求。
  *
  * 三种状态一次说清：还没设置账号（引导初始化）、设置了但没登录（显示登录框）、
@@ -38,6 +50,7 @@ sessionRouter.get(
   asyncHandler(async (req, res) => {
     const account = getAccount();
     const session = currentSession(req);
+    noStore(res);
     res.json({
       configured: Boolean(account),
       authenticated: Boolean(session) || env.authDisabled,
@@ -62,10 +75,12 @@ sessionRouter.post(
       confirm: req.body?.confirm,
     });
     withCookie(req, res, result, true);
+    noStore(res);
     res.status(201).json({
       ok: true,
       username: result.account.username,
       expiresAt: result.expiresAt,
+      token: result.token,
     });
   }),
 );
@@ -80,7 +95,8 @@ sessionRouter.post(
       remember,
     });
     withCookie(req, res, result, remember);
-    res.json({ ok: true, username: result.username, expiresAt: result.expiresAt });
+    noStore(res);
+    res.json({ ok: true, username: result.username, expiresAt: result.expiresAt, token: result.token });
   }),
 );
 
@@ -89,6 +105,7 @@ sessionRouter.post(
   asyncHandler(async (req, res) => {
     destroySession(req);
     clearCookie(req, res);
+    noStore(res);
     res.json({ ok: true });
   }),
 );
@@ -105,7 +122,8 @@ sessionRouter.put(
     });
     // updateAccount 内部已经把其它设备的旧会话清干净，并给当前设备补发了新会话
     withCookie(req, res, result, true);
-    res.json({ ok: true, username: result.account.username });
+    noStore(res);
+    res.json({ ok: true, username: result.account.username, token: result.token, expiresAt: result.expiresAt });
   }),
 );
 

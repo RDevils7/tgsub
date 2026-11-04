@@ -210,7 +210,7 @@ systemRouter.post(
   }),
 );
 
-/** ffmpeg / ffprobe 的实际路径与版本（界面要显示「现在用的是哪个」） */
+/** ffmpeg 的实际路径与版本（界面要显示「现在用的是哪个」） */
 systemRouter.get(
   "/ffmpeg",
   asyncHandler(async (req, res) => {

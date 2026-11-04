@@ -66,7 +66,9 @@ import {
   shouldRunCheck,
 } from "../server/src/platform/updateplan";
 import {
+  applyOrder,
   buildRenamePlan,
+  canRenameDir,
   countEffective,
   episodeFileName,
   naturalCompare,
@@ -77,7 +79,7 @@ import {
 } from "../server/src/tg/renameplan";
 import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
-import { parseCookie } from "../server/src/auth/cookie";
+import { parseCookie, parseCookies } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
@@ -900,8 +902,8 @@ async function logStoreChecks(): Promise<void> {
 }
 
 /**
- * ffmpeg -i 解析器：镜像里不再内置 ffprobe 二进制（省 75MB），
- * 元数据探测改走 `ffmpeg -i` 的 stderr 解析，这里验证解析结果与 ffprobe 一致。
+ * ffmpeg -i 解析器：项目里唯一的媒体信息探测路径（只有 ffmpeg 一个二进制），
+ * 这里验证从 stderr 抽出的时长 / 分辨率 / 编码 / 码率是否准确。
  */
 async function ffmpegProbeChecks(): Promise<void> {
   const { parseFfmpegProbe } = await import("../server/src/tg/ffmpeg");
@@ -932,9 +934,9 @@ async function ffmpegProbeChecks(): Promise<void> {
     assert.ok(Math.abs((probe.duration ?? 0) - 5.02) < 0.01, `duration=${probe.duration}`);
   });
 
-  await acheck("ffmpeg 解析的码率换算成 bit/s（与 ffprobe 同量纲）", async () => {
+  await acheck("ffmpeg 解析的码率换算成 bit/s", async () => {
     const probe = parseFfmpegProbe(stderr);
-    // ffmpeg 报 396 kb/s → 396000 bit/s；ffprobe 报 398201（整数 kb/s 舍入误差内）
+    // ffmpeg 报 396 kb/s → 396000 bit/s（统一量纲，界面不会一会儿 396 一会儿 398201）
     assert.equal(probe?.bitrate, 396000);
   });
 
@@ -2101,6 +2103,56 @@ function renamePlanChecks(): void {
     assert.equal(plan.items[2].to, path.resolve("/media/我的剧", "我的剧S01E03.mp4"));
   });
 
+  check("确认顺序：applyOrder 完全按用户给的路径顺序重排", () => {
+    const sources = [src("a.mp4", 1), src("b.mp4", 2), src("c.mp4", 3)];
+    const ordered = applyOrder(sources, ["/media/剧/c.mp4", "/media/剧/a.mp4", "/media/剧/b.mp4"]);
+    assert.deepEqual(ordered.map((s) => s.name), ["c.mp4", "a.mp4", "b.mp4"]);
+    // 不改入参
+    assert.deepEqual(sources.map((s) => s.name), ["a.mp4", "b.mp4", "c.mp4"]);
+  });
+
+  check("确认顺序：没出现在 order 里的文件按原序垫在末尾，不丢文件", () => {
+    const sources = [src("a.mp4", 1), src("b.mp4", 2), src("c.mp4", 3)];
+    const ordered = applyOrder(sources, ["/media/剧/b.mp4"]);
+    assert.deepEqual(ordered.map((s) => s.name), ["b.mp4", "a.mp4", "c.mp4"]);
+  });
+
+  check("确认顺序：buildRenamePlan 按 order 编号，而不是按原集号", () => {
+    const plan = buildRenamePlan({
+      sources: [src("第3集.mp4", 3), src("第1集.mp4", 1)],
+      title: "剧名",
+      targetDir: "/media/剧名",
+      // 用户把「第3集」拖到第一位
+      order: ["/media/剧/第3集.mp4", "/media/剧/第1集.mp4"],
+    });
+    assert.deepEqual(plan.items.map((i) => i.oldEpisode), [3, 1]);
+    assert.deepEqual(
+      plan.items.map((i) => i.newEpisode),
+      [1, 2],
+    );
+    assert.ok(plan.items[0].to.endsWith("剧名S01E01.mp4"));
+  });
+
+  check("保存改名：目录名等于旧剧名时才允许把目录一起改", () => {
+    assert.ok(canRenameDir("美人局", "美人局"));
+    // 清洗后的比较：剧名前后的空格会被去掉
+    assert.ok(canRenameDir("美人局", "  美人局  "));
+    // 大小写差异在 Windows 上是同一个名字
+    assert.ok(canRenameDir("The Show", "the show"));
+    // 非法字符会被替换成下划线，清洗后与目录名不一致 → 保守地不动目录
+    assert.equal(canRenameDir("美人局", "美人/局"), false);
+  });
+
+  check("保存改名：平台目录 / 外部大目录不会被当成剧集目录", () => {
+    // 目录名不等于旧剧名 → 只改文件名，不动目录
+    assert.equal(canRenameDir("telegram", "美人局"), false);
+    assert.equal(canRenameDir("影片", "美人局"), false);
+    assert.equal(canRenameDir("Season 01", "美人局"), false);
+    // 旧剧名为空（还没有 tvshow.nfo）时一律不动目录
+    assert.equal(canRenameDir("美人局", ""), false);
+    assert.equal(canRenameDir("美人局", "   "), false);
+  });
+
   check("保留原扩展名（mkv 不会变成 mp4）", () => {
     const plan = buildRenamePlan({
       sources: [src("第一集.mkv", 1)],
@@ -2419,6 +2471,23 @@ async function loginChecks(): Promise<void> {
     assert.equal(parseCookie("tgsub_sid=a%3Db%26c", "tgsub_sid"), "a=b&c");
     // 孤立的 % 不合法，按原样返回，而不是当作没有
     assert.equal(parseCookie("tgsub_sid=bad%zz", "tgsub_sid"), "bad%zz");
+  });
+
+  /**
+   * 浏览器可能同时发多个同名 cookie（换了访问地址、旧版本写过一份）。
+   * 校验会话时要挨个试 —— 只认第一个的话，排在前面那份失效的旧 cookie
+   * 会让「登录成功 → 马上又弹回登录页」反复发生。
+   */
+  check("Cookie 解析：同名多值全部解出来，顺序保持不变", () => {
+    const values = parseCookies("tgsub_sid=old; theme=dark; tgsub_sid=new", "tgsub_sid");
+    assert.equal(values.length, 2);
+    assert.equal(values[0], "old");
+    assert.equal(values[1], "new");
+    // parseCookie 保持「只取第一个」的旧语义
+    assert.equal(parseCookie("tgsub_sid=old; tgsub_sid=new", "tgsub_sid"), "old");
+    // 空值不计入（浏览器偶尔会带 name= 的空 cookie）
+    assert.equal(parseCookies("tgsub_sid=; tgsub_sid=ok", "tgsub_sid").length, 1);
+    assert.deepEqual(parseCookies(null, "tgsub_sid"), []);
   });
 }
 
@@ -2889,7 +2958,7 @@ function overviewChecks(): void {
 
   check("概览汇总：跨分组统计，未启用不计入待处理", () => {
     const s = summarizeProbes([
-      [probe("ok", "ffmpeg"), probe("warn", "ffprobe", "缺 ffprobe"), probe("off", "机器人")],
+      [probe("ok", "ffmpeg"), probe("warn", "sharp", "图片处理降级"), probe("off", "机器人")],
       [probe("error", "yt-dlp", "没装"), probe("ok", "队列")],
     ]);
     assert.equal(s.ok, 2);
@@ -2902,10 +2971,10 @@ function overviewChecks(): void {
 
   check("概览汇总：异常排前面，同级保持原顺序", () => {
     const s = summarizeProbes([
-      [probe("warn", "ffprobe", "缺"), probe("error", "ffmpeg", "挂了"), probe("warn", "sharp", "降级")],
+      [probe("warn", "yt-dlp", "旧版"), probe("error", "ffmpeg", "挂了"), probe("warn", "sharp", "降级")],
     ]);
     assert.equal(s.overall, "error");
-    assert.deepEqual(s.issues, ["ffmpeg：挂了", "ffprobe：缺", "sharp：降级"]);
+    assert.deepEqual(s.issues, ["ffmpeg：挂了", "yt-dlp：旧版", "sharp：降级"]);
   });
 
   check("概览汇总：只有留意或全未启用时整体状态正确", () => {
@@ -3174,6 +3243,200 @@ function nfoTraceChecks(): void {
   });
 }
 
+async function embyViewChecks(): Promise<void> {
+  // embyview 顶层 import 了 db，动态引入避免自检一启动就建库
+  const { toCard } = await import("../server/src/tg/embyview");
+
+  check("媒体卡片：评分保留一位小数并四舍五入", () => {
+    assert.equal(toCard({ Id: "a", Name: "x", CommunityRating: 8.46 }).rating, 8.5);
+    assert.equal(toCard({ Id: "a", Name: "x", CommunityRating: 7 }).rating, 7);
+  });
+
+  check("媒体卡片：缺少年份 / 评分 / 片长时给 null，不显示成 0", () => {
+    const card = toCard({ Id: "a", Name: "x" });
+    assert.equal(card.rating, null);
+    assert.equal(card.year, null);
+    assert.equal(card.runtimeMinutes, null);
+    assert.equal(card.imageTag, null);
+  });
+
+  check("媒体卡片：RunTimeTicks 换算成分钟", () => {
+    assert.equal(toCard({ Id: "a", Name: "x", RunTimeTicks: 6_000_000_000 }).runtimeMinutes, 10);
+  });
+
+  check("媒体卡片：季集号与已看进度（按秒）", () => {
+    const card = toCard({
+      Id: "e",
+      Name: "第2集",
+      Type: "Episode",
+      ParentIndexNumber: 1,
+      IndexNumber: 2,
+      UserData: { Played: false, PlaybackPositionTicks: 30_000_000 },
+    });
+    assert.equal(card.season, 1);
+    assert.equal(card.episode, 2);
+    assert.equal(card.played, false);
+    assert.equal(card.positionSeconds, 3);
+  });
+
+  check("媒体卡片：容器与分辨率取第一个媒体源里的视频轨", () => {
+    const card = toCard({
+      Id: "m",
+      Name: "x",
+      MediaSources: [
+        { Container: "MKV", MediaStreams: [{ Type: "Audio", Height: 0 }, { Type: "Video", Height: 2160 }] },
+      ],
+    });
+    assert.equal(card.container, "MKV");
+    assert.equal(card.height, 2160);
+  });
+}
+
+/**
+ * 本地媒体库：封面槽位查找与「怎么播」的判定。
+ *
+ * 这两件事决定了界面上的两个关键表现 —— 有没有海报、点下去能不能播，
+ * 所以单独盯住，别让后来改封面命名或加扩展名时悄悄退化。
+ */
+async function mediaLibChecks(): Promise<void> {
+  // medialib 顶层 import 了 db / env，动态引入避免自检一启动就建库
+  const { existingEpisodeThumb, findSeriesArt, isTrialCodec, playModeOf, thumbTimeFor } = await import(
+    "../server/src/tg/medialib"
+  );
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tgsub-medialib-"));
+  const touch = (file: string) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "x");
+  };
+
+  try {
+    check("封面：优先用目录里的 poster 槽位", () => {
+      const dir = path.join(root, "a");
+      touch(path.join(dir, "poster.jpg"));
+      touch(path.join(dir, "fanart.jpg"));
+      const art = findSeriesArt(dir);
+      assert.equal(path.basename(art.poster ?? ""), "poster.jpg");
+      assert.equal(path.basename(art.landscape ?? ""), "fanart.jpg");
+    });
+
+    check("封面：没有海报时回退到第一集的缩略图", () => {
+      const dir = path.join(root, "b");
+      const video = path.join(dir, "剧名S01E01.mp4");
+      touch(video);
+      touch(path.join(dir, "剧名S01E01-thumb.jpg"));
+      const art = findSeriesArt(dir, video);
+      assert.equal(path.basename(art.poster ?? ""), "剧名S01E01-thumb.jpg");
+    });
+
+    check("封面：什么都没有就返回 null，界面显示占位", () => {
+      const dir = path.join(root, "c");
+      fs.mkdirSync(dir, { recursive: true });
+      assert.equal(findSeriesArt(dir).poster, null);
+    });
+
+    const probe = (codec: string | null) => ({
+      duration: 1,
+      width: 1920,
+      height: 1080,
+      videoCodec: codec,
+      audioCodec: "aac",
+      bitrate: 1000,
+      fps: 25,
+      container: "matroska",
+      sizeBytes: 100,
+    });
+
+    check("播放：mp4 + h264 走原生直出（可拖进度条）", () => {
+      assert.equal(playModeOf("a.mp4", probe("h264")), "direct");
+      assert.equal(playModeOf("a.webm", probe("vp9")), "direct");
+    });
+
+    check("播放：mkv / ts 里的 h264 换封装后能播", () => {
+      assert.equal(playModeOf("a.mkv", probe("h264")), "remux");
+      assert.equal(playModeOf("a.ts", probe("h264")), "remux");
+      assert.equal(playModeOf("a.AVI", probe("mpeg4")), "remux");
+    });
+
+    check("播放：HEVC / H.265 默认判为不支持，别假装能播", () => {
+      assert.equal(playModeOf("a.mp4", probe("hevc")), "unsupported");
+      assert.equal(playModeOf("a.mkv", probe("hevc")), "unsupported");
+      assert.equal(playModeOf("a.mp4", probe("h265")), "unsupported");
+      // 关掉开关与不传 opts 的行为必须一致（默认不变）
+      assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: false }), "unsupported");
+    });
+
+    check("播放：开了 HEVC 试播后按容器决定直出还是换封装", () => {
+      // mp4 装 HEVC：浏览器能不能解由它自己说，服务端不再拦
+      assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: true }), "direct");
+      assert.equal(playModeOf("a.m4v", probe("h265"), { allowHevc: true }), "direct");
+      // mkv / ts 装 HEVC：换封装只换壳、编码还是 HEVC，但至少给了浏览器一次机会
+      assert.equal(playModeOf("a.mkv", probe("hevc"), { allowHevc: true }), "remux");
+      assert.equal(playModeOf("a.ts", probe("h265"), { allowHevc: true }), "remux");
+    });
+
+    check("播放：试播开关只放行 HEVC，别的怪编码仍然拦下", () => {
+      // prores / mpeg2 这些不是「看浏览器」的问题，开了开关也不该放过去
+      assert.equal(playModeOf("a.mov", probe("prores"), { allowHevc: true }), "unsupported");
+      assert.equal(playModeOf("a.mpg", probe("mpeg2video"), { allowHevc: true }), "unsupported");
+      // 正常编码不受开关影响
+      assert.equal(playModeOf("a.mp4", probe("h264"), { allowHevc: true }), "direct");
+      assert.equal(playModeOf("a.mkv", probe("h264"), { allowHevc: true }), "remux");
+    });
+
+    check("播放：isTrialCodec 只认 hevc / h265，大小写不敏感", () => {
+      assert.equal(isTrialCodec("hevc"), true);
+      assert.equal(isTrialCodec("H265"), true);
+      assert.equal(isTrialCodec("h264"), false);
+      assert.equal(isTrialCodec(null), false);
+      assert.equal(isTrialCodec(""), false);
+    });
+
+    check("播放：探测不到编码时按容器兜底", () => {
+      assert.equal(playModeOf("a.mp4", null), "direct");
+      assert.equal(playModeOf("a.mkv", null), "remux");
+      // 编码名大小写不敏感
+      assert.equal(playModeOf("a.MKV", probe("H264")), "remux");
+    });
+
+    check("单集缩略图：优先用下载时生成好的 -thumb 图", () => {
+      const dir = path.join(root, "t1");
+      const video = path.join(dir, "第1集.mp4");
+      touch(video);
+      touch(path.join(dir, "第1集-thumb.jpg"));
+      assert.equal(path.basename(existingEpisodeThumb(video) ?? ""), "第1集-thumb.jpg");
+    });
+
+    check("单集缩略图：没有 -thumb 时才退到同名图片，再没有就返回 null", () => {
+      const dir = path.join(root, "t2");
+      const video = path.join(dir, "第2集.mkv");
+      touch(video);
+      // 同名 jpg 也要认（有些下载会直接存 <base>.jpg）
+      touch(path.join(dir, "第2集.jpg"));
+      assert.equal(path.basename(existingEpisodeThumb(video) ?? ""), "第2集.jpg");
+
+      const bare = path.join(root, "t3", "第3集.mp4");
+      touch(bare);
+      assert.equal(existingEpisodeThumb(bare), null);
+    });
+
+    check("单集缩略图：抽帧位置跳过片头，短视频退回第一帧", () => {
+      // 长片取 12% 处，且不早于 3 秒
+      assert.equal(thumbTimeFor(600), 72);
+      assert.equal(thumbTimeFor(20), 3);
+      // 太短（<5 秒）直接第 0 秒，免得 ffmpeg 抽到空帧
+      assert.equal(thumbTimeFor(3), 0);
+      // 时长未知时取一个保守的中间位置
+      assert.equal(thumbTimeFor(null), 6);
+      // 结尾前留 1 秒，避免越界
+      assert.ok(thumbTimeFor(10) <= 9);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -3182,6 +3445,8 @@ async function main(): Promise<void> {
     ["权限检查用例", () => permissionChecks()],
     ["Emby 用例", () => embyChecks()],
     ["Emby 入库用例", () => embyNotifyChecks()],
+    ["Emby 媒体库用例", () => embyViewChecks()],
+    ["本地媒体库用例", () => mediaLibChecks()],
     ["缓存清理用例", () => cacheChecks()],
     ["网络代理用例", () => proxyChecks()],
     ["网络线路用例", () => netRouteChecks()],

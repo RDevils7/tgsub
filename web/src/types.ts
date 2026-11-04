@@ -612,6 +612,80 @@ export interface EmbyProbeResult {
   url?: string;
 }
 
+/* ------------------------------ 本地媒体库 ------------------------------ */
+
+/** 可以切换的库位置（下载根 / 各平台目录 / 手动登记的来源） */
+export interface MediaRoot {
+  path: string;
+  label: string;
+  rel: string;
+  kind: "root" | "platform" | "source";
+}
+
+export interface MediaEpisode {
+  path: string;
+  name: string;
+  title: string;
+  /** 本集简介（单集 NFO 的 plot），没有就是空串 */
+  plot: string;
+  season: number | null;
+  episode: number | null;
+  size: number;
+  updatedAt: number;
+  durationSec: number | null;
+  width: number | null;
+  height: number | null;
+  videoCodec: string | null;
+  /** direct = 原生播放（可拖进度条），remux = 服务端换封装，unsupported = 播不了 */
+  playMode: "direct" | "remux" | "unsupported";
+  /** 播放地址（已按 playMode 选好模式） */
+  streamUrl: string;
+  /** 缩略图地址（下载时生成的图或服务端抽帧，取不到图时为 null） */
+  thumbUrl: string | null;
+  /**
+   * 这一集本来会被判成「浏览器不支持」，是因为打开了
+   * 「我的浏览器能放 HEVC，强制尝试」才变成可播的 —— 界面上标「试播」。
+   */
+  trial?: boolean;
+}
+
+export interface MediaSeries {
+  dir: string;
+  name: string;
+  title: string;
+  year: number | null;
+  overview: string;
+  genres: string[];
+  rating: number | null;
+  episodeCount: number;
+  totalSize: number;
+  updatedAt: number;
+  hasNfo: boolean;
+  origin: string;
+  firstVideo: string | null;
+  posterUrl: string | null;
+  landscapeUrl: string | null;
+}
+
+export interface MediaLibraryResponse {
+  ok: boolean;
+  dir: string;
+  parent: string | null;
+  home: string;
+  roots: MediaRoot[];
+  /** 这个目录自己就是一部剧（用户已经点进来了） */
+  isSeries: boolean;
+  series: MediaSeries[];
+  loose: MediaEpisode[];
+}
+
+export interface MediaSeriesResponse {
+  ok: boolean;
+  dir: string;
+  series: MediaSeries;
+  episodes: MediaEpisode[];
+}
+
 export type QrStatus = "idle" | "waiting" | "scanned" | "password" | "success" | "error";
 
 export interface QrState {
@@ -888,7 +962,6 @@ export interface VideoProbe {
 export interface FfmpegInfo {
   available: boolean;
   ffmpeg: string | null;
-  ffprobe: string | null;
   source: "settings" | "env" | "bundled" | "path" | null;
   version: string | null;
   error: string | null;
@@ -949,6 +1022,19 @@ export interface MetadataDetail {
   } | null;
 }
 
+/** 保存元数据时联动改名的结果（失败不影响 NFO 已保存的事实） */
+export interface MetaRenameResult {
+  applied: boolean;
+  key?: string;
+  dir?: string;
+  /** 目录本身是否也搬了位置 */
+  dirMoved?: boolean;
+  moved?: number;
+  sidecars?: number;
+  nfoUpdated?: number;
+  error?: string;
+}
+
 export interface FrameCandidate {
   index: number;
   at: number;
@@ -1000,7 +1086,7 @@ export interface ServiceProbe {
   status: ProbeStatus;
   value: string;
   note: string | null;
-  page: "settings" | "channels" | "downloads" | "emby" | "logs" | "manual" | "metadata" | null;
+  page: "settings" | "channels" | "downloads" | "logs" | "manual" | "metadata" | null;
 }
 
 export interface StorageDirProbe {

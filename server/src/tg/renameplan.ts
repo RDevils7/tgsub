@@ -117,6 +117,20 @@ export function seriesDirName(title: string): string {
   return sanitizeSegment(title, 120) || "未命名";
 }
 
+/**
+ * 保存元数据时，「目录名」该不该跟着新剧名一起改。
+ *
+ * 只有当目录名本来就等于**旧剧名**时才允许动它。否则那个目录很可能是
+ * 平台目录（`telegram` / `B站`）或用户自己的大目录（`D:\影片`），
+ * 跟着剧名改一次就会把上层结构全搬走 —— 这种情况只改文件名、不动目录。
+ */
+export function canRenameDir(dirName: string, oldTitle: string): boolean {
+  const title = sanitizeSegment(oldTitle ?? "", 120);
+  if (!title) return false;
+  // Windows 上大小写不敏感，比较前统一小写
+  return seriesDirName(dirName).toLowerCase() === title.toLowerCase();
+}
+
 export interface BuildPlanInput {
   sources: readonly EpisodeSource[];
   /** 用户填的剧名（会被清洗成合法目录名 / 文件名） */
@@ -127,6 +141,46 @@ export interface BuildPlanInput {
   existingNames?: ExistingNames;
   /** 临时名前缀，测试里可覆盖 */
   tmpPrefix?: string;
+  /**
+   * 用户在确认面板里排好的顺序（绝对路径列表）。
+   *
+   * 给了就完全按这个顺序编号，不再按集号 / 文件名自动排 ——
+   * 用户在界面上「确认好顺序」之后，落盘必须与看到的一致。
+   * 列表没覆盖到的源文件保持原自然序排在后面（兜底，不会丢文件）。
+   */
+  order?: readonly string[];
+}
+
+/** 把路径规整成排序用的比较键（Windows 大小写不敏感） */
+function orderKey(p: string): string {
+  const abs = path.resolve(p);
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
+
+/**
+ * 按用户确认的顺序重排源文件。
+ *
+ * `order` 里没出现的文件不会丢，按原顺序垫在末尾；同一位置重复出现的以第一次为准。
+ * 返回值是新数组，不改入参。
+ */
+export function applyOrder<T extends EpisodeSource>(
+  sources: readonly T[],
+  order: readonly string[] | undefined,
+): T[] {
+  if (!order || order.length === 0) return [...sources];
+  const index = new Map<string, number>();
+  order.forEach((p, i) => {
+    const key = orderKey(p);
+    if (!index.has(key)) index.set(key, i);
+  });
+  return [...sources].sort((a, b) => {
+    const ia = index.get(orderKey(a.path));
+    const ib = index.get(orderKey(b.path));
+    if (ia === undefined && ib === undefined) return 0;
+    if (ia === undefined) return 1;
+    if (ib === undefined) return -1;
+    return ia - ib;
+  });
 }
 
 /**
@@ -138,7 +192,8 @@ export interface BuildPlanInput {
 export function buildRenamePlan(input: BuildPlanInput): RenamePlan {
   const title = sanitizeSegment(input.title, 120) || "未命名";
   const targetDir = path.resolve(input.targetDir);
-  const sorted = sortEpisodeSources(input.sources);
+  // 用户确认过顺序就照它排；否则按集号 / 文件名自然序
+  const sorted = applyOrder(sortEpisodeSources(input.sources), input.order);
 
   const warnings: string[] = [];
   const seasons = [...new Set(sorted.map((s) => s.season ?? 1))];

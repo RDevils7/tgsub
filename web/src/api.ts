@@ -11,6 +11,8 @@ import type {
   EmbyNotifyRecord,
   EmbyProbeResult,
   EmbyStatus,
+  MediaLibraryResponse,
+  MediaSeriesResponse,
   CacheActionResult,
   CacheStats,
   BotTestResult,
@@ -31,6 +33,7 @@ import type {
   MetadataDeletePlan,
   MetadataDeleteResult,
   MetadataExcludedItem,
+  MetaRenameResult,
   MetadataTransferResponse,
   RenamePlanPreview,
   RenameExecuteResult,
@@ -66,11 +69,50 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 会话令牌的兜底存放。
+ *
+ * 正常情况靠 httpOnly cookie，浏览器会自动带上。但有些环境根本存不住 cookie：
+ * 隐私设置拦掉、嵌在沙箱 iframe（opaque origin）里、或者反向代理把 Set-Cookie 吞了 ——
+ * 表现为「点登录没反应，一直回登录页」。这时登录接口会在响应体里给一个 token，
+ * 前端存下来、每个请求放进 `X-Tgsub-Session` 头，服务端两种凭据都认。
+ */
+const TOKEN_KEY = "tgsub.session";
+
+function readToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    // 无痕 / 沙箱环境里 localStorage 会抛错，退化成「本次页面内有效」
+    return "";
+  }
+}
+
+let sessionToken = readToken();
+
+export function setSessionToken(token: string): void {
+  sessionToken = token;
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* 存不住就只在内存里用，刷新后重新登录 */
+  }
+}
+
+export function clearSessionToken(): void {
+  sessionToken = "";
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* 同上 */
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (sessionToken) headers.set("X-Tgsub-Session", sessionToken);
+  const res = await fetch(`/api${path}`, { credentials: "same-origin", ...init, headers });
   const text = await res.text();
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!res.ok) {
@@ -78,6 +120,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // 会话过期或被清掉时，任何一次接口调用都会拿到 401。
     // 抛个全局事件让外层切回登录页，好过每个页面各写一遍错误处理。
     if (res.status === 401 && (payload.code === "LOGIN_REQUIRED" || payload.code === "SETUP_REQUIRED")) {
+      clearSessionToken();
       window.dispatchEvent(new CustomEvent("tgsub:unauthorized"));
     }
     throw new ApiError(res.status, payload.error || `请求失败 (${res.status})`, payload.code);
@@ -96,12 +139,12 @@ export const api = {
   sessionState: () => request<SessionState>("/session/state"),
   /** 首次初始化账号，成功后服务端直接下发 cookie */
   sessionSetup: (payload: { username: string; password: string; confirm: string }) =>
-    request<{ ok: boolean; username: string }>("/session/setup", {
+    request<{ ok: boolean; username: string; token?: string }>("/session/setup", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
   sessionLogin: (payload: { username: string; password: string; remember: boolean }) =>
-    request<{ ok: boolean; username: string }>("/session/login", {
+    request<{ ok: boolean; username: string; token?: string }>("/session/login", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -293,6 +336,16 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
+  /* ------------------------------ 本地媒体库 ------------------------------ */
+  /** 列目录里的剧集；不传 dir 就是下载根。hevc=true 表示这台浏览器要强制尝试 HEVC */
+  mediaLibrary: (dir?: string, hevc = false) => {
+    const query = [dir ? `dir=${encodeURIComponent(dir)}` : "", hevc ? "hevc=1" : ""].filter(Boolean).join("&");
+    return request<MediaLibraryResponse>(`/media/library${query ? `?${query}` : ""}`);
+  },
+  /** 一部剧的详情 + 全部分集 */
+  mediaSeries: (dir: string, hevc = false) =>
+    request<MediaSeriesResponse>(`/media/series?dir=${encodeURIComponent(dir)}${hevc ? "&hevc=1" : ""}`),
+
   /* ------------------------------ 缓存 ------------------------------ */
   cacheStatus: () => request<CacheStats>("/cache/status"),
   /** 按上限立即清理（忽略「最近 10 分钟不动」的保护） */
@@ -453,18 +506,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ key, title }),
     }),
-  /** 合并预览：把散在不同文件夹里的视频并成一部剧 */
-  previewMerge: (keys: string[], title: string, dir?: string) =>
+  /** 合并预览：把散在不同文件夹里的视频并成一部剧；order 为用户确认过的顺序 */
+  previewMerge: (keys: string[], title: string, dir?: string, order?: string[]) =>
     request<{ ok: boolean; dryRun: true; plan: RenamePlanPreview; count: number; merged: number }>(
       "/metadata/merge",
-      { method: "POST", body: JSON.stringify({ keys, title, dir, dryRun: true }) },
+      { method: "POST", body: JSON.stringify({ keys, title, dir, order, dryRun: true }) },
     ),
   /** 合并执行 */
-  mergeSeries: (keys: string[], title: string, dir?: string) =>
+  mergeSeries: (keys: string[], title: string, dir?: string, order?: string[]) =>
     request<RenameExecuteResult>("/metadata/merge", {
       method: "POST",
-      body: JSON.stringify({ keys, title, dir }),
+      body: JSON.stringify({ keys, title, dir, order }),
     }),
+  /** 目标目录的剧集信息：移动时「一键更新为当前剧集信息」的默认剧名 */
+  metadataSeriesInfo: (dir: string) =>
+    request<{ ok: boolean; dir: string; title: string; hasNfo: boolean; videoCount: number }>(
+      `/metadata/series-info?dir=${encodeURIComponent(dir)}`,
+    ),
   /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录 */
   metadataBrowse: (path?: string) =>
     request<BrowseResult>(`/metadata/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
@@ -485,10 +543,10 @@ export const api = {
     request<{ ffmpeg: FfmpegInfo; sharp: boolean; settings: { ffmpeg_path: string } }>(
       `/metadata/tools/status${refresh ? "?refresh=1" : ""}`,
     ),
-  saveMetaFields: (key: string, kind: "episode" | "show", fields: NfoFields) =>
-    request<{ ok: boolean; nfo: string; fields: NfoFields }>("/metadata/meta", {
+  saveMetaFields: (key: string, kind: "episode" | "show", fields: NfoFields, renameFiles = false) =>
+    request<{ ok: boolean; nfo: string; fields: NfoFields; rename: MetaRenameResult | null }>("/metadata/meta", {
       method: "PUT",
-      body: JSON.stringify({ key, kind, fields }),
+      body: JSON.stringify({ key, kind, fields, renameFiles }),
     }),
   readNfo: (key: string, kind: "episode" | "show") =>
     request<{ exists: boolean; file: string; content: string }>(

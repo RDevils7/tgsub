@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, setSessionToken } from "../api";
 import type { SessionState } from "../types";
 import { IconEye, IconEyeOff } from "../components/icons";
 import { Spinner } from "../components/ui";
@@ -80,10 +80,20 @@ export default function Login({ state, onDone }: { state: SessionState; onDone: 
 
     setBusy(true);
     try {
-      if (mode === "setup") {
-        await api.sessionSetup({ username: username.trim(), password, confirm });
-      } else {
-        await api.sessionLogin({ username: username.trim(), password, remember });
+      // 服务端除了写 cookie，还会把 token 放进响应体 —— 存住它，
+      // 浏览器拒收 cookie 时（隐私设置 / 沙箱 iframe / 代理吞 Set-Cookie）还有条路。
+      const result =
+        mode === "setup"
+          ? await api.sessionSetup({ username: username.trim(), password, confirm })
+          : await api.sessionLogin({ username: username.trim(), password, remember });
+      if (result.token) setSessionToken(result.token);
+
+      // 登录接口成功 ≠ 一定进得去：cookie 被拦掉时状态仍是「未登录」。
+      // 当场核对一次，把原因说清楚，省得用户对着登录页反复点（日志里就是几十条登录成功）。
+      const next = await api.sessionState().catch(() => null);
+      if (next && !next.authenticated && !next.authDisabled) {
+        setError("登录成功，但浏览器没有保存登录状态。请确认没有禁用 Cookie、不在无痕或内嵌预览窗口里，然后刷新页面重试。");
+        return;
       }
       onDone();
     } catch (err) {

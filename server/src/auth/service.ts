@@ -4,7 +4,7 @@ import { db, getSetting, setSetting } from "../db";
 import { env } from "../env";
 import { HttpError } from "../lib/http";
 import { logger } from "../logger";
-import { parseCookie } from "./cookie";
+import { parseCookie, parseCookies } from "./cookie";
 import {
   confirmProblem,
   hashPassword,
@@ -176,38 +176,74 @@ export function readCookie(req: Request, name: string): string {
   return parseCookie(req.headers.cookie, name);
 }
 
+/**
+ * 请求里可能携带会话凭据的地方，按优先级：
+ *   1. cookie（正常路径，httpOnly 更安全）
+ *   2. `X-Tgsub-Session` 请求头（浏览器拒绝存 cookie 时的兜底：隐私插件、
+ *      内嵌 iframe、反向代理吞掉 Set-Cookie 都会让 cookie 方案失效，
+ *      这种环境下登录接口会把 token 放在响应体里，前端改用它）
+ */
+export const SESSION_HEADER = "x-tgsub-session";
+
+function sessionTokens(req: Request): string[] {
+  const tokens = parseCookies(req.headers.cookie, COOKIE_NAME);
+  const header = String(req.headers[SESSION_HEADER] ?? "").trim();
+  if (header) tokens.push(header.replace(/^Bearer\s+/i, ""));
+  // 去重但保序
+  return tokens.filter((token, index) => token && tokens.indexOf(token) === index);
+}
+
 export interface SessionInfo {
   username: string;
   createdAt: number;
   expiresAt: number;
 }
 
-/** 校验当前请求的 cookie；顺带节流更新 last_seen（每 5 分钟一次足够） */
+/**
+ * 校验当前请求的凭据；顺带节流更新 last_seen（每 5 分钟一次足够）。
+ *
+ * 同名 cookie 可能有**不止一个**（旧版本写过、或换了访问地址留下一份），
+ * 浏览器先发哪个不由我们决定，所以这里挨个试，任一对得上就算登录 ——
+ * 只认第一个的话，多出来的那份旧 cookie 会让「登录成功但马上又回登录页」反复上演。
+ */
 export function currentSession(req: Request): SessionInfo | null {
-  const token = readCookie(req, COOKIE_NAME);
-  if (!token) return null;
+  const tokens = sessionTokens(req);
+  if (tokens.length === 0) return null;
 
-  const row = db
-    .prepare("SELECT username, created_at, expires_at, last_seen FROM login_sessions WHERE token_hash = ?")
-    .get(hashToken(token)) as
-    | { username: string; created_at: number; expires_at: number; last_seen: number }
-    | undefined;
-  if (!row) return null;
+  const hashes = tokens.map(hashToken);
+  const rows = db
+    .prepare(
+      `SELECT token_hash, username, created_at, expires_at, last_seen FROM login_sessions
+       WHERE token_hash IN (${hashes.map(() => "?").join(",")})`,
+    )
+    .all(...hashes) as Array<{
+    token_hash: string;
+    username: string;
+    created_at: number;
+    expires_at: number;
+    last_seen: number;
+  }>;
 
   const now = Date.now();
-  if (row.expires_at <= now) {
-    db.prepare("DELETE FROM login_sessions WHERE token_hash = ?").run(hashToken(token));
-    return null;
+  for (const hash of hashes) {
+    const hit = rows.find((item) => item.token_hash === hash);
+    if (!hit) continue;
+    if (hit.expires_at <= now) {
+      db.prepare("DELETE FROM login_sessions WHERE token_hash = ?").run(hash);
+      continue;
+    }
+    if (now - hit.last_seen > 5 * 60 * 1000) {
+      db.prepare("UPDATE login_sessions SET last_seen = ? WHERE token_hash = ?").run(now, hash);
+    }
+    return { username: hit.username, createdAt: hit.created_at, expiresAt: hit.expires_at };
   }
-  if (now - row.last_seen > 5 * 60 * 1000) {
-    db.prepare("UPDATE login_sessions SET last_seen = ? WHERE token_hash = ?").run(now, hashToken(token));
-  }
-  return { username: row.username, createdAt: row.created_at, expiresAt: row.expires_at };
+  return null;
 }
 
 export function destroySession(req: Request): void {
-  const token = readCookie(req, COOKIE_NAME);
-  if (token) db.prepare("DELETE FROM login_sessions WHERE token_hash = ?").run(hashToken(token));
+  for (const token of sessionTokens(req)) {
+    db.prepare("DELETE FROM login_sessions WHERE token_hash = ?").run(hashToken(token));
+  }
 }
 
 export function destroyAllSessions(): number {
@@ -216,9 +252,11 @@ export function destroyAllSessions(): number {
 
 /** 只保留当前这台设备的会话（「退出其它设备」） */
 export function destroyOtherSessions(req: Request): number {
-  const token = readCookie(req, COOKIE_NAME);
-  if (!token) return destroyAllSessions();
-  return db.prepare("DELETE FROM login_sessions WHERE token_hash <> ?").run(hashToken(token)).changes;
+  const hashes = sessionTokens(req).map(hashToken);
+  if (hashes.length === 0) return destroyAllSessions();
+  return db
+    .prepare(`DELETE FROM login_sessions WHERE token_hash NOT IN (${hashes.map(() => "?").join(",")})`)
+    .run(...hashes).changes;
 }
 
 export function activeSessionCount(): number {

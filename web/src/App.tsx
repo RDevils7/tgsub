@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, clearSessionToken } from "./api";
 import type { ScanState, Stats } from "./types";
 import { ToastProvider, Button, Badge, StatusDot, Spinner, useToast } from "./components/ui";
 import {
@@ -27,7 +27,7 @@ import Downloads from "./pages/Downloads";
 import Manual from "./pages/Manual";
 import Monitor from "./pages/Monitor";
 import Metadata from "./pages/Metadata";
-import Emby from "./pages/Emby";
+import MediaLibrary from "./pages/MediaLibrary";
 import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import Login from "./pages/Login";
@@ -43,38 +43,39 @@ type PageKey =
   | "manual"
   | "downloads"
   | "metadata"
-  | "emby"
+  | "media"
   | "logs"
   | "settings";
 
 const NAV: Array<{ key: PageKey; label: string; icon: React.ReactNode }> = [
   { key: "dashboard", label: "概览", icon: <IconDashboard className="h-[17px] w-[17px]" /> },
+  { key: "media", label: "媒体库", icon: <IconTv className="h-[17px] w-[17px]" /> },
   { key: "channels", label: "频道", icon: <IconBroadcast className="h-[17px] w-[17px]" /> },
   { key: "subscriptions", label: "订阅关键词", icon: <IconTag className="h-[17px] w-[17px]" /> },
   { key: "monitor", label: "监控历史", icon: <IconInbox className="h-[17px] w-[17px]" /> },
   { key: "manual", label: "手动下载", icon: <IconLink className="h-[17px] w-[17px]" /> },
   { key: "downloads", label: "下载记录", icon: <IconDownload className="h-[17px] w-[17px]" /> },
   { key: "metadata", label: "元数据", icon: <IconImage className="h-[17px] w-[17px]" /> },
-  { key: "emby", label: "Emby 入库", icon: <IconTv className="h-[17px] w-[17px]" /> },
   { key: "logs", label: "日志", icon: <IconLogs className="h-[17px] w-[17px]" /> },
   { key: "settings", label: "设置", icon: <IconSettings className="h-[17px] w-[17px]" /> },
 ];
 
 const TITLES: Record<PageKey, { title: string; desc: string }> = {
   dashboard: { title: "概览", desc: "健康状态、服务与工具链、存储用量与最新活动" },
-  channels: { title: "频道", desc: "管理需要定时扫描的 Telegram 频道" },
+  media: { title: "媒体库", desc: "浏览下载目录里的剧集，点进去看分集，点任意一集直接播放" },  channels: { title: "频道", desc: "管理需要定时扫描的 Telegram 频道" },
   subscriptions: { title: "订阅关键词", desc: "命中关键词后自动下载整条消息的文件" },
   monitor: { title: "监控历史", desc: "每条被扫描到的消息及其命中结果，可追溯到原消息" },
   manual: { title: "手动下载", desc: "粘贴 Telegram 消息链接、B站 / 小红书 / YouTube 链接，或网页 / m3u8 视频链接，直接下载" },
   downloads: { title: "下载记录", desc: "查看、重试与导出已抓取的文件" },
   metadata: { title: "元数据", desc: "编辑已下载视频的 NFO 与封面，可从视频截图" },
-  emby: { title: "Emby 入库", desc: "媒体信息生成、封面规格与入库通知" },
   logs: { title: "日志", desc: "服务运行日志，排障时最先该看的地方" },
-  settings: { title: "设置", desc: "账号登录、网络代理、扫描与下载参数" },
+  settings: { title: "设置", desc: "账号登录、网络代理、扫描下载参数，以及 Emby 媒体信息与入库通知" },
 };
 
 function readHash(): PageKey {
   const key = window.location.hash.replace(/^#\/?/, "");
+  // 旧地址 #/emby 兼容：这一页 1.3.5 起改成「媒体库」（读本地下载目录）
+  if (key === "emby") return "media";
   return (NAV.some((n) => n.key === key) ? key : "dashboard") as PageKey;
 }
 
@@ -292,7 +293,7 @@ function Shell({ session, onLogout }: { session: SessionState; onLogout: () => v
           {page === "manual" && <Manual />}
           {page === "downloads" && <Downloads />}
           {page === "metadata" && <Metadata />}
-          {page === "emby" && <Emby />}
+          {page === "media" && <MediaLibrary />}
           {page === "logs" && <Logs />}
           {page === "settings" && <SettingsPage />}
         </div>
@@ -376,6 +377,8 @@ export default function App() {
     try {
       await api.sessionLogout();
     } finally {
+      // cookie 清掉的同时也把兜底 token 丢掉，否则下次打开会「退出了又自动登录」
+      clearSessionToken();
       await reload();
     }
   };

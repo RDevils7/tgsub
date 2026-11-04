@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import type { AppSettings } from "../types";
-import { Badge, Button, Toggle, useToast } from "../components/ui";
-import CollapsibleCard from "../components/CollapsibleCard";
-import EmbyNotifyPanel from "../components/EmbyNotifyPanel";
-import FfmpegStatusPanel from "../components/FfmpegStatusPanel";
-import { IconAlert, IconSpark, IconTv } from "../components/icons";
+import { Badge, Button, Toggle, useToast } from "./ui";
+import CollapsibleCard from "./CollapsibleCard";
+import EmbyNotifyPanel from "./EmbyNotifyPanel";
+import FfmpegStatusPanel from "./FfmpegStatusPanel";
+import { IconAlert, IconSpark, IconTv } from "./icons";
 
 /**
- * Emby 入库页。
+ * Emby 媒体库设置（设置页里的一组卡片）。
  *
- * 之前这些设置散在「设置」页中段，跟 Telegram 账号、下载参数混在一起；
- * 实际上它是「下完之后怎么进媒体库」这条链路，独立成一页更好找。
+ * 内容原来单独占一页，现在 Emby 那一页留给「看片」（媒体库海报墙），
+ * 生成什么、怎么通知、Emby 端要做什么这些配置统一收到设置页。
  *
- * 页面上三块：
+ * 三块：
  *   1. 生成什么（nfo / 封面 / 落盘结构）
  *   2. 怎么通知 Emby（入库通知，自带草稿与保存）
  *   3. Emby 端还需要做什么（说明，不可折叠）
@@ -21,7 +21,7 @@ import { IconAlert, IconSpark, IconTv } from "../components/icons";
 
 type Draft = Pick<AppSettings, "emby_meta" | "fallback_folder" | "auto_cover_frames" | "ffmpeg_path">;
 
-export default function Emby() {
+export default function EmbySettingsPanel() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   /** 改完 ffmpeg 路径保存后，让状态面板重新检测（用 key 强制重建） */
@@ -65,14 +65,16 @@ export default function Emby() {
   };
 
   return (
-    <div className="space-y-3">
+    // 三块内容共用一个框：外层画卡片外壳与分隔线，里面的块一律 flat
+    <section className="card divide-y divide-white/[0.06] overflow-hidden">
       <CollapsibleCard
         id="emby-meta"
+        flat
         tint="violet"
         icon={<IconSpark className="h-4 w-4" />}
-        title="生成媒体信息"
+        title="Emby 媒体信息"
         desc="边下边写 nfo 与封面，Emby 扫描即出海报、简介与集数"
-        defaultOpen
+        defaultOpen={false}
         extra={
           <Badge
             className={
@@ -92,10 +94,7 @@ export default function Emby() {
               每集写入「剧名S01E04.nfo」与缩略图，剧集目录写入 tvshow.nfo 与取自第一集的 poster / landscape / fanart；开启后消息里的图片不再下载
             </p>
           </div>
-          <Toggle
-            checked={draft?.emby_meta ?? false}
-            onChange={(next) => patch("emby_meta", next)}
-          />
+          <Toggle checked={draft?.emby_meta ?? false} onChange={(next) => patch("emby_meta", next)} />
         </div>
 
         <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
@@ -162,9 +161,9 @@ export default function Emby() {
       </CollapsibleCard>
 
       {/* 入库通知：服务地址、API Key、路径映射与推送流水（自己管自己的保存） */}
-      <EmbyNotifyPanel />
+      <EmbyNotifyPanel flat />
 
-      <section className="card p-5">
+      <div className="p-5">
         <div className="flex items-start gap-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-amber-300">
             <IconTv className="h-4 w-4" />
@@ -177,7 +176,7 @@ export default function Emby() {
 
         <ol className="mt-3 space-y-2">
           {[
-            "媒体库类型选「电影」或「电视节目」，指向下载目录；路径要和容器里看到的一致（不一样就填下面的「路径映射」）。",
+            "媒体库类型选「电影」或「电视节目」，指向下载目录；路径要和容器里看到的一致（不一样就填上面的「路径映射」）。",
             "媒体库 → 高级 → 勾选「优先使用本地元数据 / 启用 NFO」，否则 Emby 会先联网刮削再读 nfo，把标题简介盖掉。",
             "同一媒体库里如果有真实剧集，建议给下载目录单独建一个库，避免 tgsub 生成的 tvshow.nfo 干扰其它剧的集数识别。",
           ].map((text, index) => (
@@ -190,9 +189,9 @@ export default function Emby() {
 
         <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-slate-500">
           <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400/80" />
-          入库通知只负责「告诉 Emby 有新文件」，不会替你改媒体库配置；改动路径映射后建议先点一次「让 Emby 全库扫描」。
+          上面填好地址与 API Key 后，「Emby 媒体库」页就能直接浏览、播放这些内容；入库通知只负责「告诉 Emby 有新文件」，不会替你改媒体库配置。
         </p>
-      </section>
-    </div>
+      </div>
+    </section>
   );
 }

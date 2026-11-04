@@ -3,7 +3,7 @@ import path from "node:path";
 import { db } from "../db";
 import { logger } from "../logger";
 import { queueEmbyUpdate } from "./embyapi";
-import { episodeArtifacts } from "./mediapath";
+import { episodeArtifacts, isVideoFile } from "./mediapath";
 import { samePath, type RenamePlan } from "./renameplan";
 
 /**
@@ -37,6 +37,12 @@ function exists(target: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** 路径比较键（Windows 大小写不敏感） */
+function canonicalPath(p: string): string {
+  const abs = path.resolve(p);
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
 }
 
 /** 移动文件：同盘 rename；跨盘（EXDEV）退化成复制后删除 */
@@ -141,6 +147,7 @@ function isSeriesLevelFile(name: string): boolean {
 async function moveSeriesLevelFiles(
   fromDirs: string[],
   targetDir: string,
+  moved: Set<string>,
   result: RenameOutcome,
 ): Promise<void> {
   const taken = new Set<string>();
@@ -152,6 +159,12 @@ async function moveSeriesLevelFiles(
     } catch {
       continue;
     }
+    // 这个目录里还有本次不搬的视频 → 它仍是一部在用的剧，
+    // 别把它的 tvshow.nfo / 封面顺手搬到目标目录（那是另一部剧的元数据）。
+    const remains = names.some(
+      (name) => isVideoFile(name) && !moved.has(canonicalPath(path.join(dir, name))),
+    );
+    if (remains) continue;
     for (const name of names) {
       if (!isSeriesLevelFile(name)) continue;
       const to = path.join(targetDir, name);
@@ -184,6 +197,8 @@ export async function executeRenamePlan(plan: RenamePlan): Promise<RenameOutcome
 
   // 原地已经叫对的不用动（重复执行同一份计划时不会瞎折腾）
   const effective = plan.items.filter((item) => !samePath(item.from, item.to));
+  /** 本次真正要搬走的视频（用于判断源目录是否还有留下没搬的剧集） */
+  const moved = new Set(effective.map((item) => canonicalPath(item.from)));
   /** 有文件搬走的源目录（剧集级封面要从这里一起搬） */
   const sourceDirs = [...new Set(effective.map((item) => path.dirname(item.from)))];
 
@@ -235,7 +250,7 @@ export async function executeRenamePlan(plan: RenamePlan): Promise<RenameOutcome
     }
 
     // 剧集级封面与 tvshow.nfo：文件名是 Emby 认死的槽位，原样搬进新目录
-    await moveSeriesLevelFiles(sourceDirs, plan.targetDir, result);
+    await moveSeriesLevelFiles(sourceDirs, plan.targetDir, moved, result);
   } catch (err) {
     // 回滚：把所有动过的文件放回原位
     const rollbackErrors: string[] = [];

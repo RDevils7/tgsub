@@ -64,7 +64,7 @@ export interface ServiceProbe {
   value: string;
   note: string | null;
   /** 点击后跳哪个页面 */
-  page: "settings" | "channels" | "downloads" | "emby" | "logs" | "manual" | "metadata" | null;
+  page: "settings" | "channels" | "downloads" | "logs" | "manual" | "metadata" | null;
 }
 
 export interface StorageDirProbe {
@@ -414,16 +414,6 @@ async function toolReport(
       usedBy: "m3u8 下载 / 视频截帧 / 封面生成",
     },
     {
-      id: "ffprobe",
-      label: "ffprobe",
-      status: ffmpeg.ffprobe ? "ok" : "warn",
-      version: ffmpeg.ffprobe ? "随 ffmpeg" : null,
-      path: ffmpeg.ffprobe,
-      source: ffmpeg.source ? FFMPEG_SOURCE[ffmpeg.source] ?? ffmpeg.source : null,
-      note: ffmpeg.ffprobe ? null : "未找到；probeVideo 会自动改用 ffmpeg -i 解析，不影响下载",
-      usedBy: "读取视频时长 / 分辨率（可选）",
-    },
-    {
       id: "ytdlp",
       label: "yt-dlp",
       status: toolStatus({
@@ -610,7 +600,8 @@ async function serviceReport(settings: ReturnType<typeof getSettings>): Promise<
             : embyState.lastNotifiedAt
               ? `最近通知 ${clockTime(embyState.lastNotifiedAt)}`
               : "尚未推送过通知",
-      page: "emby",
+      // Emby 的配置项 1.3.5 起统一在设置页，点卡片去那里改
+      page: "settings",
     },
     {
       id: "proxy",

@@ -15,7 +15,12 @@ import CollapsibleCard from "./CollapsibleCard";
  * 这块自己管自己的草稿与保存：它只碰 emby_notify / emby_url / emby_path_map
  * 三个字段，和设置页其它卡片的保存互不影响。
  */
-export default function EmbyNotifyPanel() {
+export interface EmbyNotifyPanelProps {
+  /** 不要自己的卡片外壳，交给外层的框兜住（设置页里三块合成一个框） */
+  flat?: boolean;
+}
+
+export default function EmbyNotifyPanel({ flat = false }: EmbyNotifyPanelProps = {}) {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [status, setStatus] = useState<EmbyStatus | null>(null);
@@ -148,7 +153,9 @@ export default function EmbyNotifyPanel() {
 
   if (!data || !draft) {
     return (
-      <section className="card flex h-40 items-center justify-center p-5 text-slate-500">
+      <section
+        className={`flex h-40 items-center justify-center p-5 text-slate-500 ${flat ? "" : "card"}`}
+      >
         <Spinner className="h-5 w-5" />
       </section>
     );
@@ -170,6 +177,7 @@ export default function EmbyNotifyPanel() {
       title="入库通知"
       desc="每集下载完成后把路径提交给 Emby 的 /Library/Media/Updated 接口，Emby 立刻增量扫描，不用等定时任务也不用手动点扫描"
       defaultOpen
+      flat={flat}
       extra={
         <Badge className={badge.tone}>
           <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
