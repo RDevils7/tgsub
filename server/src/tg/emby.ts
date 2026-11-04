@@ -7,6 +7,7 @@ import { sanitizeSegment } from "../utils";
 import { autoCoversFromVideo } from "./autocover";
 import { fixTelegramLink } from "./entity";
 import { applyCoversFromImage } from "../platform/cover";
+import { nfoTraceOf, type NfoTrace, type TraceRow } from "./nfotrace";
 
 /**
  * 生成 Emby 可直接识别的本地媒体信息。
@@ -156,7 +157,7 @@ export function describeMeta(meta: EmbyMeta): string {
   return tag ? `${meta.series} ${tag}` : meta.series;
 }
 
-export function buildEpisodeNfo(meta: EmbyMeta): string {
+export function buildEpisodeNfo(meta: EmbyMeta, trace?: NfoTrace | null): string {
   const tag = formatEpisodeTag(meta);
   const title = meta.episode !== null ? `${meta.series} ${tag}` : meta.series;
   const lines = [
@@ -185,15 +186,18 @@ export function buildEpisodeNfo(meta: EmbyMeta): string {
   lines.push(`  <aired>${date}</aired>`);
   lines.push(`  <premiered>${date}</premiered>`);
   lines.push(`  <year>${new Date(meta.airedAt || Date.now()).getFullYear()}</year>`);
+  // 追溯信息：落盘名会被改成「剧名 S01E01.mp4」，原始文件名与来源只在这里留底
+  if (trace?.originalFileName) lines.push(`  <originalfilename>${esc(trace.originalFileName)}</originalfilename>`);
+  if (trace?.sourceLabel) lines.push(`  <source>${esc(trace.sourceLabel)}</source>`);
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:${meta.series}:${tag || "movie"}`)}</uniqueid>`);
-  const link = fixTelegramLink(meta.link);
+  const link = fixTelegramLink(meta.link || trace?.sourceUrl || null);
   // 平台视频的「原链接」不是 Telegram 消息，标成 platform，Emby 详情页不会显示成 Telegram
   if (link) lines.push(`  <uniqueid type="${meta.platform ? "platform" : "telegram"}">${esc(link)}</uniqueid>`);
   lines.push("</episodedetails>", "");
   return lines.join("\n");
 }
 
-export function buildShowNfo(meta: EmbyMeta): string {
+export function buildShowNfo(meta: EmbyMeta, trace?: NfoTrace | null): string {
   const lines = [
     '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
     "<tvshow>",
@@ -211,6 +215,8 @@ export function buildShowNfo(meta: EmbyMeta): string {
   const date = isoDate(meta.airedAt);
   lines.push(`  <premiered>${date}</premiered>`);
   lines.push(`  <year>${new Date(meta.airedAt || Date.now()).getFullYear()}</year>`);
+  // 剧集级没有「原文件名」，只保留整部剧的来源
+  if (trace?.sourceLabel) lines.push(`  <source>${esc(trace.sourceLabel)}</source>`);
   lines.push("  <status>Continuing</status>");
   lines.push(`  <uniqueid type="tgsub" default="true">${esc(`tgsub:series:${meta.series}`)}</uniqueid>`);
   const link = fixTelegramLink(meta.link);
@@ -345,22 +351,32 @@ async function writeMediaFile(file: string, data: string, dir: string): Promise<
   }
 }
 
-/** 视频落盘后：写剧集 nfo + 剧集信息 + 本集缩略图与剧集封面 */
-export async function finalizeMedia(filePath: string, rawMeta: string | null | undefined): Promise<void> {
+/**
+ * 视频落盘后：写剧集 nfo + 剧集信息 + 本集缩略图与剧集封面。
+ *
+ * row 用来把「原始文件名 / 来源」一起写进 NFO：落盘名已经规范化了，
+ * 之后改名、合并、重建 NFO 都不会把这条追溯信息弄丢。
+ */
+export async function finalizeMedia(
+  filePath: string,
+  rawMeta: string | null | undefined,
+  row?: TraceRow | null,
+): Promise<void> {
   const meta = decodeMeta(rawMeta);
   if (!meta) return;
   const dir = path.dirname(filePath);
   const label = describeMeta(meta);
   const base = path.basename(filePath, path.extname(filePath));
+  const trace = nfoTraceOf(row, path.basename(filePath));
 
   try {
     if (meta.kind !== "art") {
       const nfoPath = path.join(dir, `${sanitizeSegment(base, 120)}.nfo`);
-      await writeMediaFile(nfoPath, buildEpisodeNfo(meta), dir);
+      await writeMediaFile(nfoPath, buildEpisodeNfo(meta, trace), dir);
 
       const showPath = path.join(dir, "tvshow.nfo");
       if (!fs.existsSync(showPath)) {
-        await writeMediaFile(showPath, buildShowNfo(meta), dir);
+        await writeMediaFile(showPath, buildShowNfo(meta, trace), dir);
       }
       logger.info(
         {

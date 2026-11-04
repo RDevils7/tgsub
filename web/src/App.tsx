@@ -61,7 +61,7 @@ const NAV: Array<{ key: PageKey; label: string; icon: React.ReactNode }> = [
 ];
 
 const TITLES: Record<PageKey, { title: string; desc: string }> = {
-  dashboard: { title: "概览", desc: "监控状态、下载队列与最新活动" },
+  dashboard: { title: "概览", desc: "健康状态、服务与工具链、存储用量与最新活动" },
   channels: { title: "频道", desc: "管理需要定时扫描的 Telegram 频道" },
   subscriptions: { title: "订阅关键词", desc: "命中关键词后自动下载整条消息的文件" },
   monitor: { title: "监控历史", desc: "每条被扫描到的消息及其命中结果，可追溯到原消息" },

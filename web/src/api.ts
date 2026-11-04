@@ -53,6 +53,7 @@ import type {
   Stats,
   Subscription,
   SessionState,
+  OverviewReport,
 } from "./types";
 
 export class ApiError extends Error {
@@ -86,6 +87,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ ok: boolean; uptime: number }>("/health"),
+  /** 概览页聚合状态：运行时 / 存储 / 工具链 / 服务，一次拿全 */
+  overview: (refresh = false) =>
+    request<OverviewReport>(`/overview${refresh ? "?refresh=1" : ""}`),
 
   /* ------------------------------ 管理界面登录 ------------------------------ */
   /** 一次问清三种状态：未初始化 / 未登录 / 已登录 */
@@ -424,6 +428,18 @@ export const api = {
     request<{ ok: boolean }>("/metadata/excluded/restore", {
       method: "POST",
       body: JSON.stringify({ path }),
+    }),
+  /** 隐藏条目（仅从列表移除，磁盘文件保留，刷新后也不再出现） */
+  hideMetadata: (key: string) =>
+    request<{ ok: boolean; path: string; kind: "file" | "folder" }>("/metadata/excluded", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+  /** 批量隐藏勾选的条目 */
+  hideMetadataBatch: (keys: string[]) =>
+    request<{ ok: boolean; hidden: number; failed: string[] }>("/metadata/excluded/batch", {
+      method: "POST",
+      body: JSON.stringify({ keys }),
     }),
   /** 剧集改名预览：目录与每一集的新文件名，改之前先看一遍 */
   previewRenameSeries: (key: string, title: string) =>

@@ -54,56 +54,91 @@ export interface ParsedNfo {
 }
 
 const TAG_RE = /<(\/?)([A-Za-z_][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+/** 注释 / CDATA 里出现的 "<xxx>" 不是标签，整段跳过（只跳过匹配，不改原文下标） */
+const OPAQUE_RE = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g;
 
-/** 只解析一层：根元素 + 其直接子元素 */
+interface OpenTag {
+  name: string;
+  attrs: string;
+  start: number;
+  innerStart: number;
+  /** 这一层里出现过子标签 */
+  nested: boolean;
+}
+
+/**
+ * 只解析一层：根元素 + 其直接子元素。
+ *
+ * 用标签栈而不是单个 `open + depth`：形如 `<actor><name>x</name><role>y</role></actor>`
+ * 的块里，`</name>` 并不等于外层标签名，旧实现的 depth 永远归不了零，
+ * 结果整个嵌套块之后的所有字段（showtitle / season / aired…）都被吞掉，
+ * 表现为「表单里填了值，保存后重新打开还是空的」并且 NFO 里多出重复标签。
+ * 现在每个直接子标签独立成帧，内部嵌套只影响该帧的 nested 标记，原文保持不动。
+ */
 export function parseNfo(raw: string): ParsedNfo | null {
-  const rootMatch = /<([A-Za-z_][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/.exec(raw);
-  if (!rootMatch) return null;
-  const root = rootMatch[1];
+  const opaque: Array<[number, number]> = [];
+  for (const hit of raw.matchAll(OPAQUE_RE)) {
+    if (hit.index !== undefined) opaque.push([hit.index, hit.index + hit[0].length]);
+  }
+  const isOpaque = (pos: number) => opaque.some(([from, to]) => pos >= from && pos < to);
+
+  const rootRe = /<([A-Za-z_][\w:.-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let rootHit: RegExpMatchArray | null = null;
+  for (const hit of raw.matchAll(rootRe)) {
+    if (hit.index !== undefined && !isOpaque(hit.index)) {
+      rootHit = hit;
+      break;
+    }
+  }
+  if (!rootHit) return null;
+  const root = rootHit[1];
   if (!root) return null;
-  const rootStart = rootMatch.index + rootMatch[0].length;
+  const rootStart = (rootHit.index ?? 0) + rootHit[0].length;
   const closeIdx = raw.lastIndexOf(`</${root}`);
   if (closeIdx < rootStart) return null;
 
   const content = raw.slice(0, closeIdx);
   const children: NfoChild[] = [];
+  const stack: OpenTag[] = [];
   TAG_RE.lastIndex = rootStart;
-
-  let depth = 0;
-  let open: { name: string; attrs: string; start: number; innerStart: number } | null = null;
-  let hasNested = false;
 
   let m: RegExpExecArray | null;
   while ((m = TAG_RE.exec(content))) {
     const [full, closing, name, attrs, selfClose] = m;
     const tagStart = m.index;
-    if (tagStart < rootStart) continue;
+    if (tagStart < rootStart || isOpaque(tagStart)) continue;
 
     if (closing === "/") {
-      if (!open) continue;
-      if (name !== open.name) continue;
-      if (depth > 0) {
-        depth -= 1;
-        continue;
+      // 容错：畸形 NFO 的闭合标签可能不配对，找最近的同名开标签，连同更内层的一起收掉
+      let at = -1;
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].name === name) {
+          at = i;
+          break;
+        }
       }
-      children.push({
-        name: open.name,
-        attrs: open.attrs,
-        value: unescapeXml(content.slice(open.innerStart, tagStart)).trim(),
-        blockStart: open.start,
-        blockEnd: tagStart + full.length,
-        innerStart: open.innerStart,
-        innerEnd: tagStart,
-        nested: hasNested,
-      });
-      open = null;
-      hasNested = false;
+      if (at < 0) continue;
+      const frame = stack[at];
+      stack.length = at;
+      if (stack.length > 0) stack[stack.length - 1].nested = true;
+      if (stack.length === 0) {
+        children.push({
+          name: frame.name,
+          attrs: frame.attrs,
+          value: unescapeXml(content.slice(frame.innerStart, tagStart)).trim(),
+          blockStart: frame.start,
+          blockEnd: tagStart + full.length,
+          innerStart: frame.innerStart,
+          innerEnd: tagStart,
+          nested: frame.nested,
+        });
+      }
       continue;
     }
 
-    if (!open) {
-      open = { name, attrs, start: tagStart, innerStart: tagStart + full.length };
-      if (selfClose === "/") {
+    if (stack.length > 0) stack[stack.length - 1].nested = true;
+    if (selfClose === "/") {
+      if (stack.length === 0) {
         children.push({
           name,
           attrs,
@@ -114,17 +149,10 @@ export function parseNfo(raw: string): ParsedNfo | null {
           innerEnd: tagStart + full.length,
           nested: false,
         });
-        open = null;
       }
-      hasNested = false;
       continue;
     }
-    if (selfClose === "/") {
-      hasNested = true;
-      continue;
-    }
-    depth += 1;
-    hasNested = true;
+    stack.push({ name, attrs, start: tagStart, innerStart: tagStart + full.length, nested: false });
   }
 
   return { root, raw, children, insertAt: closeIdx };
@@ -146,6 +174,10 @@ export interface NfoFields {
   outline: string;
   studio: string;
   rating: string;
+  /** 下载时的原始文件名（不是规范化后的落盘名），用于追溯 */
+  originalfilename: string;
+  /** 来源：Telegram · 频道名 / B站 / 网页 / m3u8 / 外部目录 */
+  source: string;
   tags: string[];
   genres: string[];
 }
@@ -163,6 +195,8 @@ export const EMPTY_FIELDS: NfoFields = {
   outline: "",
   studio: "",
   rating: "",
+  originalfilename: "",
+  source: "",
   tags: [],
   genres: [],
 };
@@ -180,14 +214,30 @@ const SCALAR_TAGS = [
   "outline",
   "studio",
   "rating",
+  "originalfilename",
+  "source",
 ] as const;
 
-/** 从已解析的 NFO 读出一份表单值（同名标签取第一个非空） */
+/** 表单能改的标签；只有这些标签自身含子标签时，才禁止表单式保存 */
+const EDITABLE_TAGS = new Set<string>([...SCALAR_TAGS, "tag", "genre"]);
+
+/**
+ * 含 `<actor>` / `<fileinfo>` 这类嵌套块本身不影响编辑：
+ * 它们会被当成一个 child 原样保留，applyFields 只改根下的标量标签。
+ * 真正要拦的是「可编辑标签自己写了子标签」或压根解析不出来。
+ */
+export function isNfoEditable(parsed: ParsedNfo | null): boolean {
+  if (!parsed) return false;
+  return !parsed.children.some((c) => c.nested && EDITABLE_TAGS.has(c.name));
+}
+
+/** 从已解析的 NFO 读出一份表单值（同名标签优先取第一个非空） */
 export function fieldsFromNfo(parsed: ParsedNfo | null): NfoFields {
   const fields: NfoFields = { ...EMPTY_FIELDS, tags: [], genres: [] };
   if (!parsed) return fields;
   for (const tag of SCALAR_TAGS) {
-    const hit = parsed.children.find((c) => c.name === tag && !c.nested);
+    const hits = parsed.children.filter((c) => c.name === tag && !c.nested);
+    const hit = hits.find((c) => c.value.trim()) ?? hits[0];
     if (hit) fields[tag] = hit.value;
   }
   fields.tags = parsed.children.filter((c) => c.name === "tag" && !c.nested).map((c) => c.value).filter(Boolean);
@@ -285,6 +335,87 @@ export function applyFields(parsed: ParsedNfo, fields: NfoFields): string {
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "\n");
 }
 
+/** `buildEpisodeNfo` / `buildShowNfo` 负责刷新的字段；其余标签以原文为准 */
+const GENERATED_TAGS = new Set<string>([
+  "title",
+  "originaltitle",
+  "showtitle",
+  "season",
+  "episode",
+  "plot",
+  "outline",
+  "genre",
+  "tag",
+  "studio",
+  "runtime",
+  "aired",
+  "premiered",
+  "year",
+  "uniqueid",
+  "status",
+]);
+
+/**
+ * 一键生成时把生成结果「合并」进已有 NFO，而不是整份覆盖。
+ *
+ * - 模板字段（title / plot / uniqueid …）用生成结果刷新；
+ * - 其它标签（originalfilename / source、用户手写的自定义标签、actor 嵌套块等）
+ *   原文里有就原样保留，原文没有才从生成结果补上。
+ *
+ * 于是点多少次「生成 NFO」，原文件名与来源都不会被抹掉；解析不出来时
+ * 返回原文，绝不用生成结果覆盖看不懂的结构。
+ */
+export function mergeGeneratedNfo(existing: string, generated: string): string {
+  const base = parseNfo(existing);
+  const gen = parseNfo(generated);
+  if (!base || !gen) return existing;
+
+  const groupBy = (parsed: ParsedNfo): Map<string, NfoChild[]> => {
+    const map = new Map<string, NfoChild[]>();
+    for (const child of parsed.children) {
+      const list = map.get(child.name) ?? [];
+      list.push(child);
+      map.set(child.name, list);
+    }
+    return map;
+  };
+  const baseByName = groupBy(base);
+  const genByName = groupBy(gen);
+  const splices: Splice[] = [];
+  const inserts: string[] = [];
+
+  for (const [name, genHits] of genByName) {
+    const baseHits = baseByName.get(name) ?? [];
+    // 非模板字段：原文写过非空值就保留用户 / 外部工具改过的值；
+    // 只有空标签（<source></source> 之类）才允许生成结果补上
+    if (!GENERATED_TAGS.has(name) && baseHits.some((h) => h.value.trim())) continue;
+    const block = genHits.map((h) => generated.slice(h.blockStart, h.blockEnd)).join("\n  ");
+    if (baseHits.length === 0) {
+      inserts.push(`  ${block}`);
+      continue;
+    }
+    splices.push({ start: baseHits[0].blockStart, end: baseHits[0].blockEnd, text: block });
+    for (const extra of baseHits.slice(1)) {
+      splices.push({
+        start: lineStartOf(existing, extra.blockStart),
+        end: lineEndOf(existing, extra.blockEnd),
+        text: "",
+      });
+    }
+  }
+
+  // 从后往前替换，前面的下标不受影响
+  splices.sort((a, b) => b.start - a.start);
+  let out = existing;
+  for (const s of splices) out = out.slice(0, s.start) + s.text + out.slice(s.end);
+
+  if (inserts.length > 0) {
+    const closeAt = out.lastIndexOf(`</${base.root}`);
+    if (closeAt > 0) out = `${out.slice(0, closeAt)}${inserts.join("\n")}\n${out.slice(closeAt)}`;
+  }
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "\n");
+}
+
 /** 没有 NFO 时按表单值新建一份完整文件 */
 export function buildNfo(kind: "episode" | "show", fields: NfoFields): string {
   const HEAD = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>';
@@ -308,6 +439,8 @@ export function buildNfo(kind: "episode" | "show", fields: NfoFields): string {
     if (fields.genres.length) lines.push(buildList("genre", fields.genres, "  "));
     push("studio", fields.studio);
     push("rating", fields.rating);
+    push("originalfilename", fields.originalfilename);
+    push("source", fields.source);
     push("aired", fields.aired);
     push("premiered", fields.premiered);
     push("year", fields.year);
@@ -323,6 +456,7 @@ export function buildNfo(kind: "episode" | "show", fields: NfoFields): string {
   if (fields.genres.length) lines.push(buildList("genre", fields.genres, "  "));
   push("studio", fields.studio);
   push("rating", fields.rating);
+  push("source", fields.source);
   push("premiered", fields.premiered || fields.aired);
   push("year", fields.year);
   lines.push("  <status>Continuing</status>");

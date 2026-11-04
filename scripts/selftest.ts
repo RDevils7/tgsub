@@ -55,6 +55,7 @@ import {
   isRetryableResolve,
   isSignatureError,
   normalizeMediaUrl,
+  ROUTE_FALLBACK_NOTE,
   shouldRetryRoute,
 } from "../server/src/tg/m3u8";
 import {
@@ -80,6 +81,27 @@ import { parseCookie } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
+import {
+  diskLevel,
+  ellipsizePath,
+  humanUptime,
+  statusRank,
+  summarizeProbes,
+  toolStatus,
+  type ProbeLike,
+} from "../server/src/system/overviewFormat";
+import {
+  applyFields,
+  buildNfo,
+  EMPTY_FIELDS as EMPTY_NFO_FIELDS,
+  fieldsFromNfo,
+  isNfoEditable,
+  mergeGeneratedNfo,
+  parseNfo,
+  validateNfo,
+  type NfoFields,
+} from "../server/src/tg/nfo";
+import { nfoTraceOf } from "../server/src/tg/nfotrace";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -658,6 +680,87 @@ async function seriesDirChecks(): Promise<void> {
   await fs.rm(root, { recursive: true, force: true });
 }
 
+/** 元数据页以文件系统为准：下载根下的所有视频都会列出，无论是否由 tgsub 下载 */
+async function fileManagerChecks(): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const { env } = await import("../server/src/env");
+  const { collectFolders, excludePath, restorePath } = await import("../server/src/tg/mediatree");
+
+  const realDownloadDir = env.downloadDir;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-fm-"));
+  const touch = async (rel: string): Promise<void> => {
+    const full = path.join(root, rel);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, "x");
+  };
+
+  // tgsub 风格路径（平台子目录） + 完全未知的子目录（手动拷入 / 其它工具下载）
+  await touch("B站/剧名A/剧名A S01E01.mp4");
+  await touch("B站/剧名A/剧名A S01E02.mp4");
+  await touch("外部拷贝/随手拍/随手一集.mp4");
+  await touch("其它/单集/我的短片.mp4");
+
+  // 关键：不写任何 downloads 记录，验证「文件系统为准」——
+  // 改动前这些文件不会出现在元数据页，因为 collectFolders 只认 downloads 表 + 手动来源。
+  env.downloadDir = root;
+  try {
+    await acheck("下载根下的所有视频都被列出（含非 tgsub 下载的）", async () => {
+      const folders = collectFolders();
+      const a = folders.find((f) => f.name === "剧名A");
+      assert.ok(a, "剧名A 应被列出");
+      assert.equal(a.files.length, 2);
+      const ext = folders.find((f) => f.name === "随手拍");
+      assert.ok(ext, "随手拍 应被列出");
+      assert.equal(ext.files.length, 1);
+      assert.equal(ext.files[0].name, "随手一集.mp4");
+    });
+
+    await acheck("未由 tgsub 下载的文件标记为 manual / 外部来源，来源按物理路径推断", async () => {
+      const folders = collectFolders();
+      const a = folders.find((f) => f.name === "剧名A")!;
+      // 没有 downloads 记录，整部剧都是外部文件
+      assert.equal(a.source, "manual");
+      assert.ok(a.files.every((x) => x.source === "manual" && x.downloadId === null));
+      // 来源按物理路径推断：B站 子目录 → bilibili
+      assert.equal(a.origin, "bilibili");
+      const ext = folders.find((f) => f.name === "随手拍")!;
+      assert.equal(ext.origin, "manual");
+    });
+
+    await acheck("隐藏（登记 media_excluded）后，collectFolders 不再列出该文件夹及其视频", async () => {
+      const a = collectFolders().find((f) => f.name === "剧名A")!;
+      assert.ok(a, "隐藏前应存在");
+      excludePath(a.dir);
+      const after = collectFolders().find((f) => f.name === "剧名A");
+      assert.equal(after, undefined, "隐藏后剧名A 不应再出现");
+    });
+
+    await acheck("恢复（删掉 media_excluded 登记）后，文件夹重新出现在列表里", async () => {
+      const dirA = path.join(root, "B站", "剧名A");
+      const missing = collectFolders().find((f) => f.name === "剧名A");
+      assert.equal(missing, undefined, "恢复前不应出现");
+      restorePath(dirA);
+      const back = collectFolders().find((f) => f.name === "剧名A");
+      assert.ok(back, "恢复后剧名A 应重新出现");
+      assert.equal(back!.files.length, 2);
+    });
+
+    await acheck("隐藏是前缀匹配：隐藏父目录会连带隐藏其下所有视频", async () => {
+      const other = collectFolders().find((f) => f.name === "单集")!;
+      assert.ok(other, "单集 应存在");
+      const parent = path.dirname(other.dir); // 「其它」整个父目录
+      excludePath(parent);
+      const still = collectFolders().some((f) => f.name === "单集");
+      assert.equal(still, false, "隐藏父目录后，子目录单集不应出现");
+      restorePath(parent);
+    });
+  } finally {
+    env.downloadDir = realDownloadDir;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 /**
  * 挂载目录权限检查（NAS 反复重启的根因）。
  *
@@ -970,7 +1073,21 @@ async function embyChecks(): Promise<void> {
     kind: "video" as const,
   };
 
-  await finalizeMedia(video, encodeMeta(meta));
+  await finalizeMedia(video, encodeMeta(meta), {
+    file_name: "原始消息视频.mp4",
+    save_name: "美人局S01E04.mp4",
+    source: "telegram",
+    source_url: null,
+    channel_title: "AI短剧频道",
+  });
+
+  await acheck("自动生成的 nfo 保留原文件名与来源", async () => {
+    const nfo = await fs.readFile(path.join(dir, "美人局S01E04.nfo"), "utf8");
+    assert.ok(nfo.includes("<originalfilename>原始消息视频.mp4</originalfilename>"));
+    assert.ok(nfo.includes("<source>Telegram · AI短剧频道</source>"));
+    const show = await fs.readFile(path.join(dir, "tvshow.nfo"), "utf8");
+    assert.ok(show.includes("<source>Telegram · AI短剧频道</source>"));
+  });
 
   await acheck("剧集 nfo 含集数、简介与标签", async () => {
     const nfo = await fs.readFile(path.join(dir, "美人局S01E04.nfo"), "utf8");
@@ -2183,10 +2300,20 @@ function m3u8ParseChecks(): void {
     assert.equal(isSignatureError("网络拉取失败，确认服务器能访问该地址"), false);
   });
 
-  check("下载换线路判定：403 与网络错误都值得再试一次", () => {
+  check("下载换线路判定：直连失败一律再试代理，用户取消除外", () => {
     assert.equal(shouldRetryRoute("源站拒绝下载（403）"), true);
     assert.equal(shouldRetryRoute("Connection timed out"), true);
+    // ffmpeg 报错被 parseFfmpegError 翻成中文后，原来的英文正则一个都认不出，
+    // 结果就是「直连优先」卡在第一次失败上 —— 这两条必须能换线路
+    assert.equal(shouldRetryRoute("网络拉取失败，确认服务器能访问该地址（必要时配置代理）"), true);
+    assert.equal(shouldRetryRoute("无法解析该 m3u8（可能是加密 / 非常规格式 / 源站返回错误）"), true);
     assert.equal(shouldRetryRoute("下载被取消"), false);
+    assert.equal(shouldRetryRoute("下载已取消"), false);
+    assert.equal(shouldRetryRoute("镜像里没有可用的 ffmpeg，无法下载 m3u8"), false);
+  });
+
+  check("线路切换提示文案与用户要求一致", () => {
+    assert.equal(ROUTE_FALLBACK_NOTE, "因直连下载失败，使用代理进行下载");
   });
 
   check("解析换线路判定：403 / 挑战页也算可重试", () => {
@@ -2747,9 +2874,310 @@ function sortChecks(): void {
   });
 }
 
+function overviewChecks(): void {
+  const probe = (status: ProbeLike["status"], label: string, note: string | null = null): ProbeLike => ({
+    status,
+    label,
+    note,
+  });
+
+  check("概览状态权重：异常 > 留意 > 正常 > 未启用", () => {
+    assert.ok(statusRank("error") > statusRank("warn"));
+    assert.ok(statusRank("warn") > statusRank("ok"));
+    assert.ok(statusRank("ok") > statusRank("off"));
+  });
+
+  check("概览汇总：跨分组统计，未启用不计入待处理", () => {
+    const s = summarizeProbes([
+      [probe("ok", "ffmpeg"), probe("warn", "ffprobe", "缺 ffprobe"), probe("off", "机器人")],
+      [probe("error", "yt-dlp", "没装"), probe("ok", "队列")],
+    ]);
+    assert.equal(s.ok, 2);
+    assert.equal(s.warn, 1);
+    assert.equal(s.error, 1);
+    assert.equal(s.off, 1);
+    assert.equal(s.overall, "error");
+    assert.equal(s.issues.length, 2);
+  });
+
+  check("概览汇总：异常排前面，同级保持原顺序", () => {
+    const s = summarizeProbes([
+      [probe("warn", "ffprobe", "缺"), probe("error", "ffmpeg", "挂了"), probe("warn", "sharp", "降级")],
+    ]);
+    assert.equal(s.overall, "error");
+    assert.deepEqual(s.issues, ["ffmpeg：挂了", "ffprobe：缺", "sharp：降级"]);
+  });
+
+  check("概览汇总：只有留意或全未启用时整体状态正确", () => {
+    assert.equal(summarizeProbes([[probe("ok", "Node"), probe("warn", "磁盘", "85%")]]).overall, "warn");
+    assert.equal(summarizeProbes([[probe("off", "Emby"), probe("off", "Bot")]]).overall, "off");
+    assert.equal(summarizeProbes([]).overall, "off");
+    assert.deepEqual(summarizeProbes([[probe("off", "Bot", "用户主动关的")]]).issues, []);
+  });
+
+  check("磁盘占用率分档：80% 留意、92% 异常", () => {
+    assert.equal(diskLevel(null), "off");
+    assert.equal(diskLevel(NaN), "off");
+    assert.equal(diskLevel(26), "ok");
+    assert.equal(diskLevel(80), "warn");
+    assert.equal(diskLevel(92), "error");
+  });
+
+  check("工具状态：可选组件缺失只算留意，有新版算留意", () => {
+    assert.equal(toolStatus({ available: true }), "ok");
+    assert.equal(toolStatus({ available: false }), "error");
+    assert.equal(toolStatus({ available: false, optional: true }), "warn");
+    assert.equal(toolStatus({ available: true, degraded: true }), "warn");
+    assert.equal(toolStatus({ available: true, outdated: true }), "warn");
+  });
+
+  check("运行时长文案", () => {
+    assert.equal(humanUptime(-1), "—");
+    assert.equal(humanUptime(0), "0 秒");
+    assert.equal(humanUptime(90), "1 分钟");
+    assert.equal(humanUptime(3661), "1 小时 1 分");
+    assert.equal(humanUptime(90000), "1 天 1 小时");
+  });
+
+  check("长路径省略保留头尾且不超长", () => {
+    assert.equal(ellipsizePath(null), "—");
+    assert.equal(ellipsizePath("/data/tgsub.db"), "/data/tgsub.db");
+    const shortened = ellipsizePath("/a/very/long/path/to/chromium/chrome.exe", 16);
+    assert.equal(shortened.length, 16);
+    assert.ok(shortened.includes("…"));
+    assert.ok(shortened.endsWith("e.exe"));
+  });
+}
+
+/**
+ * NFO 表单编辑：曾经因为嵌套块（actor / fileinfo）把后面的字段全吞掉，
+ * 表现为「showtitle 填了保存后还是空的」且 NFO 里多出重复标签。
+ */
+function nfoChecks(): void {
+  const HEAD = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>';
+  const ep = (body: string) => `${HEAD}\n<episodedetails>\n${body}\n</episodedetails>\n`;
+  const fill = (raw: string, patch: Partial<NfoFields>): string => {
+    const parsed = parseNfo(raw);
+    assert.ok(parsed, "NFO 应可解析");
+    return applyFields(parsed, { ...EMPTY_NFO_FIELDS, ...fieldsFromNfo(parsed), ...patch });
+  };
+
+  check("常规单集 NFO 读出标题 / 集号，缺失标签为空", () => {
+    const raw = ep("  <title>剧 S01E07</title>\n  <originaltitle>剧</originaltitle>\n  <season>1</season>\n  <episode>7</episode>");
+    const fields = fieldsFromNfo(parseNfo(raw));
+    assert.equal(fields.title, "剧 S01E07");
+    assert.equal(fields.originaltitle, "剧");
+    assert.equal(fields.episode, "7");
+    assert.equal(fields.showtitle, "");
+  });
+
+  check("actor 嵌套块之后的 showtitle 不再被吞掉", () => {
+    const raw = ep(
+      "  <title>剧 S01E07</title>\n  <aired>2026-11-02</aired>\n  <actor>\n    <name>张三</name>\n    <role>爸爸</role>\n  </actor>\n  <showtitle></showtitle>",
+    );
+    const parsed = parseNfo(raw)!;
+    assert.ok(parsed.children.some((c) => c.name === "actor" && c.nested));
+    assert.equal(fieldsFromNfo(parsed).aired, "2026-11-02");
+    assert.equal(fieldsFromNfo(parsed).showtitle, "");
+    assert.equal(isNfoEditable(parsed), true, "嵌套块本身不该禁止表单编辑");
+  });
+
+  check("含 actor 时保存 showtitle：只写一个标签、值可重读、嵌套块原样保留", () => {
+    const raw = ep(
+      "  <title>剧 S01E07</title>\n  <actor>\n    <name>张三</name>\n  </actor>\n  <showtitle></showtitle>",
+    );
+    const out = fill(raw, { showtitle: "新剧名" });
+    assert.equal((out.match(/<showtitle>/g) ?? []).length, 1);
+    assert.equal(fieldsFromNfo(parseNfo(out)!).showtitle, "新剧名");
+    assert.ok(out.includes("<name>张三</name>"));
+    assert.ok(out.includes("<actor>"));
+  });
+
+  check("多层嵌套 fileinfo 不吞后续字段", () => {
+    const raw = ep(
+      "  <fileinfo>\n    <streamdetails>\n      <video><codec>h264</codec></video>\n    </streamdetails>\n  </fileinfo>\n  <title>剧 S01E01</title>\n  <aired>2026-11-02</aired>",
+    );
+    const fields = fieldsFromNfo(parseNfo(raw));
+    assert.equal(fields.title, "剧 S01E01");
+    assert.equal(fields.aired, "2026-11-02");
+    assert.equal(isNfoEditable(parseNfo(raw)), true);
+  });
+
+  check("注释与 CDATA 里的尖括号不当成标签", () => {
+    const raw = ep(
+      "  <!-- <actor><name>假标签</name></actor> -->\n  <plot><![CDATA[<b>粗体</b> 与 <i>斜体</i>]]></plot>\n  <showtitle>真剧名</showtitle>",
+    );
+    const fields = fieldsFromNfo(parseNfo(raw));
+    assert.equal(fields.showtitle, "真剧名");
+    assert.equal(isNfoEditable(parseNfo(raw)), true);
+  });
+
+  check("同名标签优先显示非空值，保存时收敛成一个", () => {
+    const raw = ep("  <showtitle></showtitle>\n  <showtitle>旧剧名</showtitle>\n  <title>剧</title>");
+    assert.equal(fieldsFromNfo(parseNfo(raw)).showtitle, "旧剧名");
+    const out = fill(raw, { showtitle: "新剧名" });
+    assert.equal((out.match(/<showtitle>/g) ?? []).length, 1);
+    assert.equal(fieldsFromNfo(parseNfo(out)!).showtitle, "新剧名");
+  });
+
+  check("清空字段会删掉标签，其它字段不受影响", () => {
+    const out = fill(ep("  <title>剧</title>\n  <studio>制片厂</studio>"), { studio: "" });
+    assert.ok(!out.includes("studio"));
+    assert.ok(out.includes("<title>剧</title>"));
+  });
+
+  check("特殊字符写入时转义、读回时还原", () => {
+    const out = fill(ep("  <title>剧</title>"), { showtitle: 'A & B <C> "D"' });
+    assert.ok(out.includes("<showtitle>A &amp; B &lt;C&gt; &quot;D&quot;</showtitle>"));
+    assert.equal(fieldsFromNfo(parseNfo(out)!).showtitle, 'A & B <C> "D"');
+  });
+
+  check("自闭合 showtitle 可以被替换成有值的标签", () => {
+    const out = fill(ep("  <title>剧</title>\n  <showtitle/>"), { showtitle: "新剧名" });
+    assert.equal(fieldsFromNfo(parseNfo(out)!).showtitle, "新剧名");
+  });
+
+  check("可编辑字段自身含子标签时才禁止表单保存", () => {
+    const raw = ep("  <plot><b>粗体</b></plot>\n  <title>剧</title>");
+    assert.equal(isNfoEditable(parseNfo(raw)), false);
+    assert.equal(fieldsFromNfo(parseNfo(raw)!).title, "剧");
+  });
+
+  check("解析不出来时不可编辑，且不会误判为可新建", () => {
+    assert.equal(parseNfo("不是 XML"), null);
+    assert.equal(isNfoEditable(null), false);
+    assert.equal(isNfoEditable(parseNfo("不是 XML")), false);
+  });
+
+  check("新建的单集 NFO 合法且能读回 showtitle", () => {
+    const raw = buildNfo("episode", {
+      ...EMPTY_NFO_FIELDS,
+      title: "剧 S01E01",
+      showtitle: "剧",
+      season: "1",
+      episode: "1",
+    });
+    assert.equal(validateNfo(raw, "episode"), null);
+    assert.equal(fieldsFromNfo(parseNfo(raw)!).showtitle, "剧");
+  });
+
+  check("畸形未闭合的内层标签不会让后续字段消失", () => {
+    const raw = ep("  <actor><name>张三</actor>\n  <title>剧</title>\n  <showtitle>真剧名</showtitle>");
+    const fields = fieldsFromNfo(parseNfo(raw));
+    assert.equal(fields.title, "剧");
+    assert.equal(fields.showtitle, "真剧名");
+  });
+}
+
+/** 自动 / 一键生成 NFO 时的追溯字段与「合并而非覆盖」 */
+function nfoTraceChecks(): void {
+  const generated = `<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<episodedetails>
+  <title>新剧名 S01E07</title>
+  <showtitle>新剧名</showtitle>
+  <originalfilename>生成时的文件名.mp4</originalfilename>
+  <source>Telegram · 新频道</source>
+  <uniqueid type="tgsub" default="true">tgsub:剧:S01E07</uniqueid>
+</episodedetails>
+`;
+  const existing = `<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<episodedetails>
+  <title>旧标题</title>
+  <originalfilename>用户手写原名.mp4</originalfilename>
+  <source>用户手写来源</source>
+  <custom>保留我</custom>
+  <actor><name>张三</name></actor>
+</episodedetails>
+`;
+
+  check("Telegram 来源带频道名，原文件名优先取 file_name", () => {
+    const trace = nfoTraceOf(
+      {
+        file_name: "原始视频.mp4",
+        save_name: "剧名S01E01.mp4",
+        source: "telegram",
+        channel_title: "短剧频道",
+        source_url: null,
+      },
+      "兜底.mp4",
+    );
+    assert.equal(trace.originalFileName, "原始视频.mp4");
+    assert.equal(trace.sourceLabel, "Telegram · 短剧频道");
+    assert.equal(trace.sourceUrl, null);
+  });
+
+  check("平台来源从原链接判定 B站 / 小红书 / YouTube", () => {
+    const label = (url: string) =>
+      nfoTraceOf({ source: "platform", source_url: url, file_name: "a.mp4" }, "x.mp4").sourceLabel;
+    assert.equal(label("https://www.bilibili.com/video/BV1xx"), "B站");
+    assert.equal(label("https://xhslink.cn/o/abc"), "小红书");
+    assert.equal(label("https://youtu.be/abc"), "YouTube");
+  });
+
+  check("m3u8 与外部目录来源，原文件名回退链", () => {
+    const m3u8 = nfoTraceOf({ source: "m3u8", source_url: "https://example.com/a.m3u8", file_name: "" }, "本地.mp4");
+    assert.equal(m3u8.sourceLabel, "网页 / m3u8");
+    assert.equal(m3u8.originalFileName, "本地.mp4");
+    assert.equal(m3u8.sourceUrl, "https://example.com/a.m3u8");
+    const manual = nfoTraceOf(null, "手动添加.mp4");
+    assert.equal(manual.sourceLabel, "外部目录");
+    assert.equal(manual.originalFileName, "手动添加.mp4");
+    assert.equal(
+      nfoTraceOf({ save_name: "落盘名.mp4", file_name: "" }, "x.mp4").originalFileName,
+      "落盘名.mp4",
+    );
+  });
+
+  check("生成 NFO 时保留已写过的原文件名与来源", () => {
+    const out = mergeGeneratedNfo(existing, generated);
+    assert.ok(out.includes("<originalfilename>用户手写原名.mp4</originalfilename>"));
+    assert.ok(out.includes("<source>用户手写来源</source>"));
+    assert.ok(!out.includes("生成时的文件名"));
+    assert.ok(out.includes("<title>新剧名 S01E07</title>"));
+    assert.ok(out.includes("<showtitle>新剧名</showtitle>"));
+    assert.ok(out.includes("<uniqueid"));
+    assert.ok(out.includes("<custom>保留我</custom>"));
+    assert.ok(out.includes("<name>张三</name>"));
+    assert.equal((out.match(/<title>/g) ?? []).length, 1);
+  });
+
+  check("原文没有追溯字段时由生成结果补写", () => {
+    const raw = '<?xml version="1.0"?>\n<episodedetails>\n  <title>旧</title>\n</episodedetails>\n';
+    const out = mergeGeneratedNfo(raw, generated);
+    assert.ok(out.includes("<originalfilename>生成时的文件名.mp4</originalfilename>"));
+    assert.ok(out.includes("<source>Telegram · 新频道</source>"));
+    assert.ok(out.includes("<title>新剧名 S01E07</title>"));
+    assert.equal(validateNfo(out, "episode"), null);
+  });
+
+  check("原文里是空的追溯标签时用生成结果补上", () => {
+    const raw =
+      "<episodedetails>\n  <originalfilename></originalfilename>\n  <source></source>\n  <title>旧</title>\n</episodedetails>\n";
+    const out = mergeGeneratedNfo(raw, generated);
+    assert.ok(out.includes("<originalfilename>生成时的文件名.mp4</originalfilename>"));
+    assert.ok(out.includes("<source>Telegram · 新频道</source>"));
+    assert.equal((out.match(/<source>/g) ?? []).length, 1);
+  });
+
+  check("多值模板字段整组刷新，生成结果里没有的标签保留", () => {
+    const raw = "<episodedetails>\n  <tag>旧1</tag>\n  <tag>旧2</tag>\n  <genre>旧分类</genre>\n</episodedetails>\n";
+    const gen = "<episodedetails>\n  <tag>新1</tag>\n  <tag>新2</tag>\n  <tag>新3</tag>\n</episodedetails>\n";
+    const out = mergeGeneratedNfo(raw, gen);
+    assert.equal((out.match(/<tag>/g) ?? []).length, 3);
+    assert.ok(!out.includes("旧1") && !out.includes("旧2"));
+    assert.ok(out.includes("<genre>旧分类</genre>"));
+  });
+
+  check("解析不出来时生成不动原文", () => {
+    const bad = "这不是 XML";
+    assert.equal(mergeGeneratedNfo(bad, generated), bad);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
+    ["元数据页文件管理器用例", () => fileManagerChecks()],
     ["日志存储用例", () => logStoreChecks()],
     ["权限检查用例", () => permissionChecks()],
     ["Emby 用例", () => embyChecks()],
@@ -2770,6 +3198,9 @@ async function main(): Promise<void> {
     ["媒体来源分区用例", () => originChecks()],
     ["媒体移动复制用例", () => transferPlanChecks()],
     ["媒体排列方式用例", () => sortChecks()],
+    ["概览状态汇总用例", () => overviewChecks()],
+    ["NFO 表单编辑用例", () => nfoChecks()],
+    ["NFO 生成追溯用例", () => nfoTraceChecks()],
   ];
   for (const [name, run] of suites) {
     try {

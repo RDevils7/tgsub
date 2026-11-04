@@ -387,3 +387,70 @@ export const IconHelp = (p: Props) => (
     <path d="M12 17.1v.1" />
   </Svg>
 );
+
+/* ----------------------------- 概览页状态展示 ----------------------------- */
+
+export const IconActivity = (p: Props) => (
+  <Svg {...p}>
+    <path d="M2.6 12h4.1l2.6-6.4 4.1 12.8 2.5-6.4h5.5" />
+  </Svg>
+);
+
+export const IconCpu = (p: Props) => (
+  <Svg {...p}>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+    <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
+    <path d="M9 2.6v3.2M15 2.6v3.2M9 18.2v3.2M15 18.2v3.2M2.6 9h3.2M2.6 15h3.2M18.2 9h3.2M18.2 15h3.2" />
+  </Svg>
+);
+
+export const IconDatabase = (p: Props) => (
+  <Svg {...p}>
+    <ellipse cx="12" cy="5.5" rx="8" ry="3" />
+    <path d="M4 5.5v6.2c0 1.7 3.6 3 8 3s8-1.3 8-3V5.5" />
+    <path d="M4 11.7v6.2c0 1.7 3.6 3 8 3s8-1.3 8-3v-6.2" />
+  </Svg>
+);
+
+export const IconServer = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="3.5" width="18" height="7" rx="1.8" />
+    <rect x="3" y="13.5" width="18" height="7" rx="1.8" />
+    <path d="M7 7h.01M7 17h.01M11 7h6M11 17h6" />
+  </Svg>
+);
+
+export const IconGlobe = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3.2 12h17.6M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z" />
+  </Svg>
+);
+
+export const IconTool = (p: Props) => (
+  <Svg {...p}>
+    <path d="M14.6 6.4a4.2 4.2 0 0 0 5.4 5.4l-8.5 8.5a2.4 2.4 0 0 1-3.4-3.4l8.5-8.5" />
+    <path d="M14.6 6.4 17.6 3.4a1 1 0 0 1 1.4 0l1.6 1.6a1 1 0 0 1 0 1.4l-3 3" />
+  </Svg>
+);
+
+export const IconTerminal = (p: Props) => (
+  <Svg {...p}>
+    <rect x="2.8" y="4" width="18.4" height="16" rx="2" />
+    <path d="m6.8 9 3 3-3 3M12.5 15h4.6" />
+  </Svg>
+);
+
+export const IconHardDrive = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M3 13.5h18M7 16.5h.01M10.5 16.5h.01" />
+  </Svg>
+);
+
+export const IconPackage = (p: Props) => (
+  <Svg {...p}>
+    <path d="m12 2.8 8.2 4.5v9.4L12 21.2l-8.2-4.5V7.3L12 2.8Z" />
+    <path d="m3.9 7.4 8.1 4.4 8.1-4.4M12 11.8v9.3M7.9 5.1l8.2 4.5" />
+  </Svg>
+);

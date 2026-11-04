@@ -17,6 +17,7 @@ import {
   telegramProxyUnsupported,
 } from "../lib/netprobe";
 import { APP_VERSION } from "../version";
+import { getOverview } from "../system/overview";
 import { logger } from "../logger";
 
 export const systemRouter = Router();
@@ -35,6 +36,17 @@ systemRouter.get("/health", (_req, res) => {
     version: APP_VERSION,
   });
 });
+
+/**
+ * 概览页聚合状态：运行时 / 存储 / 工具链 / 服务，一次拿全。
+ * 默认复用 30 秒缓存，?refresh=1 会重新探测 ffmpeg、yt-dlp、Chromium 的版本。
+ */
+systemRouter.get(
+  "/overview",
+  asyncHandler(async (req, res) => {
+    res.json(await getOverview(req.query.refresh === "1"));
+  }),
+);
 
 /**
  * 优雅退出：先断开 Telegram 再退出进程。

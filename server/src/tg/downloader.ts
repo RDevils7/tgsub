@@ -23,6 +23,7 @@ import {
   pickProxy,
   plannedRoutes,
   resolveM3u8Input,
+  ROUTE_FALLBACK_NOTE,
   shouldRetryRoute,
 } from "./m3u8";
 import { rememberRoute } from "./netroute";
@@ -90,6 +91,8 @@ const stmtResetStuck = db.prepare(
 );
 /** 记录这次实际走的网络线路（直连 / 代理），界面上用来告诉用户 */
 const stmtRoute = db.prepare<[string, number]>("UPDATE downloads SET net_route = ? WHERE id = ?");
+/** 线路切换说明（直连失败 → 改用代理），下载列表里显示成一行提示，不是错误 */
+const stmtRouteNote = db.prepare<[string | null, number]>("UPDATE downloads SET route_note = ? WHERE id = ?");
 const stmtChannel = db.prepare<[number], { username: string | null; tg_id: string | null; title: string }>(
   "SELECT username, tg_id, title FROM channels WHERE id = ?",
 );
@@ -687,7 +690,7 @@ class DownloadQueue {
             `跳过重复下载：${label} → ${relPathOf(candidate)}（本地已有 ${humanSize(existing.size)}）`,
           );
           // 文件在但元信息可能缺（老版本下载的），顺手补齐
-          await finalizeMedia(candidate, row.emby_json);
+          await finalizeMedia(candidate, row.emby_json, row);
           // 顺手让 Emby 认一下这个文件：老版本下载时没通知过入库
           if (!isArtTask) queueEmbyUpdate(candidate, "Created");
           return;
@@ -767,7 +770,7 @@ class DownloadQueue {
         `下载完成：${label} → ${relPathOf(targetPath)}（${humanSize(stat.size)}）`,
       );
       // 生成 Emby 的 .nfo / 本集缩略图 / 剧集封面（失败不影响下载结果）
-      await finalizeMedia(targetPath, row.emby_json);
+      await finalizeMedia(targetPath, row.emby_json, row);
       // 最后通知 Emby 入库：放在元信息写完之后，Emby 扫到文件时海报简介已经就位。
       // 攒 2.5 秒批量提交，连着下完几集也只会触发一次增量扫描。
       if (!isArtTask && !isPhoto) queueEmbyUpdate(targetPath, "Created");
@@ -808,7 +811,7 @@ class DownloadQueue {
       // 老版本的封面图任务彻底失败时也触发一次收尾，别让同目录的活文件白等
       if (row.save_dir && (row.save_name ?? "").startsWith(".art-")) {
         const fallback = path.join(env.downloadDir, row.save_dir, row.save_name ?? "x");
-        await finalizeMedia(fallback, row.emby_json);
+        await finalizeMedia(fallback, row.emby_json, row);
       }
     }
   }
@@ -892,7 +895,7 @@ class DownloadQueue {
       );
 
       if (getSettings().platform_meta) {
-        await finalizeMedia(result.file, row.emby_json);
+        await finalizeMedia(result.file, row.emby_json, row);
       }
       queueEmbyUpdate(result.file, "Created");
       requestCacheTrim();
@@ -944,6 +947,8 @@ class DownloadQueue {
   private async runM3u8(id: number, row: Download): Promise<void> {
     const startedAt = Date.now();
     stmtSetStatus.run(startedAt, id);
+    // 重试 / 继续时清掉上一轮的线路提示，避免成功后还挂着旧说明
+    stmtRouteNote.run(null, id);
     this.live.set(id, {
       startedAt,
       downloaded: 0,
@@ -1017,6 +1022,11 @@ class DownloadQueue {
             const message = lastError?.message ?? String(err);
             const isLast = i === routes.length - 1;
             if (isLast || !shouldRetryRoute(message)) break;
+            // 直连失败、下一条线路正好是代理 —— 把原因写进任务，
+            // 下载列表会立刻显示「因直连下载失败，使用代理进行下载」。
+            if (route === "direct" && routes[i + 1] === "proxy") {
+              stmtRouteNote.run(ROUTE_FALLBACK_NOTE, id);
+            }
             logger.warn(
               { id, route, err: message },
               `按${route === "direct" ? "直连" : "代理"}下载失败，换另一条线路重试`,
@@ -1081,7 +1091,7 @@ class DownloadQueue {
       );
 
       if (getSettings().platform_meta) {
-        await finalizeMedia(outFile, row.emby_json);
+        await finalizeMedia(outFile, row.emby_json, row);
       }
       queueEmbyUpdate(outFile, "Created");
       requestCacheTrim();

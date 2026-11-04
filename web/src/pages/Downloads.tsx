@@ -468,6 +468,13 @@ export default function Downloads() {
                     </p>
 
                     <DownloadStats item={item} />
+                    {/* 线路切换提示不是错误：任务可能已经靠代理下完了，用告警色单独一行 */}
+                    {item.route_note && (
+                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] leading-relaxed text-warn">
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-70" />
+                        {item.route_note}
+                      </p>
+                    )}
                     {item.error && (
                       <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-err/80">{item.error}</p>
                     )}

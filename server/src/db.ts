@@ -206,6 +206,9 @@ ensureColumn("downloads", "error", "TEXT");
 // 实际使用的网络线路：direct=直连 / proxy=代理 / auto=尚未确定。
 // 界面用它告诉用户「这条到底走没走代理」。
 ensureColumn("downloads", "net_route", "TEXT");
+// 线路切换提示：直连下载失败、自动改走代理时写给下载列表看的一行说明。
+// 不写进 error —— 这不是失败，任务最后可能成功。
+ensureColumn("downloads", "route_note", "TEXT");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 

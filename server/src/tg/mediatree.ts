@@ -29,6 +29,26 @@ const MAX_FILES_PER_FOLDER = 500;
 
 export { isVideoFile };
 
+/**
+ * 下载根全盘扫描的结果缓存。
+ *
+ * collectFolders 在一次请求里会被调用多次（列表 / 来源 / 详情 / 删除预览），
+ * 每次都递归扫整个下载根会很慢，尤其是媒体库大的时候。下载根扫描结果跟
+ * sort 参数无关，缓存一小段时间即可，外部来源（media_sources）和 downloads
+ * 表查询仍是实时的。
+ */
+const SCAN_TTL_MS = 5000;
+let scanCache: { root: string; at: number; value: Array<{ dir: string; files: string[] }> } | null = null;
+
+function scanDownloadRoot(root: string): Array<{ dir: string; files: string[] }> {
+  if (scanCache && scanCache.root === root && Date.now() - scanCache.at < SCAN_TTL_MS) {
+    return scanCache.value;
+  }
+  const value = collectSeriesDirs(root);
+  scanCache = { root, at: Date.now(), value };
+  return value;
+}
+
 export interface MediaFileEntry {
   /** 绝对路径 */
   path: string;
@@ -446,7 +466,23 @@ export function collectFolders(
     else folder.source = "manual";
   };
 
-  // 1) 项目下载的文件
+  // 0) 下载根目录：以文件系统为准，列出所有视频（含非 tgsub 下载的）
+  //    手动拷进来的、或来自其它工具的视频也会像其它条目一样规范化显示，
+  //    不再只认 downloads 表里登记过的记录。命中的下载记录会 enrich 出频道 / 来源等信息。
+  for (const item of scanDownloadRoot(downloadRoot)) {
+    if (isExcluded(item.dir)) continue;
+    const folder = ensureFolder(item.dir);
+    for (const file of item.files) {
+      if (isExcluded(file)) continue;
+      const abs = path.resolve(file);
+      if (seenFiles.has(abs)) continue;
+      const row = findDownloadByPath(abs);
+      addFile(folder, abs, row);
+      if (row && folder.source === "manual") folder.source = "download";
+    }
+  }
+
+  // 1) 项目下载的文件（磁盘上已不存在的记录也要补回来，方便用户清理）
   for (const row of stmtDoneVideos.all()) {
     if (!row.file_path) continue;
     const abs = path.resolve(row.file_path);

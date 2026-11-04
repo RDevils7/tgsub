@@ -13,13 +13,23 @@ import {
   IconTag,
 } from "../components/icons";
 import { formatBytes, formatCountdown, formatRelative, statusMeta } from "../utils";
+import {
+  HealthBanner,
+  RuntimeCard,
+  ServiceGrid,
+  StorageSection,
+  ToolChain,
+  useOverview,
+  type OverviewNavKey,
+} from "../components/OverviewPanels";
 
 interface Props {
   stats: Stats | null;
   scanState: ScanState | null;
   onScan: () => Promise<void>;
   scanning: boolean;
-  onNavigate: (page: "channels" | "subscriptions" | "downloads" | "settings") => void;
+  /** 新面板的卡片能跳到更多页面，App 传进来的 navigate 覆盖全部页面，类型兼容 */
+  onNavigate: (page: OverviewNavKey) => void;
 }
 
 function Countdown({ ts }: { ts: number | null }) {
@@ -32,6 +42,9 @@ function Countdown({ ts }: { ts: number | null }) {
 }
 
 export default function Dashboard({ stats, scanState, onScan, scanning, onNavigate }: Props) {
+  // 环境状态单独轮询（30 秒）并自带缓存，不跟 8 秒一次的下载统计绑在一起
+  const overview = useOverview();
+
   if (!stats || !scanState) {
     return (
       <div className="flex h-64 items-center justify-center text-slate-500">
@@ -82,6 +95,8 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
 
   return (
     <div className="space-y-5">
+      <HealthBanner state={overview} />
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map((card, i) => (
           <div
@@ -232,6 +247,19 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
           </div>
         </div>
       </div>
+
+      {overview.report && (
+        <>
+          <ServiceGrid services={overview.report.services} onNavigate={onNavigate} />
+          <ToolChain tools={overview.report.tools} />
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+            <div className="xl:col-span-2">
+              <StorageSection report={overview.report} />
+            </div>
+            <RuntimeCard report={overview.report} />
+          </div>
+        </>
+      )}
 
       <div className="card animate-fade-up p-5" style={{ animationDelay: "100ms" }}>
         <div className="flex items-center justify-between">

@@ -34,6 +34,7 @@ import {
   IconCrop,
   IconDownload,
   IconEdit,
+  IconEyeOff,
   IconFolder,
   IconImage,
   IconMove,
@@ -118,6 +119,8 @@ const EMPTY_FIELDS: NfoFields = {
   outline: "",
   studio: "",
   rating: "",
+  originalfilename: "",
+  source: "",
   tags: [],
   genres: [],
 };
@@ -135,6 +138,8 @@ const FIELD_KEYS: Array<keyof NfoFields> = [
   "outline",
   "studio",
   "rating",
+  "originalfilename",
+  "source",
 ];
 
 /** 表单比较用（忽略空数组顺序差异） */
@@ -190,6 +195,9 @@ export default function Metadata() {
   const [picker, setPicker] = useState<{ scope: ImageScope; name: ImageName } | null>(null);
   const [imageScope, setImageScope] = useState<ImageScope>("series");
   const [addOpen, setAddOpen] = useState(false);
+  /** 已隐藏（仅从列表移除）条目的独立查看面板 */
+  const [hiddenOpen, setHiddenOpen] = useState(false);
+  const [hiddenCount, setHiddenCount] = useState(0);
   /** 待删除的媒体条目（剧集目录 / 单集视频） */
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   /** 勾选的条目（视频或剧集目录，存的是路径标识） */
@@ -236,6 +244,51 @@ export default function Metadata() {
   useEffect(() => {
     void fetchList(page);
   }, [fetchList, page]);
+
+  /** 已隐藏条目数量（给工具栏徽章用） */
+  const loadHiddenCount = useCallback(async () => {
+    try {
+      const res = await api.metadataExcluded();
+      setHiddenCount(res.items.length);
+    } catch {
+      /* 未登录或被拦截时忽略，不影响主列表 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHiddenCount();
+  }, [loadHiddenCount]);
+
+  /** 隐藏单个条目：登记到 media_excluded，刷新后也不会再出现 */
+  const hideTarget = useCallback(
+    async (key: string, name: string) => {
+      try {
+        await api.hideMetadata(key);
+        toast.push(`已隐藏「${name}」`, "success");
+        await loadHiddenCount();
+        await fetchList(page, true);
+      } catch (err) {
+        toast.push((err as Error).message, "error");
+      }
+    },
+    [page, toast, fetchList, loadHiddenCount],
+  );
+
+  /** 批量隐藏勾选的条目 */
+  const hideBatch = useCallback(
+    async (keys: string[], names: string[]) => {
+      try {
+        const res = await api.hideMetadataBatch(keys);
+        toast.push(`已隐藏 ${res.hidden} 项` + (res.failed.length ? `，${res.failed.length} 项失败` : ""), "success");
+        setChecked(new Set());
+        await loadHiddenCount();
+        await fetchList(page, true);
+      } catch (err) {
+        toast.push((err as Error).message, "error");
+      }
+    },
+    [page, toast, fetchList, loadHiddenCount],
+  );
 
   // 换页 / 换来源 / 换搜索词时勾选会跨页失效，直接清空免得删错东西
   useEffect(() => {
@@ -411,6 +464,17 @@ export default function Metadata() {
   /** 合并只对视频有意义：勾了剧集目录就没法按集号重排 */
   const onlyFiles = checkedEntries.length > 0 && checkedEntries.every((entry) => entry.kind === "file");
 
+  /** 当前页所有可选条目（剧集目录 + 各视频），用于「全选」整页 */
+  const allSelectableKeys: string[] = [];
+  for (const folder of items) {
+    allSelectableKeys.push(folder.key);
+    for (const file of folder.files) allSelectableKeys.push(file.key);
+  }
+  const allSelected = allSelectableKeys.length > 0 && allSelectableKeys.every((k) => checked.has(k));
+  const toggleSelectAll = () => {
+    setChecked(allSelected ? new Set() : new Set(allSelectableKeys));
+  };
+
   /**
    * 列表分组：选了某个来源就只显示这一组（不重复显示分组标题），
    * 选「全部」时按来源分区展示，顺序以后端返回的 origins 为准。
@@ -458,13 +522,24 @@ export default function Metadata() {
             <IconPlus className="h-3.5 w-3.5" />
             添加
           </Button>
+          <Button
+            size="sm"
+            variant={hiddenCount > 0 ? "primary" : undefined}
+            onClick={() => setHiddenOpen(true)}
+            title="查看已隐藏（仅从列表移除）的条目，可恢复显示"
+          >
+            <IconEyeOff className="h-3.5 w-3.5" />
+            已隐藏{hiddenCount > 0 ? ` (${hiddenCount})` : ""}
+          </Button>
           <Button size="sm" onClick={() => void fetchList(page)} title="刷新">
             <IconRefresh className="h-3.5 w-3.5" />
           </Button>
         </div>
 
-        {/* 来源分区：Telegram / B站 / 小红书 / YouTube / 网页(m3u8) / 外部目录 */}
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.06] px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {/* 来源分区：Telegram / B站 / 小红书 / YouTube / 网页(m3u8) / 外部目录
+            之前是单行横向滚动，右侧的「混合来源 / 其它」会被裁掉看不见；
+            改成自动换行，分区再多也全部露出来，宽屏仍是一行。 */}
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-white/[0.06] px-3 py-2">
           <button
             onClick={() => {
               setOrigin("");
@@ -529,6 +604,19 @@ export default function Metadata() {
               className={`h-3 w-3 transition-transform ${sortOrder === "asc" ? "rotate-180" : ""}`}
             />
           </button>
+          <button
+            onClick={() => toggleSelectAll()}
+            disabled={allSelectableKeys.length === 0}
+            className={`flex items-center gap-1 rounded-md border px-1.5 py-1 text-[11px] transition disabled:opacity-30 ${
+              allSelected
+                ? "border-brand-500/40 bg-brand-500/15 text-brand-200"
+                : "border-white/[0.07] text-slate-400 hover:text-slate-200"
+            }`}
+            title={allSelected ? "取消全选当前页" : "全选当前页（剧集目录与各视频一起勾上）"}
+          >
+            <IconCheck className="h-3 w-3" />
+            {allSelected ? "取消全选" : "全选"}
+          </button>
           <span className="ml-auto text-[10.5px] tabular-nums text-slate-500">{total} 条</span>
         </div>
 
@@ -542,7 +630,7 @@ export default function Metadata() {
             <EmptyState
               icon={<IconVideo className="h-5 w-5" />}
               title="还没有可管理的媒体"
-              description="下载完成的视频会按文件夹聚合到这里，也可以手动添加本地视频或目录"
+              description="下载目录下的所有视频都会按文件夹聚合到这里（不论是否由 tgsub 下载），也可以手动添加本地视频或目录"
               action={
                 <Button size="sm" onClick={() => setAddOpen(true)}>
                   <IconPlus className="h-3.5 w-3.5" />
@@ -618,6 +706,20 @@ export default function Metadata() {
                           <span className="rounded bg-white/[0.06] px-1.5 py-[1px] tabular-nums text-slate-400">
                             {folder.fileCount} 个视频
                           </span>
+                          {folder.source !== "download" && (
+                            <span
+                              className={`rounded px-1.5 py-[1px] text-slate-400 ${
+                                folder.source === "mixed" ? "bg-white/[0.06]" : "bg-amber-500/15 text-amber-300"
+                              }`}
+                              title={
+                                folder.source === "mixed"
+                                  ? "该目录同时含 tgsub 下载与外部文件"
+                                  : "目录里的文件并非都由 tgsub 下载（外部 / 手动拷入）"
+                              }
+                            >
+                              {folder.source === "mixed" ? "混合" : "外部"}
+                            </span>
+                          )}
                           {folder.missing && (
                             <span className="rounded bg-err/15 px-1.5 py-[1px] text-err" title="磁盘上找不到这个目录了，只能删记录">
                               磁盘缺失
@@ -641,7 +743,15 @@ export default function Metadata() {
                       </span>
                     </button>
 
-                    {/* 每一项都能删：剧集目录可整目录删除，也可只移出列表 */}
+                    {/* 每一项都能隐藏 / 删除：隐藏只是从列表移除（磁盘文件保留），删除会连文件一起删 */}
+                    <Button
+                      size="sm"
+                      className="mt-0.5 shrink-0 !px-1.5 !py-1"
+                      onClick={() => void hideTarget(folder.key, folder.name)}
+                      title="隐藏这个剧集目录（保留磁盘文件，刷新后也不再显示，可在「已隐藏」里恢复）"
+                    >
+                      <IconEyeOff className="h-3 w-3" />
+                    </Button>
                     <Button
                       size="sm"
                       variant="danger"
@@ -654,7 +764,7 @@ export default function Metadata() {
                           path: folder.dir,
                         })
                       }
-                      title="删除这个剧集目录"
+                      title="删除这个剧集目录（连磁盘文件一起删）"
                     >
                       <IconTrash className="h-3 w-3" />
                     </Button>
@@ -709,8 +819,26 @@ export default function Metadata() {
                                 >
                                   {file.nfoExists ? "NFO" : "无"}
                                 </span>
+                                <span
+                                  className={`shrink-0 rounded px-1.5 py-[1px] text-[10px] ${
+                                    file.source === "download"
+                                      ? "bg-brand-500/15 text-brand-300"
+                                      : "bg-white/[0.06] text-slate-400"
+                                  }`}
+                                  title={file.source === "download" ? "由 tgsub 下载并收录" : "下载目录里的文件，但未由 tgsub 下载（外部 / 手动拷入）"}
+                                >
+                                  {file.source === "download" ? "tgsub" : "外部"}
+                                </span>
                               </button>
-                              {/* 每一集都能删 */}
+                              {/* 每一集都能隐藏 / 删除 */}
+                              <Button
+                                size="sm"
+                                className="shrink-0 !px-1.5 !py-0.5"
+                                onClick={() => void hideTarget(file.key, file.name)}
+                                title="隐藏这一集（保留磁盘文件，刷新后也不再显示，可在「已隐藏」里恢复）"
+                              >
+                                <IconEyeOff className="h-3 w-3" />
+                              </Button>
                               <Button
                                 size="sm"
                                 variant="danger"
@@ -723,7 +851,7 @@ export default function Metadata() {
                                     path: file.path,
                                   })
                                 }
-                                title="删除这一集"
+                                title="删除这一集（连磁盘文件一起删）"
                               >
                                 <IconTrash className="h-3 w-3" />
                               </Button>
@@ -794,9 +922,17 @@ export default function Metadata() {
               </Button>
               <Button
                 size="sm"
+                onClick={() => void hideBatch(checkedEntries.map((e) => e.key), checkedEntries.map((e) => e.name))}
+                title="批量隐藏选中的条目（保留磁盘文件，刷新后也不再显示）"
+              >
+                <IconEyeOff className="h-3.5 w-3.5" />
+                隐藏
+              </Button>
+              <Button
+                size="sm"
                 variant="danger"
                 onClick={() => setBatchDelete(checkedEntries)}
-                title="批量删除选中的条目"
+                title="批量删除选中的条目（连磁盘文件一起删）"
               >
                 <IconTrash className="h-3.5 w-3.5" />
                 删除
@@ -1063,6 +1199,15 @@ export default function Metadata() {
         }}
       />
 
+      <HiddenDialog
+        open={hiddenOpen}
+        onClose={() => setHiddenOpen(false)}
+        onChanged={async () => {
+          await loadHiddenCount();
+          await fetchList(page, true);
+        }}
+      />
+
       {/* 删除媒体条目（可连磁盘文件一起删，也可只移出列表） */}
       <MediaDeleteDialog
         target={deleteTarget}
@@ -1177,8 +1322,11 @@ function BasicTab({
         {locked && (
           <span className="ml-auto flex items-center gap-1 text-warn">
             <IconAlert className="h-3.5 w-3.5" />
-            该 NFO 含嵌套标签，请用「NFO 原文」编辑
+            该 NFO 结构无法安全编辑，请用「NFO 原文」
           </span>
+        )}
+        {!locked && slot?.nested && (
+          <span className="ml-auto text-slate-500">含嵌套标签（actor / fileinfo 等），保存时会原样保留</span>
         )}
       </div>
 
@@ -1186,7 +1334,12 @@ function BasicTab({
         <Field label="标题 title" value={fields.title} onChange={(v) => onChange({ title: v })} />
         {/* tvshow.nfo 没有 showtitle 这个概念，只在单集里出现 */}
         {kind === "episode" && (
-          <Field label="剧名 showtitle" value={fields.showtitle} onChange={(v) => onChange({ showtitle: v })} />
+          <Field
+            label="剧名 showtitle"
+            value={fields.showtitle}
+            onChange={(v) => onChange({ showtitle: v })}
+            placeholder="Emby 靠它把这一集归到剧集"
+          />
         )}
         <Field label="原名 originaltitle" value={fields.originaltitle} onChange={(v) => onChange({ originaltitle: v })} />
         <Field label="制片厂 studio" value={fields.studio} onChange={(v) => onChange({ studio: v })} />
@@ -1201,6 +1354,19 @@ function BasicTab({
             <Field label="评分 rating" value={fields.rating} onChange={(v) => onChange({ rating: v })} placeholder="0-10" mono />
           </>
         )}
+        <div className="sm:col-span-2 -mb-1 mt-1 flex items-center gap-2 text-[10.5px] uppercase tracking-wide text-slate-500">
+          <span>追溯信息 · 生成 NFO 时自动补写</span>
+          <span className="h-px flex-1 bg-white/[0.07]" />
+        </div>
+        {kind === "episode" && (
+          <Field
+            label="原文件名 originalfilename"
+            value={fields.originalfilename}
+            onChange={(v) => onChange({ originalfilename: v })}
+            mono
+          />
+        )}
+        <Field label="来源 source" value={fields.source} onChange={(v) => onChange({ source: v })} />
         {kind === "show" && (
           <Field label="首播 premiered" value={fields.premiered} onChange={(v) => onChange({ premiered: v })} placeholder="2026-11-01" />
         )}
@@ -1511,6 +1677,102 @@ function ImagesTab({
   );
 }
 
+/* ------------------------------ 已隐藏的条目（独立面板，不在「添加」里） ------------------------------ */
+
+function HiddenDialog({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onChanged: () => void | Promise<void>;
+}) {
+  const toast = useToast();
+  const [items, setItems] = useState<MetadataExcludedItem[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api.metadataExcluded();
+      setItems(res.items);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (open) void load();
+  }, [open, load]);
+
+  const restore = async (target: string) => {
+    setBusy(true);
+    try {
+      await api.restoreMetadataExcluded(target);
+      toast.push("已恢复显示", "success");
+      await load();
+      await onChanged();
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="已隐藏的条目"
+      description="这些条目只是从列表里移除了，磁盘文件仍在。恢复后会重新显示。"
+      width="max-w-2xl"
+      footer={
+        <Button size="sm" onClick={onClose}>
+          完成
+        </Button>
+      }
+    >
+      <div className="space-y-3">
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-6 text-[12.5px] text-slate-500">
+            <Spinner /> 加载中…
+          </div>
+        )}
+        {!loading && items.length === 0 && (
+          <p className="py-6 text-center text-[12.5px] text-slate-500">没有被隐藏的条目。</p>
+        )}
+        {!loading && items.length > 0 && (
+          <ul className="max-h-[55vh] space-y-1.5 overflow-y-auto">
+            {items.map((item) => (
+              <li
+                key={item.path}
+                className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5"
+              >
+                <IconEyeOff className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-slate-300" title={item.path}>
+                  {item.path}
+                </span>
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void restore(item.path)}
+                  title="恢复显示"
+                >
+                  恢复
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 /* ------------------------------ 手动添加来源 ------------------------------ */
 
 function AddSourceDialog({
@@ -1526,7 +1788,6 @@ function AddSourceDialog({
   const [browse, setBrowse] = useState<BrowseResult | null>(null);
   const [path, setPath] = useState("");
   const [sources, setSources] = useState<MetadataSource[]>([]);
-  const [excluded, setExcluded] = useState<MetadataExcludedItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -1534,15 +1795,6 @@ function AddSourceDialog({
     try {
       const res = await api.metadataSources();
       setSources(res.items);
-    } catch (err) {
-      toast.push((err as Error).message, "error");
-    }
-  }, [toast]);
-
-  const loadExcluded = useCallback(async () => {
-    try {
-      const res = await api.metadataExcluded();
-      setExcluded(res.items);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
@@ -1568,8 +1820,7 @@ function AddSourceDialog({
     if (!open) return;
     void browseTo();
     void loadSources();
-    void loadExcluded();
-  }, [open, browseTo, loadSources, loadExcluded]);
+  }, [open, browseTo, loadSources]);
 
   const add = async (target: string, title?: string) => {
     setBusy(true);
@@ -1591,21 +1842,6 @@ function AddSourceDialog({
       await api.removeMetadataSource(id);
       toast.push("已移除来源", "success");
       await loadSources();
-      await onAdded();
-    } catch (err) {
-      toast.push((err as Error).message, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** 取消隐藏：被「仅从列表移除」的条目重新回到列表里 */
-  const restore = async (target: string) => {
-    setBusy(true);
-    try {
-      await api.restoreMetadataExcluded(target);
-      toast.push("已恢复显示", "success");
-      await loadExcluded();
       await onAdded();
     } catch (err) {
       toast.push((err as Error).message, "error");
@@ -1676,41 +1912,6 @@ function AddSourceDialog({
           {sources.length > 0 && (
             <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
               添加一个上级目录时，会自动按里面的剧集文件夹拆开显示；移除来源不会删除磁盘文件。
-            </p>
-          )}
-        </div>
-
-        {/* 被「仅从列表移除」隐藏的条目：可以恢复显示 */}
-        <div>
-          <p className="label">已隐藏的项目（{excluded.length}）</p>
-          {excluded.length === 0 ? (
-            <p className="text-[11.5px] text-slate-500">没有被隐藏的项目。</p>
-          ) : (
-            <ul className="space-y-1.5">
-              {excluded.map((item) => (
-                <li
-                  key={item.path}
-                  className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-2.5 py-1.5"
-                >
-                  <IconFolder className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-slate-300" title={item.path}>
-                    {item.path}
-                  </span>
-                  <Button
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => void restore(item.path)}
-                    title="恢复显示"
-                  >
-                    恢复
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {excluded.length > 0 && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
-              这些条目只从列表里移除了，磁盘文件仍在。恢复后会重新显示。
             </p>
           )}
         </div>

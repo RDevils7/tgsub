@@ -64,6 +64,8 @@ export interface DownloadItem {
   save_name: string | null;
   /** 实际使用的网络线路：direct=直连 / proxy=代理 / auto=尚未确定 */
   net_route: string | null;
+  /** 线路切换说明（直连失败改用代理时显示） */
+  route_note: string | null;
 }
 
 /** 按链接/指定消息直接下载的回执 */
@@ -863,6 +865,10 @@ export interface NfoFields {
   outline: string;
   studio: string;
   rating: string;
+  /** 下载时的原始文件名（追溯用，不是落盘名） */
+  originalfilename: string;
+  /** 来源：Telegram · 频道名 / B站 / 网页 / m3u8 / 外部目录 */
+  source: string;
   tags: string[];
   genres: string[];
 }
@@ -969,4 +975,85 @@ export interface SessionState {
   session: { expiresAt: number; createdAt: number } | null;
   /** 当前有效会话数，用于「退出其它设备」文案 */
   devices: number;
+}
+
+/* ------------------------------ 概览页聚合状态 ------------------------------ */
+
+/** 与 server/src/system/overviewFormat.ts 保持一致 */
+export type ProbeStatus = "ok" | "warn" | "error" | "off";
+
+export interface ToolProbe {
+  id: string;
+  label: string;
+  status: ProbeStatus;
+  version: string | null;
+  /** 可执行文件 / 模块 / 数据文件的绝对路径 */
+  path: string | null;
+  source: string | null;
+  note: string | null;
+  usedBy: string;
+}
+
+export interface ServiceProbe {
+  id: string;
+  label: string;
+  status: ProbeStatus;
+  value: string;
+  note: string | null;
+  page: "settings" | "channels" | "downloads" | "emby" | "logs" | "manual" | "metadata" | null;
+}
+
+export interface StorageDirProbe {
+  id: string;
+  label: string;
+  rel: string;
+  absolute: string;
+  exists: boolean;
+  writable: boolean;
+  error: string | null;
+}
+
+export interface OverviewReport {
+  at: number;
+  elapsedMs: number;
+  cached: boolean;
+  runtime: {
+    version: string;
+    node: string;
+    platform: string;
+    arch: string;
+    os: string;
+    cpus: number;
+    totalMemory: number;
+    workDir: string;
+    pid: number;
+    uptime: number;
+    startedAt: number;
+    timezone: string;
+    resolvedTimezone: string;
+    memory: { rss: number; heapUsed: number; heapTotal: number; external: number };
+    inContainer: boolean;
+  };
+  storage: {
+    dataDir: string;
+    downloadDir: string;
+    dbFile: string;
+    dbSize: number;
+    dbTables: number;
+    dbRows: number;
+    cacheLimitMb: number;
+    writable: { data: boolean; downloads: boolean };
+    disk: { total: number; free: number; used: number; percent: number; status: ProbeStatus } | null;
+    dirs: StorageDirProbe[];
+  };
+  tools: ToolProbe[];
+  services: ServiceProbe[];
+  summary: {
+    ok: number;
+    warn: number;
+    error: number;
+    off: number;
+    issues: string[];
+    overall: ProbeStatus;
+  };
 }

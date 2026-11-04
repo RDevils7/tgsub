@@ -33,6 +33,7 @@ import {
   findSourceByPath,
   isAllowedPath,
   isVideoFile,
+  excludePath,
   listExcluded,
   listSources,
   removeSource,
@@ -55,12 +56,15 @@ import {
   type RenamePlan,
 } from "../tg/renameplan";
 import { executeRenamePlan } from "../tg/seriesrename";
+import { nfoTraceOf } from "../tg/nfotrace";
 import { planTransfer, type TransferAction } from "../tg/transferplan";
 import { executeTransfer } from "../tg/transfer";
 import {
   applyFields,
   buildNfo,
   fieldsFromNfo,
+  isNfoEditable,
+  mergeGeneratedNfo,
   parseNfo,
   readText,
   validateNfo,
@@ -423,11 +427,14 @@ function syncEmbyJson(row: Download, fields: NfoFields): EmbyMeta {
   const dirTitle = row.save_dir
     ? String(row.save_dir).split("/").filter(Boolean).pop() ?? null
     : null;
+  // title 是「剧名 S01E07」这样的单集标题，不能拿来当剧名：
+  // NFO 原文里删掉 showtitle / originaltitle 时若回退到它，
+  // 会把 emby_json 的系列名污染成带集号的字符串。
   const series = (
     fields.showtitle ||
     fields.originaltitle ||
-    fields.title ||
     old?.series ||
+    fields.title ||
     dirTitle ||
     "未命名"
   ).trim();
@@ -468,6 +475,8 @@ function fieldsFromEmby(row: Download): NfoFields {
     outline: meta.plot.replace(/\s+/g, " ").slice(0, 200),
     studio: meta.studio ?? "",
     rating: "",
+    originalfilename: "",
+    source: "",
     tags: meta.tags ?? [],
     genres: [],
   };
@@ -482,6 +491,7 @@ function fieldsFromFile(target: Target): NfoFields {
   }
   const dirName = path.basename(target.dir);
   const info = deriveEpisodeInfo(path.basename(target.path), dirName);
+  const trace = nfoTraceOf(target.download, path.basename(target.path));
   const tag =
     info.season !== null && info.episode !== null
       ? `S${String(info.season).padStart(2, "0")}E${String(info.episode).padStart(2, "0")}`
@@ -501,6 +511,8 @@ function fieldsFromFile(target: Target): NfoFields {
     outline: "",
     studio: row?.channel_title ?? "",
     rating: "",
+    originalfilename: trace.originalFileName,
+    source: trace.sourceLabel,
     tags: [],
     genres: [],
   };
@@ -546,6 +558,8 @@ function cleanFields(input: unknown, fallback: NfoFields): NfoFields {
     outline: str("outline", 400),
     studio: str("studio", 120),
     rating: str("rating", 8),
+    originalfilename: str("originalfilename", 255),
+    source: str("source", 120),
     tags: list("tags"),
     genres: list("genres"),
   };
@@ -848,6 +862,45 @@ metadataRouter.post(
   }),
 );
 
+/**
+ * 隐藏条目：登记到 media_excluded，目录树扫描时按前缀跳过，刷新后也不会再出现。
+ * 磁盘文件原封不动，只是不再显示在元数据页；可在「已隐藏」面板里恢复。
+ */
+metadataRouter.post(
+  "/excluded",
+  asyncHandler(async (req, res) => {
+    const key = String(req.body?.key ?? "");
+    assert(key, 400, "缺少路径标识");
+    const target = resolveTarget(key, { allowMissing: true });
+    excludePath(target.path);
+    logger.info({ path: target.path, kind: target.kind }, "已隐藏媒体条目");
+    res.json({ ok: true, path: target.path, kind: target.kind });
+  }),
+);
+
+/** 批量隐藏：勾选多个条目时一次性登记 */
+metadataRouter.post(
+  "/excluded/batch",
+  asyncHandler(async (req, res) => {
+    const rawKeys: unknown = req.body?.keys;
+    const keys = Array.isArray(rawKeys) ? rawKeys.map((k) => String(k)).filter(Boolean) : [];
+    assert(keys.length > 0, 400, "请先选择要隐藏的条目");
+    let hidden = 0;
+    const failed: string[] = [];
+    for (const key of keys) {
+      try {
+        const target = resolveTarget(key, { allowMissing: true });
+        excludePath(target.path);
+        hidden += 1;
+      } catch (err) {
+        failed.push(`${key}: ${(err as Error).message}`);
+      }
+    }
+    logger.info({ hidden, failed: failed.length }, "已批量隐藏媒体条目");
+    res.json({ ok: failed.length === 0, hidden, failed });
+  }),
+);
+
 /** 服务端目录浏览：给「手动添加」对话框挑文件 / 目录用 */
 metadataRouter.get(
   "/browse",
@@ -1005,7 +1058,8 @@ metadataRouter.get(
               path: paths.episode,
               size: episodeRaw ? Buffer.byteLength(episodeRaw) : 0,
               nested: Boolean(episodeParsed?.children.some((c) => c.nested)),
-              editable: !episodeRaw || !episodeParsed?.children.some((c) => c.nested),
+              // 嵌套块（actor / fileinfo 等）只原样保留，不影响标量字段的表单编辑
+              editable: !episodeRaw || isNfoEditable(episodeParsed),
             }
           : null,
         show: {
@@ -1014,7 +1068,7 @@ metadataRouter.get(
           path: paths.show,
           size: showRaw ? Buffer.byteLength(showRaw) : 0,
           nested: Boolean(showParsed?.children.some((c) => c.nested)),
-          editable: !showRaw || !showParsed?.children.some((c) => c.nested),
+          editable: !showRaw || isNfoEditable(showParsed),
         },
       },
       images,
@@ -1051,13 +1105,22 @@ metadataRouter.put(
     assert(file, 400, "无效的 NFO 路径");
     const currentRaw = await readText(file);
     const currentParsed = currentRaw ? parseNfo(currentRaw) : null;
+    // 文件存在却解析不出来时绝不能走 buildNfo：那会用表单值整份覆盖，
+    // 把用户手写的标签全丢掉。让用户先用「NFO 原文」修好结构再回来。
+    assert(!currentRaw || currentParsed, 400, "NFO 无法解析，请先用「NFO 原文」修正后再编辑");
+    assert(!currentRaw || isNfoEditable(currentParsed), 400, "NFO 中有含子标签的可编辑字段，请用「NFO 原文」编辑");
     const base = currentRaw
       ? fieldsFromNfo(currentParsed)
       : kind === "show"
         ? fieldsFromNfo(null)
         : fieldsFromFile(target);
     const fields = cleanFields(req.body?.fields, base);
-    assert(fields.showtitle || fields.title, 400, "剧名/标题不能为空");
+    // 剧集级没有 showtitle 输入框，别拿单集的必填条件去卡它
+    assert(
+      kind === "show" ? fields.title || fields.originaltitle : fields.showtitle || fields.title,
+      400,
+      kind === "show" ? "剧名不能为空" : "剧名/标题不能为空",
+    );
 
     const next = currentRaw && currentParsed ? applyFields(currentParsed, fields) : buildNfo(kind, fields);
     const problem = validateNfo(next, kind);
@@ -1184,7 +1247,10 @@ function pickShowMeta(metas: EmbyMeta[]): EmbyMeta | null {
  * 这样简介、播放/点赞/时长、分区（genre）、制片厂、原链接等都会带进 NFO，
  * 尽量不空着，且与下载时生成的 NFO 完全一致。
  * 表单/原文编辑会回写 emby_json，所以重建不会丢掉用户改过的内容。
- * 没有下载记录（手动来源）时，回退到从文件名推导。
+ * 重建是「合并」而非整份覆盖：模板字段用生成结果刷新，
+ * `<originalfilename>` / `<source>`、用户手写的自定义标签与嵌套块一律保留，
+ * 只有原文里没有的追溯字段才补写进去。
+ * 没有下载记录（手动来源）时，回退到从文件名推导，来源记为「外部目录」。
  */
 metadataRouter.post(
   "/generate/nfo",
@@ -1205,10 +1271,14 @@ metadataRouter.post(
       const nfoFile = path.join(file.dir, `${sanitizeSegment(file.base, 120)}.nfo`);
 
       const meta = row ? decodeMeta(row.emby_json) : null;
+      const trace = nfoTraceOf(row, file.name);
       let next: string;
       if (meta) {
-        // 下载记录里的富信息直接重建（含 stats / categories / link / uniqueid）
-        next = buildEpisodeNfo(meta);
+        // 下载记录里的富信息重建，再合并回已有 NFO：
+        // 原文件名、来源和用户手写的标签都保留，只刷新模板字段
+        const generated = buildEpisodeNfo(meta, trace);
+        const existing = await readText(nfoFile);
+        next = existing ? mergeGeneratedNfo(existing, generated) : generated;
       } else {
         // 手动来源：从文件名推导，并尽量回写 emby_json 以便日后重建
         const info = deriveEpisodeInfo(file.name, dirName);
@@ -1229,11 +1299,14 @@ metadataRouter.post(
             : info.series;
         fields.season = info.season !== null ? String(info.season) : "";
         fields.episode = info.episode !== null ? String(info.episode) : "";
+        // 没有下载记录时，用磁盘上的真实文件名与「外部目录」留底
+        fields.originalfilename = trace.originalFileName;
+        fields.source = trace.sourceLabel;
         if (!fields.plot) fields.plot = fields.outline = "";
 
+        const generated = buildNfo("episode", fields);
         const existing = await readText(nfoFile);
-        const parsed = existing ? parseNfo(existing) : null;
-        next = parsed ? applyFields(parsed, fields) : buildNfo("episode", fields);
+        next = existing ? mergeGeneratedNfo(existing, generated) : generated;
         if (row) syncEmbyJson(row, fields);
       }
 
@@ -1247,14 +1320,16 @@ metadataRouter.post(
     // 剧集信息（tvshow.nfo）：仅当不存在时生成，避免覆盖手工编辑
     const showFile = path.join(target.dir, "tvshow.nfo");
     if (!fs.existsSync(showFile)) {
-      const metas = files
+      const rows = files
         .map((f) => (f.downloadId ? stmtGet.get(f.downloadId) : undefined))
-        .filter((r): r is Download => Boolean(r))
+        .filter((r): r is Download => Boolean(r));
+      const metas = rows
         .map((r) => decodeMeta(r.emby_json))
         .filter((m): m is EmbyMeta => Boolean(m));
       const showMeta = pickShowMeta(metas);
+      const showTrace = nfoTraceOf(rows[0] ?? null, dirName);
       const next = showMeta
-        ? buildShowNfo(showMeta)
+        ? buildShowNfo(showMeta, showTrace)
         : buildNfo("show", {
             ...fieldsFromNfo(null),
             title: dirName,

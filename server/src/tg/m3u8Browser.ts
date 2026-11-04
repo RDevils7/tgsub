@@ -35,9 +35,31 @@ const UA =
 
 let browserPromise: Promise<Browser> | null = null;
 let browserDisabled = false;
+/** 已启动实例报上来的真实版本；未启动时概览页会退回去读可执行文件 */
+let browserVersion: string | null = null;
 /** 空闲多久后关闭浏览器（chromium 常驻约 150MB 内存，NAS 上不该一直占着） */
 const IDLE_CLOSE_MS = 3 * 60 * 1000;
 let idleTimer: NodeJS.Timeout | null = null;
+
+/**
+ * 概览页要显示「无头浏览器在不在跑、是什么版本」。
+ * 只读内存状态，绝不为展示而启动浏览器 —— 那会凭空吃掉 150MB。
+ */
+export interface BrowserStatus {
+  running: boolean;
+  disabled: boolean;
+  version: string | null;
+  idleCloseMinutes: number;
+}
+
+export function browserStatus(): BrowserStatus {
+  return {
+    running: Boolean(browserPromise),
+    disabled: browserDisabled,
+    version: browserVersion,
+    idleCloseMinutes: IDLE_CLOSE_MS / 60000,
+  };
+}
 
 async function getBrowser(): Promise<Browser> {
   if (browserDisabled) throw new Error("headless browser 已禁用（上次启动失败）");
@@ -53,9 +75,14 @@ async function getBrowser(): Promise<Browser> {
           "--disable-blink-features=AutomationControlled",
         ],
       })
+      .then((b) => {
+        browserVersion = b.version();
+        return b;
+      })
       .catch((e) => {
         browserPromise = null;
         browserDisabled = true;
+        browserVersion = null;
         logger.warn("无头浏览器启动失败（chromium 未安装？）: %s", String(e));
         throw e;
       });
@@ -70,6 +97,7 @@ function scheduleIdleClose(): void {
     idleTimer = null;
     const p = browserPromise;
     browserPromise = null;
+    browserVersion = null;
     if (!p) return;
     p.then((b) =>
       b.close().catch(() => {

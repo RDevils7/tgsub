@@ -438,6 +438,9 @@ async function resolveViaRoute(
   );
 }
 
+/** 直连下载失败、自动改走代理时写给下载列表看的一行说明（不是错误） */
+export const ROUTE_FALLBACK_NOTE = "因直连下载失败，使用代理进行下载";
+
 /* ------------------------------------------------------------------ */
 /* 错误分类：什么时候值得换线路 / 重新解析                              */
 /* ------------------------------------------------------------------ */
@@ -461,9 +464,19 @@ export function isSignatureError(message: string): boolean {
   return /\b(403|404|410)\b|签名|防盗链|Forbidden|Not Found/i.test(message);
 }
 
-/** 下载阶段值不值得换线路（403 / 429 换出口 IP 常常能过） */
+/**
+ * 下载阶段值不值得换线路。
+ *
+ * 1.3.4-test 起：**直连下载失败一律再试一次代理**，不再按错误文案挑挑拣拣。
+ * 之前只认网络类错误与 403/429/5xx，但 ffmpeg 的报错会被 parseFfmpegError
+ * 翻成中文（「网络拉取失败…」「无法解析该 m3u8…」），正则一个都认不出来，
+ * 结果「直连优先」常常卡在第一次失败上，代理明明配了也不会试。
+ * 用户取消 / 地址丢了属于本地问题，换线路也没用，直接排除。
+ */
 export function shouldRetryRoute(message: string): boolean {
-  return isNetworkError(message) || /\b(403|429|5\d\d)\b/.test(message);
+  // 用户取消 / 地址丢了 / 镜像里根本没装 ffmpeg —— 换线路也救不了
+  if (/下载已取消|下载被取消|找不到 m3u8 地址|没有可用的 ffmpeg|cancelled|canceled/i.test(message)) return false;
+  return true;
 }
 
 /**

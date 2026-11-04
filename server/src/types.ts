@@ -70,6 +70,8 @@ export interface Download {
    * 界面上用它告诉用户「这条到底走没走代理」。
    */
   net_route: string | null;
+  /** 线路切换说明（如「因直连下载失败，使用代理进行下载」），仅展示用 */
+  route_note: string | null;
 }
 
 export interface ScanRun {
