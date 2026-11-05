@@ -4,6 +4,11 @@ export interface Channel {
   id: number;
   tg_id: string | null;
   username: string | null;
+  /**
+   * 取消息用的 access_hash（字符串，可能超过 2^53）。
+   * 评论区（讨论组）大多没有 username，靠它才能拼出 InputChannel 按消息 ID 取评论。
+   */
+  access_hash: string | null;
   title: string;
   enabled: number;
   last_scanned_id: number;

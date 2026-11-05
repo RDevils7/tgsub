@@ -4,12 +4,12 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.7-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.8-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
 
-> **版本状态**：当前最新正式版 **1.3.7**（镜像 `rdevils7/tgsub:v1.3.7` 与 `latest`）。
+> **版本状态**：当前最新正式版 **1.3.8**（镜像 `rdevils7/tgsub:v1.3.8` 与 `latest`）。
 > 本页只讲「怎么部署起来用」；全部配置项、HTTP 接口、开发自检与排错见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
@@ -20,23 +20,24 @@
 
 ---
 
-## 本版更新（1.3.7）
+## 本版更新（1.3.8）
 
-**媒体库按现代播放器（SenPlayer / Hills / Infuse 一类）重做，好看也好找；带核显的 NAS 上，HEVC 这类浏览器解不了的编码交给显卡实时转成 H.264。**
+**评论区链接终于能下了。** 1.3.7 里所有 `?comment=` 链接都报「这个帖子没有开启评论，或当前账号不在关联讨论组里」——那不是判定的问题，是定位讨论组那条路本身走不通。
 
-1. **媒体库界面重做** —— 不再是「面包屑 + 一排卡片 + 一张分集表」：
-   - 目录页：顶部沉浸式主视觉（最近更新那部的横版剧照铺底，只有竖版海报时自动虚化成氛围底）+ 自适应海报墙（窗口多宽就铺多少列）+ 散装视频横向片架；
-   - 剧集页：海报 + 标题 + 年份 / 来源 / 集数 + 简介的主视觉区，选集支持**网格 / 列表双视图**；卡片带缩略图、集号、两行标题、三行简介与「分辨率 · 体积 · 编码 · 时间」胶囊；
-   - 播放：影院式弹窗，`[` `]` 切上一集 / 下一集，`Esc` 关闭，底部可直接下载；
-   - 顺带修掉简介里露出 `<![CDATA[` 的毛病：解析 NFO 时把 CDATA 当容器剥掉、再去 HTML 标签，元数据表单 / 写回 Emby / 媒体库三处同时干净。
-2. **显卡硬件转码**（部署方法见「部署 → 硬件转码」）：
-   - 启动时探测 `ffmpeg` 有没有 VAAPI / QSV、有没有 `/dev/dri/renderD128`，并**真编一帧**验证驱动能开（只查参数会误报）；
-   - 浏览器解不了的编码自动走「**硬解 + 硬编 H.264**」，目标高度 `min(1080, 源高)`，音频转 AAC，CPU 基本不烧；
-   - 实时流没有总长度，进度条由前端自绘，拖动时按 `start=秒` 从新位置重开一路（首帧 1~3 秒）；
-   - 生效后媒体库工具栏显示绿色「硬解 · VAAPI」，转码的集标「显卡转码」，概览页工具链多一项「硬件解码」（没有设备会直接写原因）；
-   - 想强制指定：environment 里加 `HW_ACCEL: vaapi|qsv|software|none`（不填就是自动探测）。
+1. **定位讨论组改成五条路依次兜底**：
+   - ① `messages.getDiscussionMessage`（空结果自动重试一次，遇 FLOOD_WAIT 会等）；
+   - ② 直接读帖子自身的 `replies.channel_id`（只读频道就能拿到，不需要任何群权限）；
+   - ③ `messages.getReplies(peer=频道, msg_id=帖子)`，从返回的 chats 里补 `access_hash`；
+   - ④ 拉一次对话框列表里找关联群（**命中才缓存**，空结果不缓存，避免一次网络抖动被记成永久失败）；
+   - ⑤ 最后才试 `getEntity("-100<id>")`。
+   全部失败才报错，且报错文案改成「先结论后诊断」，把每一步 RPC 的结果都附出来，能直接看出是「帖子真没开评论」还是「私密群 + 账号不在群里」。
+2. **不用加入群组**：`getDiscussionMessage` 官方说明就是「without actually joining the group」，代码里也没有任何加入动作。之前真正的坑是**取消息**——讨论组大多没设置 username，`getEntity("-100<id>")` 在 GramJS 里解析不出来（没有 `access_hash` 就拼不出 `InputChannel`），旧代码却把这句失败写成了「请先加入」。
+   - 现在定位时把讨论组的 `access_hash` 一起取到并存进 `channels.access_hash`（**老库自动补列**，不用重建）；
+   - 取消息 / 取评论走 `channels.getMessages` 与 `messages.getHistory`，带 hash 直接读；
+   - hash 过期（`CHANNEL_INVALID` / `ACCESS_HASH_INVALID`）自动退回 `getEntity` 重试一次。
+   - **公开讨论组到此就能直接下**；私密讨论组服务端会直接拒（`CHANNEL_PRIVATE`），这种只能先用同一个账号加群，报错里会明确写出来。
 
-> 1.3.6 的评论区视频下载、HEVC 直连默认打开，以及更早的本地播放、合并改名、元数据分区、登录兜底等全部保留。
+> 1.3.7 的媒体库界面重做、显卡硬件转码、简介 CDATA 清洗，以及更早的评论区视频下载、HEVC 直连默认打开、合并改名、元数据分区、登录兜底等全部保留。
 
 ---
 
@@ -232,7 +233,7 @@ downloads/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布的镜像 |
-| `v1.3.7` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.8` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push 到 `main` 只跑构建与冒烟测试（健康检查、两个挂载目录可写、NAS 属主场景、内置 ffmpeg），
 **不发布镜像**；打 tag 才构建 amd64 + arm64 并推送。
@@ -267,6 +268,7 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 新集没出现在 Emby | 检查「Emby 入库通知」的地址 / API Key / 路径映射，点「测试连接」 |
 | `yt-dlp 不可用` | 镜像低于 1.2.0 或本地开发没装；升级镜像或在设置里手填路径 |
 | `要求登录` / `风控拦截（412）` | Cookie 过期，重新复制一次；已下载的文件不受影响 |
+| 评论区链接报「没有开启评论 / 不在讨论组里」 | 1.3.8 起会依次试 5 条路定位讨论组；仍失败时会写明是「帖子确实没开评论」还是「私密讨论组 + 账号不在群里」（后者只能先用同一账号加群） |
 | `连不上 YouTube` | 没配第三方平台代理，或节点在该地区不可用 |
 | 网页视频报 `403`，一秒就失败 | 多半是老任务里 `&amp;` 把签名写坏；1.3.1 起已自动还原，点「重试」即可 |
 | 一直 `Just a moment...` / 抓取 403 | 站点在跑 Cloudflare 人机验证，会自动开无头浏览器过挑战（15~30 秒）；代理轮换 IP 会让 Cookie 失效 |

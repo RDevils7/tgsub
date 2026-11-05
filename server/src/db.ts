@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS channels (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_id           TEXT,
   username        TEXT,
+  -- 取消息用的 access_hash（字符串存，可能超过 2^53）。
+  -- 评论区（讨论组）大多没有公开用户名，只有 access_hash 才能拼出 InputChannel，
+  -- 也才有可能「不加入群组」直接按消息 ID 读评论。
+  access_hash     TEXT,
   title           TEXT NOT NULL,
   enabled         INTEGER NOT NULL DEFAULT 1,
   last_scanned_id INTEGER NOT NULL DEFAULT 0,
@@ -209,6 +213,9 @@ ensureColumn("downloads", "net_route", "TEXT");
 // 线路切换提示：直连下载失败、自动改走代理时写给下载列表看的一行说明。
 // 不写进 error —— 这不是失败，任务最后可能成功。
 ensureColumn("downloads", "route_note", "TEXT");
+// 频道的 access_hash：评论区（讨论组）通常没有公开用户名，
+// 只有它才能拼出 InputChannel 去按消息 ID 取评论 —— 也是「不加群组」的前提。
+ensureColumn("channels", "access_hash", "TEXT");
 // 老数据补齐：已完成的任务下载量必然等于文件大小
 db.prepare("UPDATE downloads SET downloaded_bytes = file_size WHERE status = 'done' AND downloaded_bytes = 0").run();
 

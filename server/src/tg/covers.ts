@@ -144,7 +144,7 @@ export async function ensureCovers(channel: Channel, messageId: number): Promise
       const entityKey = channelEntityKey(channel);
       if (!entityKey) return [];
       const client = await getClient();
-      const messages = await fetchMessageGroup(entityKey, messageId);
+      const messages = await fetchMessageGroup(entityKey, messageId, channel.access_hash);
       const photos = messages
         .map((msg) => ({ msg, info: extractMedia(msg) }))
         .filter((entry): entry is { msg: Record<string, unknown>; info: NonNullable<ReturnType<typeof extractMedia>> } =>
@@ -206,7 +206,7 @@ export async function ensureCovers(channel: Channel, messageId: number): Promise
 export async function fetchCaption(channel: Channel, messageId: number): Promise<string | null> {
   const entityKey = channelEntityKey(channel);
   if (!entityKey) return null;
-  const messages = await fetchMessageGroup(entityKey, messageId);
+  const messages = await fetchMessageGroup(entityKey, messageId, channel.access_hash);
   const text = messages
     .map((msg) => (typeof msg.message === "string" ? msg.message : ""))
     .filter((part) => part.trim())

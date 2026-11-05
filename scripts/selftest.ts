@@ -79,7 +79,17 @@ import {
 } from "../server/src/tg/renameplan";
 import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
 import { commentIdOf, extractTelegramLinks, isCommentLink, parseTelegramLink } from "../server/src/tg/link";
-import { discussionEntityKey, idString, pickDiscussionGroup } from "../server/src/tg/discussionplan";
+import {
+  chatInfoOf,
+  discussionEntityKey,
+  groupsFromChats,
+  hashString,
+  idString,
+  pickDiscussionGroup,
+  postReplyInfo,
+  threadGroupId,
+  validId,
+} from "../server/src/tg/discussionplan";
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
 import { parseCookie, parseCookies } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
@@ -2746,7 +2756,111 @@ function telegramLinkChecks(): void {
 
   check("没有评论组时返回 null，entityKey 用 -100 标记形式", () => {
     assert.equal(pickDiscussionGroup({ messages: [], chats: [] }, "1001"), null);
-    assert.equal(discussionEntityKey({ id: "42", username: null, title: "" }), "-10042");
+    assert.equal(discussionEntityKey({ id: "42", username: null, accessHash: null, title: "" }), "-10042");
+  });
+
+  check("讨论组的 access_hash 会被带出来（不加入群组取评论的关键）", () => {
+    const group = pickDiscussionGroup(
+      {
+        messages: [{ id: 900, peerId: { channelId: BigInt("2002") } }],
+        chats: [
+          { id: BigInt("1001"), title: "频道", className: "Channel" },
+          {
+            id: BigInt("2002"),
+            title: "私密讨论组",
+            megagroup: true,
+            className: "Channel",
+            accessHash: BigInt("-7123456789012345678"),
+          },
+        ],
+      },
+      "1001",
+    );
+    assert.equal(group?.username, null);
+    assert.equal(group?.accessHash, "-7123456789012345678");
+    // 没有 username 只能用 -100 标记键 + 库里存的 hash
+    assert.equal(discussionEntityKey(group!), "-1002002");
+  });
+
+  check("hashString 只认整数串，脏值一律 null", () => {
+    assert.equal(hashString(BigInt("-9007199254740993")), "-9007199254740993");
+    assert.equal(hashString("12345"), "12345");
+    assert.equal(hashString({ toString: () => "777" }), "777");
+    assert.equal(hashString(null), null);
+    assert.equal(hashString(""), null);
+    assert.equal(hashString("abc"), null);
+    assert.equal(hashString(undefined), null);
+  });
+
+  check("帖子 replies 字段能读出讨论组 ID 和评论开关", () => {
+    const post = {
+      messages: [
+        {
+          id: 3516,
+          replies: { comments: true, replies: 12, channelId: BigInt("1965425283") },
+        },
+      ],
+    };
+    const info = postReplyInfo(post, 3516);
+    assert.equal(info.comments, true);
+    assert.equal(info.count, 12);
+    assert.equal(info.channelId, "1965425283");
+  });
+
+  check("没开评论时 channelId 是 0，不能当成合法 ID", () => {
+    const info = postReplyInfo({ messages: [{ id: 3516, replies: { comments: false, replies: 0, channelId: 0 } }] }, 3516);
+    assert.equal(info.comments, false);
+    assert.equal(info.channelId, null);
+    // 字段缺失（老版本帖子）也当没开评论
+    assert.equal(postReplyInfo({ messages: [{ id: 3516 }] }, 3516).channelId, null);
+  });
+
+  check("validId 把 0 当没有", () => {
+    assert.equal(validId(0), null);
+    assert.equal(validId("0"), null);
+    assert.equal(validId(BigInt("2002")), "2002");
+  });
+
+  check("getReplies 的 chats 里能补到 access_hash / username", () => {
+    const payload = {
+      messages: [{ id: 55488, peerId: { channelId: BigInt("2002") } }],
+      chats: [
+        { id: BigInt("1001"), className: "Channel", title: "频道" },
+        { id: BigInt("2002"), megagroup: true, title: "评论组", accessHash: BigInt("42"), username: "g" },
+      ],
+    };
+    const info = chatInfoOf(payload, "2002");
+    assert.equal(info?.accessHash, "42");
+    assert.equal(info?.username, "g");
+    assert.equal(info?.title, "评论组");
+    assert.equal(chatInfoOf(payload, "9999"), null);
+  });
+
+  check("线程首条消息的 peerId 就是讨论组", () => {
+    const payload = { messages: [{ id: 1, peerId: { channelId: BigInt("2002") } }] };
+    assert.equal(threadGroupId(payload, "1001"), "2002");
+    // 指回频道自己就丢掉
+    assert.equal(threadGroupId({ messages: [{ peerId: { channelId: BigInt("1001") } }] }, "1001"), null);
+  });
+
+  check("对话框列表里排除频道自己和普通用户", () => {
+    const chats = [
+      { id: BigInt("1001"), className: "Channel", title: "频道" },
+      { id: BigInt("2002"), className: "Channel", megagroup: true, accessHash: BigInt("7"), title: "讨论组" },
+      { id: BigInt("3003"), className: "User", title: "某用户" },
+    ];
+    const groups = groupsFromChats({ chats }, "1001");
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].id, "2002");
+    assert.equal(groups[0].accessHash, "7");
+  });
+
+  check("讨论组没给 access_hash 时不硬编一个假值", () => {
+    const group = pickDiscussionGroup(
+      { messages: [{ id: 1, peerId: { channelId: BigInt("2002") } }], chats: [{ id: BigInt("2002"), megagroup: true }] },
+      "1001",
+    );
+    assert.equal(group?.accessHash, null);
   });
 }
 

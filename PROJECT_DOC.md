@@ -1079,7 +1079,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
 集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。
 另外 `hwDecodeChecks()` 9 项覆盖硬件转码的纯逻辑（`-hwaccels` / `-encoders` 解析、加速方式选择、
-目标高度与码率分档、VAAPI / QSV / libx264 三套参数、拖动时 `-ss` 必须在 `-i` 之前）。合计 335 项。
+目标高度与码率分档、VAAPI / QSV / libx264 三套参数、拖动时 `-ss` 必须在 `-i` 之前）。合计 344 项。
 
 `originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
 认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
@@ -1098,7 +1098,7 @@ mp4/h264 直出、mkv/ts/avi 换封装、HEVC 默认判为不支持、HEVC 强�
 ---
 
 
-## 帖子评论区链接下载（1.3.6）
+## 帖子评论区链接下载（1.3.6 / 1.3.8 免加群）
 
 手动下载 / 机器人现在能接 **帖子评论区里的单条评论链接**：
 
@@ -1120,30 +1120,63 @@ https://t.me/c/1234567890/3516?comment=55488
 | 文件 | 职责 |
 | --- | --- |
 | `tg/link.ts`（纯函数） | 解析 `?comment=`：`postId` = 路径里的帖子 ID、`commentId` = 评论 ID；`isCommentLink()`、`extractTelegramLinks()` 原样保留 query。不 import db/env，自检可直接调 |
-| `tg/discussionplan.ts`（纯函数） | `pickDiscussionGroup()` 从 `messages.GetDiscussionMessage` 的返回里挑讨论组：优先 `messages[0].peerId`，若指向频道自身则回退到 chats 里的 megagroup；`discussionEntityKey()` 有 username 用 username（重启后仍可解析），否则 `-100<id>` |
-| `tg/discussion.ts` | `resolveDiscussionGroup()` 调 `Api.messages.GetDiscussionMessage`，RPC 错误翻成中文（未开评论 / 不是讨论组成员） |
+| `tg/discussionplan.ts`（纯函数） | `pickDiscussionGroup()` 从 `messages.GetDiscussionMessage` 的返回里挑讨论组：优先 `messages[0].peerId`，若指向频道自身则回退到 chats 里的 megagroup；同时带出该 chat 的 **`accessHash`**（`hashString()` 归一化成十进制串）。`postReplyInfo()` 读帖子自己的 `replies.comments` / `replies.channel_id`；`chatInfoOf()` 按裸 ID 从上任意带 `chats` 的返回里取 hash/username；`groupsFromChats()` 摊开对话框列表；`threadGroupId()` 取线程首条消息的 peer；`validId()` 把 `0` 当空。`discussionEntityKey()` 有 username 用 username，否则 `-100<id>` |
+| `tg/discussion.ts` | `resolveDiscussionGroup()` **五条路依次兜底**（见下），把定位结果连同 access_hash 一起返回；RPC 错误翻成中文并附诊断串 |
 | `tg/direct.ts` | `downloadFromLink()` 遇评论链接 → `resolveCommentTarget()` → `enqueueFromTarget(target, commentId)` |
 
-**为什么不讨论组 ID 直接存进 downloads 表**：`fetchMessageGroup()`、`enqueueGroup()` 和
+**为什么把讨论组 ID 存进 downloads 表**：`fetchMessageGroup()`、`enqueueGroup()` 和
 `downloader.run()` 都按 `channel_id → channelEntityKey(channel)` 重新取 peer（下载阶段会再查一次消息）。
 把讨论组登记成一行 `enabled=0` 的频道（标题带「（评论区）」），三段自动统一指向讨论组，
 不用给 downloads 加列、不用改下载器；`channelMessageLink()` 生成的
-`t.me/c/<讨论组ID>/<评论ID>` 也正好是能打开的评论直链。GramJS 的 `invoke` 会把返回的 chats
-放进 entityCache，随后 `getEntity("-100<id>")` 能命中；解析阶段还会预热一次实体，失败当场给出提示。
+`t.me/c/<讨论组ID>/<评论ID>` 也正好是能打开的评论直链。
+
+**为什么只靠 `GetDiscussionMessage` 不行（1.3.8 复盘）**：1.3.7 里这条链只有一条路。实际对这个账号，
+它**稳定返回空**（`messages: []`、`chats: []`），界面就报「这个帖子没有开启评论，或当前账号不在关联讨论组里」，
+三条链接全挂。所以 1.3.8 改成五条路，任何一条通就能下：
+
+| # | 策略 | 拿到的信息 |
+| --- | --- | --- |
+| 1 | `messages.getDiscussionMessage`（官方说明无需加群），**空结果重试一次**（FLOOD_WAIT 会等） | 讨论组 ID + access_hash |
+| 2 | 帖子自己的 `replies.channel_id`（`getMessages` 取帖子即可，不看讨论组） | 讨论组 ID |
+| 3 | `messages.getReplies(peer=频道, msg_id=帖子)` —— 客户端拉评论走的就是它 | 线程消息 + 讨论组 ID + **chats 里的 access_hash** |
+| 4 | 对话框列表（`messages.getDialogs`，命中才缓存 10 分钟）—— 账号其实加过群时 hash 就在里面 | access_hash |
+| 5 | `getEntity("-100<id>")` —— 进程内缓存 / 公开组 | access_hash |
+
+任一策略拿到 ID 但没 hash 时，后面的策略只补 hash，不会覆盖已确认的 ID。**全部失败**才报错，
+报错文案先写结论再附「诊断：…」，把每一步的 RPC 结果都列出来（前端提交记录只留 300 字，所以结论在前）。
+`CHANNEL_PRIVATE` 单独识别成「私密讨论组、账号不在群里」，不再笼统说「请加群」。
+
+**不加入群组也能下载（1.3.8）**：`messages.getDiscussionMessage` 的官方说明就是
+「show it on top of the comment section, **without actually joining the group**」，
+所以整条链路**没有任何 join 调用**。真正的坑在取消息这一步：讨论组大多是私密 megagroup，
+**没有公开用户名**，`getEntity("-100<id>")` 在 gramjs 里解析不出来（没有 access_hash 拼不出
+InputChannel），报错还容易让人误以为是「没加群」。
+
+1.3.8 起把讨论组返回里的 `accessHash` 一起存进 `channels.access_hash`（`ensureColumn` 补列，
+老库自动升级），取消息改走 `channels.getMessages(InputChannel)` / `messages.getHistory(InputPeerChannel)`
+（`tg/media.ts` 的 `inputChannelOf()` / `inputPeerOf()` / `fetchMessagesById()`）。这条路
+**不需要 username、也不需要加入群组**；hash 失效（换账号、被移出、服务器轮换）时自动退回
+`getEntity` 再试一次，不让一条过期 hash 卡死下载。
 
 ### 限制
 
-- 登录的账号必须已加入该帖子的关联讨论组，否则 Telegram 不给读评论。
+- **公开讨论组不需要加入**：有 access_hash 就能按消息 ID 读评论（1.3.8 起）。
+- **私密讨论组仍然要加入**：服务器直接拒（`CHANNEL_PRIVATE`），任何 API 路径都读不到，
+  只能用已加入该群的账号；这种情况下界面的报错会写清楚是「私密讨论组」而不是笼统的「请加群」。
+- 频道本身要可读：公开频道不订阅通常也能读，私密频道需先加入频道（注意别和讨论组搞混）。
 - 一条链接 = 一条评论；手动下载页可以一次粘多条，逐条解析入队。
 - **不支持**「粘主帖链接自动下整个评论区」，主帖链接行为不变（下主帖的媒体）。
 - 评论里的相册组照常按 `grouped_id` 整组抓取，命名 / NFO / Emby 通知与普通消息一致。
 
 ### 自检
 
-`telegramLinkChecks()` 13 项：公开 / 私有链接、评论链接的帖子与评论 ID、多参数 + fragment、
+`telegramLinkChecks()` 22 项：公开 / 私有链接、评论链接的帖子与评论 ID、多参数 + fragment、
 `?single` 不算评论、非法 comment 值、省略协议 / telegram.me、非消息链接返回 null、
 提取链接保留 query 并去重、`idString` 兼容 bigint / `-100` / PeerChannel、
-讨论组挑选（peerId 优先 / 频道自身回退 / 空数据返回 null）、entityKey 形式。合计 **320** 项。
+讨论组挑选（peerId 优先 / 频道自身回退 / 空数据返回 null）、entityKey 形式、
+`accessHash` 带出与归一化（脏值一律 null）、帖子 `replies` 读出讨论组与评论开关、
+`channelId=0` 不当作合法 ID、`validId` 把 0 当空、`chatInfoOf` 从 chats 取 hash、
+`threadGroupId` 取线程 peer、对话框列表排除频道自身与用户。合计 **344** 项。
 
 ---
 
@@ -1388,7 +1421,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 335 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 344 项。
 
 ---
 
@@ -1680,12 +1713,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.7`（镜像 `rdevils7/tgsub:v1.3.7` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.8-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.8`（镜像 `rdevils7/tgsub:v1.3.8` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.9-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.8-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.8`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.8` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.9-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.9-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.9`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.9` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.10-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

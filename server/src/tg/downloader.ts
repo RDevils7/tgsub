@@ -6,7 +6,7 @@ import { logger } from "../logger";
 import { Download } from "../types";
 import { formatDateFolder, sanitizeSegment, toNumber } from "../utils";
 import { getClient } from "./client";
-import { extractMedia, targetRelativePath } from "./media";
+import { extractMedia, fetchMessagesById, targetRelativePath } from "./media";
 import { channelEntityKey, channelMessageLink } from "./entity";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 import { queueEmbyUpdate } from "./embyapi";
@@ -93,7 +93,10 @@ const stmtResetStuck = db.prepare(
 const stmtRoute = db.prepare<[string, number]>("UPDATE downloads SET net_route = ? WHERE id = ?");
 /** 线路切换说明（直连失败 → 改用代理），下载列表里显示成一行提示，不是错误 */
 const stmtRouteNote = db.prepare<[string | null, number]>("UPDATE downloads SET route_note = ? WHERE id = ?");
-const stmtChannel = db.prepare<[number], { username: string | null; tg_id: string | null; title: string }>(
+const stmtChannel = db.prepare<
+  [number],
+  { username: string | null; tg_id: string | null; access_hash: string | null; title: string }
+>(
   "SELECT username, tg_id, title FROM channels WHERE id = ?",
 );
 
@@ -642,9 +645,12 @@ class DownloadQueue {
 
       const client = await getClient();
       // 私有频道没有 username，必须用 -100 标记形式的 ID：裸号会被当成用户 ID
-      const entity = await client.getEntity(channelEntityKey(channel) as never);
+      // 评论区（讨论组）大多没有 username，只有 access_hash 才能按消息 ID 取到评论；
+      // 这条路不需要加入群组。有 username 的频道照旧走 getEntity。
       this.checkCancel(id);
-      const messages = (await client.getMessages(entity, { ids: [row.message_id] })) as unknown[];
+      const messages = (await fetchMessagesById(channelEntityKey(channel), channel.access_hash, [
+        row.message_id,
+      ])) as unknown[];
       const message = messages?.[0];
       if (!message || !(message as { media?: unknown }).media) throw new Error("消息不存在或媒体已失效");
       // 准备阶段（连 DC、取消息）也可能被打断，早点退回队列，别白等

@@ -1,5 +1,8 @@
 import path from "node:path";
+import bigInt from "big-integer";
+import { Api } from "telegram";
 import { toNumber } from "../utils";
+import { logger } from "../logger";
 import { getClient } from "./client";
 import { normalizeEntityKey } from "./entity";
 
@@ -151,32 +154,148 @@ export function groupIdOf(message: unknown): string | null {
 }
 
 /**
+ * 频道引用 → InputChannel / InputPeerChannel。
+ *
+ * 评论区的讨论组大多是**私密 megagroup**，没有 username；光有 `-100<id>`
+ * 拼不出 InputChannel（gramjs 会报 Could not find the input entity），
+ * 必须补上 access_hash。这枚 hash 从 `messages.getDiscussionMessage`
+ * 的返回里就能拿到，拿它取消息**不需要加入群组**。
+ *
+ * 拿不到合法 hash（或 key 是 username）时返回 null，调用方退回 getEntity 老路。
+ */
+function peerParts(
+  key: string,
+  accessHash?: string | null,
+): { channelId: ReturnType<typeof bigInt>; accessHash: ReturnType<typeof bigInt> } | null {
+  const normalized = normalizeEntityKey(key);
+  const internal = normalized.startsWith("-100") ? normalized.slice(4) : "";
+  const hash = String(accessHash ?? "").trim();
+  if (!/^\d+$/.test(internal) || !/^-?\d+$/.test(hash)) return null;
+  try {
+    return { channelId: bigInt(internal), accessHash: bigInt(hash) };
+  } catch {
+    return null;
+  }
+}
+
+/** channels.* 方法用的 InputChannel */
+export function inputChannelOf(key: string, accessHash?: string | null): Api.InputChannel | null {
+  const parts = peerParts(key, accessHash);
+  return parts ? new Api.InputChannel(parts) : null;
+}
+
+/** messages.* 方法用的 InputPeerChannel */
+export function inputPeerOf(key: string, accessHash?: string | null): Api.InputPeerChannel | null {
+  const parts = peerParts(key, accessHash);
+  return parts ? new Api.InputPeerChannel(parts) : null;
+}
+
+/** RPC 错误文本（去掉堆栈，只留 errorMessage 那一段） */
+function errText(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err ?? "");
+  return text.slice(0, 160);
+}
+
+/** 各种 messages.* / channels.* 返回里把 messages 数组掏出来 */
+function messagesOf(payload: unknown): Array<Record<string, unknown>> {
+  const list = (payload as { messages?: unknown } | null)?.messages;
+  return Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+}
+
+/**
+ * 按消息 ID 取消息。
+ *
+ * 有 access_hash 时走 `channels.getMessages(InputChannel)`：
+ * 这条路不需要 username、也不需要加入群组，是评论区下载的关键。
+ * 没有 hash（公开频道有 username）时退回 getEntity + getMessages。
+ */
+export async function fetchMessagesById(
+  key: string,
+  accessHash: string | null | undefined,
+  ids: number[],
+): Promise<Array<Record<string, unknown>>> {
+  const client = await getClient();
+  const channel = inputChannelOf(key, accessHash);
+  if (channel) {
+    try {
+      const res = await client.invoke(
+        new Api.channels.GetMessages({
+          channel,
+          id: ids.map((id) => new Api.InputMessageID({ id })),
+        }),
+      );
+      return messagesOf(res);
+    } catch (err) {
+      // hash 会失效（换过账号、被移出、服务器轮换）：能靠 username 解析就再试一次，
+      // 别让一条过期 hash 把整个下载卡死。
+      const text = errText(err);
+      if (!/CHANNEL_INVALID|ACCESS_HASH_INVALID|CHANNEL_PRIVATE/.test(text)) throw err;
+      logger.warn({ key, err: text }, "用 access_hash 取消息失败，退回实体解析再试一次");
+    }
+  }
+  const entity = await client.getEntity(normalizeEntityKey(key) as never);
+  return (await client.getMessages(entity as never, { ids })) as unknown as Array<Record<string, unknown>>;
+}
+
+/** 取一个消息 ID 区间（相册整组用） */
+async function fetchRange(
+  key: string,
+  accessHash: string | null | undefined,
+  minId: number,
+  maxId: number,
+  limit: number,
+): Promise<Array<Record<string, unknown>>> {
+  const client = await getClient();
+  const peer = inputPeerOf(key, accessHash);
+  if (peer) {
+    try {
+      const res = await client.invoke(
+        new Api.messages.GetHistory({
+          peer,
+          offsetId: 0,
+          offsetDate: 0,
+          addOffset: 0,
+          limit,
+          maxId,
+          minId,
+          hash: bigInt(0),
+        }),
+      );
+      return messagesOf(res);
+    } catch (err) {
+      const text = errText(err);
+      if (!/CHANNEL_INVALID|ACCESS_HASH_INVALID|CHANNEL_PRIVATE/.test(text)) throw err;
+      logger.warn({ key, err: text }, "用 access_hash 取相册区间失败，退回实体解析再试一次");
+    }
+  }
+  const entity = await client.getEntity(normalizeEntityKey(key) as never);
+  return (await client.getMessages(entity as never, { minId, maxId, limit })) as unknown as Array<
+    Record<string, unknown>
+  >;
+}
+
+/**
  * 取一条消息及其相册整组（按消息 id 升序）。
  *
  * 相册里点开任意一张，都只带回来那一条；直接下载、封面预览都需要整组，
  * 所以统一用 minId/maxId 取一个窗口再按 grouped_id 过滤。
+ *
+ * `accessHash` 是评论区（讨论组）场景的关键参数：没有 username 的讨论组
+ * 只能靠它取消息，且**不需要加入群组**。
  */
 export async function fetchMessageGroup(
   entityKey: string,
   messageId: number,
+  accessHash?: string | null,
 ): Promise<Array<Record<string, unknown>>> {
-  const client = await getClient();
-  // 兜底归一化：裸数字频道 ID 会被 gramjs 当成用户 ID 去查
-  const entity = await client.getEntity(normalizeEntityKey(entityKey) as never);
-  const list = (await client.getMessages(entity as never, { ids: [messageId] })) as unknown as Array<
-    Record<string, unknown>
-  >;
+  const list = await fetchMessagesById(entityKey, accessHash, [messageId]);
   const first = list?.[0];
   if (!first || first.className === "MessageEmpty") throw new Error(`消息不存在或已删除（#${messageId}）`);
 
   const groupId = groupIdOf(first);
   if (!groupId) return [first];
 
-  const around = (await client.getMessages(entity as never, {
-    minId: Math.max(0, messageId - 9),
-    maxId: messageId + 10,
-    limit: 20,
-  })) as unknown as Array<Record<string, unknown>>;
+  const around = await fetchRange(entityKey, accessHash, Math.max(0, messageId - 9), messageId + 10, 20);
   const sameGroup = around
     .filter((m) => groupIdOf(m) === groupId)
     .sort((a, b) => Number((a as { id: number }).id) - Number((b as { id: number }).id));
