@@ -93,8 +93,9 @@ export type PlayMode = "direct" | "remux" | "unsupported";
  * 浏览器**普遍**不认、但个别环境真能解的编码。
  *
  * HEVC / H.265 就是这样：Safari、装了 HEVC 扩展的 Edge、带硬解的系统都能播，
- * Chrome 在多数 Windows 上不行。所以默认拦下来（标灰 + 提示），
- * 用户在媒体库里打开「强制尝试」后才放行 —— 能不能放由他那台浏览器说了算。
+ * Chrome 在多数 Windows 上不行。所以**不带 allowHevc 的请求**默认拦下来（标灰 + 提示），
+ * 媒体库前端的「强制尝试」开关从 1.3.6 起默认打开，实际请求都会带 `hevc=1`；
+ * 用户手动关掉开关、或直接调接口不带参数时才走这条兜底 —— 能不能放由他那台浏览器说了算。
  */
 const TRIAL_CODEC = new Set(["hevc", "h265"]);
 

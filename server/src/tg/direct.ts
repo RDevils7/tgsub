@@ -3,26 +3,22 @@ import { logger } from "../logger";
 import { Channel } from "../types";
 import { getClient } from "./client";
 import { fetchMessageGroup } from "./media";
-import { channelEntityKey, channelMessageLink } from "./entity";
+import { normalizeEntityKey, channelEntityKey, channelMessageLink } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { downloader } from "./downloader";
 import { resolveM3u8Input, isHttpUrl } from "./m3u8";
 import { joinRel } from "./mediadir";
+import { isCommentLink, parseTelegramLink, type ParsedLink } from "./link";
+import { resolveDiscussionGroup } from "./discussion";
+
+// 机器人与旧代码从 direct 导入这两个纯函数，保持导出位置不变
+export { parseTelegramLink, extractTelegramLinks, commentIdOf, isCommentLink } from "./link";
+export type { ParsedLink } from "./link";
 
 /**
  * 直接按 Telegram 消息链接下载（不等关键词命中）。
  * 网页「手动下载」、监控历史的「下载」按钮、机器人收到链接都走这里。
  */
-
-export interface ParsedLink {
-  kind: "public" | "private";
-  /** 公开频道用户名（小写） */
-  username: string | null;
-  /** 私有频道 t.me/c/<id> 里的内部 ID */
-  internalId: string | null;
-  messageId: number;
-  raw: string;
-}
 
 export interface DirectResult {
   ok: boolean;
@@ -52,34 +48,6 @@ const stmtByTgId = db.prepare<[string], Channel>("SELECT * FROM channels WHERE t
 const stmtInsertChannel = db.prepare(
   "INSERT INTO channels(tg_id, username, title, enabled, created_at) VALUES (?, ?, ?, 0, ?)",
 );
-
-/** 支持 t.me/<用户名>/<id>、t.me/c/<内部ID>/<id>，带 ?single 之类的查询串也能认 */
-export function parseTelegramLink(input: string): ParsedLink | null {
-  const raw = String(input ?? "").trim();
-  if (!raw) return null;
-  const text = raw
-    .replace(/^https?:\/\//i, "")
-    .replace(/^(?:www\.)?(?:t|telegram)\.me\//i, "")
-    .replace(/^@?/, "")
-    .trim();
-
-  const priv = /^c\/(\d+)\/(\d+)/i.exec(text);
-  if (priv) {
-    return { kind: "private", username: null, internalId: priv[1], messageId: Number(priv[2]), raw };
-  }
-  const pub = /^([A-Za-z0-9_]{3,})\/(\d+)/.exec(text);
-  if (pub) {
-    return { kind: "public", username: pub[1].toLowerCase(), internalId: null, messageId: Number(pub[2]), raw };
-  }
-  return null;
-}
-
-/** 从一段文字里挑出所有 Telegram 消息链接（机器人收消息时用） */
-export function extractTelegramLinks(text: string): string[] {
-  const re = /(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\/(?:c\/\d+|[A-Za-z0-9_]{3,})\/\d+(?:\?\S*)?/gi;
-  const found = String(text ?? "").match(re) ?? [];
-  return [...new Set(found.map((s) => s.trim()))];
-}
 
 interface Target {
   channel: Channel;
@@ -135,6 +103,52 @@ function insertChannel(
   return { channel, entityKey: channelEntityKey(channel) || fallbackKey, autoAdded: true };
 }
 
+/**
+ * 评论链接（?comment=<id>）要换成「讨论组」这个 peer 再取消息。
+ *
+ * 评论不在频道里：帖子底下开评论后，Telegram 把它转发进关联的 megagroup，
+ * `?comment=55488` 的 55488 是**讨论组内**的消息 ID。这里做三件事：
+ *   1. 用 messages.GetDiscussionMessage 找到讨论组；
+ *   2. 把讨论组登记成一个停用频道（只作 entity 来源，不参与定时扫描）；
+ *   3. 返回以讨论组为 entityKey 的 Target —— 入队、命名、链接、以及
+ *      downloader 下载阶段重新取消息，都会自动用讨论组，不会出现「入队拿到评论、
+ *      下载时又去频道按 55488 取了个空」。
+ */
+async function resolveCommentTarget(parsed: ParsedLink, postTarget: Target): Promise<Target> {
+  const postId = parsed.postId;
+  if (!postId) throw new Error("评论链接缺少帖子 ID");
+
+  const client = await getClient();
+  const channelEntity = await client.getEntity(normalizeEntityKey(postTarget.entityKey) as never);
+  const group = await resolveDiscussionGroup(client, channelEntity, postId);
+
+  // 先验证 entityKey 真能解析（顺手把实体放进 GramJS 缓存），失败在这里就说清楚
+  try {
+    await client.getEntity(group.entityKey as never);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`无法访问关联讨论组（${reason.slice(0, 120)}）：请确认登录账号已加入该讨论组`);
+  }
+
+  const existing = stmtByTgId.get(group.id);
+  if (existing) {
+    return { channel: existing, entityKey: group.entityKey, autoAdded: false };
+  }
+
+  const title = group.title ? `${group.title}（评论区）` : `${postTarget.channel.title} 评论区`;
+  let info: { lastInsertRowid: number | bigint; changes: number };
+  try {
+    info = stmtInsertChannel.run(group.id, group.username, title, Date.now());
+  } catch (err) {
+    // 极少见：讨论组的公开用户名和库里某个频道撞了唯一索引，退回去只用数字 ID
+    if (!group.username) throw err;
+    info = stmtInsertChannel.run(group.id, null, title, Date.now());
+  }
+  const channel = stmtChannelById.get(Number(info.lastInsertRowid)) as Channel;
+  logger.info({ groupId: group.id, title, postId }, "手动下载登记帖子的关联讨论组（默认停用）");
+  return { channel, entityKey: group.entityKey, autoAdded: true };
+}
+
 /** m3u8 / 网页视频下载任务落库：source='m3u8'，channel 相关字段留 0（不属于任何 Telegram 频道） */
 const stmtInsertM3u8 = db.prepare<[string, string, string, string, string, number]>(
   `INSERT INTO downloads
@@ -186,18 +200,35 @@ async function enqueueFromTarget(
   };
 }
 
-/** 按链接下载单条消息（含相册整组） */
+/** 按链接下载单条消息（含相册整组）；`?comment=` 时下载评论区里指定的那条评论 */
 export async function downloadFromLink(link: string, opts?: { includeImages?: boolean }): Promise<DirectResult> {
   const parsed = parseTelegramLink(link);
   if (parsed) {
-    const target = await resolveTarget(parsed);
-    return enqueueFromTarget(target, parsed.messageId, parsed.raw, opts?.includeImages);
+    const postTarget = await resolveTarget(parsed);
+    if (isCommentLink(parsed)) {
+      const target = await resolveCommentTarget(parsed, postTarget);
+      try {
+        return await enqueueFromTarget(target, parsed.commentId as number, parsed.raw, opts?.includeImages);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (reason.includes("消息不存在或已删除")) {
+          throw new Error(
+            `取不到评论 #${parsed.commentId}（${reason}）：评论可能已被删除，或登录账号不是关联讨论组成员`,
+          );
+        }
+        throw err;
+      }
+    }
+    return enqueueFromTarget(postTarget, parsed.messageId, parsed.raw, opts?.includeImages);
   }
   // 非 Telegram 链接：m3u8 直链或普通网页（自动解析其中的 m3u8 视频）
   if (isHttpUrl(link)) {
     return m3u8ToDirectResult(await enqueueM3u8(link));
   }
-  throw new Error("链接格式不对，示例：https://t.me/频道名/123 或 https://t.me/c/1234567890/123；也支持网页 / m3u8 视频链接");
+  throw new Error(
+    "链接格式不对，示例：https://t.me/频道名/123 或 https://t.me/c/1234567890/123；" +
+      "评论区链接用 https://t.me/频道名/123?comment=456；也支持网页 / m3u8 视频链接",
+  );
 }
 
 /**

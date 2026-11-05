@@ -78,6 +78,8 @@ import {
   type EpisodeSource,
 } from "../server/src/tg/renameplan";
 import { clamp, directNote, kindOfLink, manualStatus, platformNote, webNote } from "../server/src/manual/note";
+import { commentIdOf, extractTelegramLinks, isCommentLink, parseTelegramLink } from "../server/src/tg/link";
+import { discussionEntityKey, idString, pickDiscussionGroup } from "../server/src/tg/discussionplan";
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
 import { parseCookie, parseCookies } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
@@ -2630,6 +2632,123 @@ function manualNoteChecks(): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* Telegram 消息链接 / 帖子评论链接解析（纯函数层）                      */
+/* ------------------------------------------------------------------ */
+
+function telegramLinkChecks(): void {
+  check("公开频道消息链接：用户名 + 帖子 ID", () => {
+    const p = parseTelegramLink("https://t.me/MMWYX1/3516");
+    assert.equal(p?.kind, "public");
+    assert.equal(p?.username, "mmwyx1");
+    assert.equal(p?.messageId, 3516);
+    assert.equal(p?.commentId, null);
+    assert.equal(p?.postId, null);
+  });
+
+  check("私有频道消息链接：t.me/c/<id>/<msg>", () => {
+    const p = parseTelegramLink("https://t.me/c/1234567890/3516");
+    assert.equal(p?.kind, "private");
+    assert.equal(p?.internalId, "1234567890");
+    assert.equal(p?.messageId, 3516);
+  });
+
+  check("评论链接：?comment= 解析出帖子 ID 与评论 ID", () => {
+    const p = parseTelegramLink("https://t.me/MMWYX1/3516?comment=55488");
+    assert.equal(p?.messageId, 3516, "路径里的 ID 仍是帖子");
+    assert.equal(p?.postId, 3516);
+    assert.equal(p?.commentId, 55488);
+    assert.equal(isCommentLink(p), true);
+  });
+
+  check("评论链接：私有频道 + 多参数 + fragment", () => {
+    const p = parseTelegramLink("https://t.me/c/1234567890/3516?thread=3516&comment=55499#reply");
+    assert.equal(p?.postId, 3516);
+    assert.equal(p?.commentId, 55499);
+    assert.equal(isCommentLink(p), true);
+  });
+
+  check("?single 等普通查询串不算评论", () => {
+    const p = parseTelegramLink("https://t.me/MMWYX1/3516?single");
+    assert.equal(p?.messageId, 3516);
+    assert.equal(p?.commentId, null);
+    assert.equal(isCommentLink(p), false);
+  });
+
+  check("comment 参数没数字 / 为 0 时忽略", () => {
+    assert.equal(commentIdOf("https://t.me/a/1?comment="), null);
+    assert.equal(commentIdOf("https://t.me/a/1?comment=0"), null);
+    assert.equal(commentIdOf("https://t.me/a/1?comment=abc"), null);
+    assert.equal(parseTelegramLink("https://t.me/MMWYX1/3516?comment=abc")?.commentId, null);
+  });
+
+  check("省略协议 / www / telegram.me 也能认", () => {
+    assert.equal(parseTelegramLink("t.me/MMWYX1/3516?comment=55488")?.commentId, 55488);
+    assert.equal(parseTelegramLink("https://www.telegram.me/MMWYX1/3516")?.username, "mmwyx1");
+  });
+
+  check("不是消息链接时返回 null", () => {
+    assert.equal(parseTelegramLink(""), null);
+    assert.equal(parseTelegramLink("https://b23.tv/29inbIp"), null);
+    assert.equal(parseTelegramLink("https://t.me/MMWYX1"), null);
+    assert.equal(parseTelegramLink("https://t.me/MMWYX1/not-a-number"), null);
+  });
+
+  check("从文字里挑链接时保留 ?comment= 且去重", () => {
+    const links = extractTelegramLinks(
+      "看这个 https://t.me/MMWYX1/3516?comment=55488 还有 https://t.me/MMWYX1/3516?comment=55488 " +
+        "https://t.me/MMWYX1/3516?comment=55499",
+    );
+    assert.equal(links.length, 2);
+    assert.ok(links.every((l) => l.includes("?comment=")));
+    assert.ok(parseTelegramLink(links[0])?.commentId);
+  });
+
+  check("idString 兼容 bigint / 字符串 / PeerChannel / -100 标记", () => {
+    assert.equal(idString(BigInt("1234567890")), "1234567890");
+    assert.equal(idString("-1001234567890"), "1234567890");
+    assert.equal(idString({ className: "PeerChannel", channelId: BigInt("77") }), "77");
+    assert.equal(idString(undefined), null);
+  });
+
+  check("从 GetDiscussionMessage 返回里挑出讨论组（peerId 优先）", () => {
+    const group = pickDiscussionGroup(
+      {
+        messages: [{ id: 900, peerId: { className: "PeerChannel", channelId: BigInt("2002") } }],
+        chats: [
+          { id: BigInt("1001"), title: "频道", className: "Channel" },
+          { id: BigInt("2002"), title: "频道评论区", username: "mmwyx_chat", megagroup: true, className: "Channel" },
+        ],
+      },
+      "1001",
+    );
+    assert.equal(group?.id, "2002");
+    assert.equal(group?.username, "mmwyx_chat");
+    assert.equal(group?.title, "频道评论区");
+    assert.equal(discussionEntityKey(group!), "mmwyx_chat");
+  });
+
+  check("peerId 指向频道自己时回退到 megagroup", () => {
+    const group = pickDiscussionGroup(
+      {
+        messages: [{ id: 3516, peerId: { channelId: BigInt("1001") } }],
+        chats: [
+          { id: BigInt("1001"), title: "频道", className: "Channel" },
+          { id: BigInt("2002"), title: "评论组", megagroup: true, className: "Channel" },
+        ],
+      },
+      "1001",
+    );
+    assert.equal(group?.id, "2002");
+    assert.equal(discussionEntityKey(group!), "-1002002");
+  });
+
+  check("没有评论组时返回 null，entityKey 用 -100 标记形式", () => {
+    assert.equal(pickDiscussionGroup({ messages: [], chats: [] }, "1001"), null);
+    assert.equal(discussionEntityKey({ id: "42", username: null, title: "" }), "-10042");
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 下载队列调度：车道分配与封面 / 正片分阶段                           */
 /* ------------------------------------------------------------------ */
 
@@ -3454,6 +3573,7 @@ async function main(): Promise<void> {
     ["yt-dlp 更新排期用例", () => updatePlanChecks()],
     ["剧集改名合并用例", () => renamePlanChecks()],
     ["手动下载记录用例", () => manualNoteChecks()],
+    ["Telegram 评论链接用例", () => telegramLinkChecks()],
     ["分来源下载目录用例", () => mediaDirChecks()],
     ["下载队列调度用例", () => queuePlanChecks()],
     ["管理界面登录用例", () => loginChecks()],

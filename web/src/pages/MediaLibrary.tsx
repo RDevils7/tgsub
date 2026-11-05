@@ -36,6 +36,9 @@ const SORT_STORAGE_KEY = "tgsub.media.sort";
  * HEVC 能不能播是**每台浏览器**的事（Safari / 带 HEVC 扩展的 Edge 能放，
  * 多数 Windows 上的 Chrome 不能），所以这个开关存在本地，不跟着账号走。
  * 打开后请求带 `hevc=1`，服务端不再把 HEVC 判成 unsupported。
+ *
+ * **默认打开**：只有在这台浏览器上手动关过（存了 "0"）才保持关闭；
+ * 没存过（新装 / 清过缓存 / 换设备）一律按开处理，不用每次进媒体库先点一下。
  */
 const HEVC_STORAGE_KEY = "tgsub.media.hevc";
 
@@ -109,7 +112,8 @@ export default function MediaLibrary() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>(() => (localStorage.getItem(SORT_STORAGE_KEY) as SortKey) || "updated");
-  const [hevc, setHevc] = useState(() => localStorage.getItem(HEVC_STORAGE_KEY) === "1");
+  // 默认开：localStorage 没值（或不是明确的 "0"）就当打开，手动关过才记成 "0"
+  const [hevc, setHevc] = useState(() => localStorage.getItem(HEVC_STORAGE_KEY) !== "0");
   /**
    * 列表加载要读这个开关，但**不能把它放进依赖**：依赖里带 hevc 的话，
    * 一开开关就会跑一遍列表加载，而列表加载会清掉剧集视图 —— 人直接被踢回海报墙。
@@ -349,7 +353,7 @@ export default function MediaLibrary() {
                   ? "border-amber-500/30 bg-amber-500/[0.12] text-warn"
                   : "border-white/[0.07] bg-white/[0.02] text-slate-500 hover:border-white/[0.14] hover:text-slate-300"
               }`}
-              title="我的浏览器能放 HEVC，强制尝试：打开后不再把 HEVC 标成播不了，实际能不能解由这台浏览器决定"
+              title="默认开启：不再把 HEVC 标成播不了，实际能不能解由这台浏览器决定；放不出来可点这里关掉"
             >
               <IconVideo className="h-3.5 w-3.5" />
               HEVC 试播

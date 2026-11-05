@@ -26,6 +26,7 @@ const PLATFORM_LABEL: Record<string, string> = {
 
 const EXAMPLES = [
   "https://t.me/频道用户名/12345",
+  "https://t.me/频道用户名/12345?comment=67890",
   "https://b23.tv/29inbIp",
   "https://xhslink.cn/o/8c7hpV57rvQ",
   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -265,6 +266,7 @@ export default function Manual() {
             <ul className="space-y-0.5 break-words text-[10.5px] leading-relaxed text-slate-400">
               <li>· 公开频道用 https://t.me/用户名/消息ID</li>
               <li>· 私有频道用 https://t.me/c/频道ID/消息ID（手机端「复制链接」就是这个格式）</li>
+              <li>· 帖子评论区的视频：粘评论链接 https://t.me/用户名/帖子ID?comment=评论ID，可一次粘多条；需要登录账号已加入关联讨论组</li>
               <li>· B站 / 小红书 / YouTube 可以直接粘视频链接或短链（b23.tv、xhslink.cn、youtu.be）</li>
               <li>· 也可以把 App 里「复制链接」的整段分享口令原样粘进来，说明文字会自动忽略</li>
               <li>· 网页链接或 .m3u8 直链：自动从页面里提取视频并下载（支持 Referer / UA 防盗链）</li>

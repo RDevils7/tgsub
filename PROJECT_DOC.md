@@ -66,7 +66,7 @@
 - **监控历史**：每次扫描实际查看过的消息全部留痕（命中 / 过滤 / 未命中 / 空消息），可按频道、状态筛选、全文搜索，一键跳转原消息，用来排查「为什么这条没下载」。
   - 同一条消息重复扫到只累加「扫描次数」并刷新「最近扫描时间」，不堆重复行。
   - 增量不足时会回看频道最近 20 条（留痕不重复入队），频道安静时页面也不会空着。
-- **按链接直接下载**：`手动下载`页粘贴 `t.me` 链接即可抓取（公开/私有频道、相册整组均可），私有频道的 `t.me/c/<内部ID>/<消息ID>` 链接同样支持；监控历史每条记录也有「下载」按钮，机器人收到链接同样立即开始。
+- **按链接直接下载**：`手动下载`页粘贴 `t.me` 链接即可抓取（公开/私有频道、相册整组均可），私有频道的 `t.me/c/<内部ID>/<消息ID>` 链接同样支持；1.3.6 起支持帖子评论区的 `?comment=<评论ID>` 链接（见专门章节，一次可粘多条）；监控历史每条记录也有「下载」按钮，机器人收到链接同样立即开始。
 - **网页 / m3u8 视频下载**：除了 Telegram 与平台分享口令，还能直接发**普通网页链接或 .m3u8 直链**——自动解析页面里的 `<video>`/`<source>`/JS 变量，挑不出再试 `playlist/index/live/hls.m3u8` 等常见播放器路径兜底，解析出 m3u8 后用 ffmpeg 合并下载（AES-128 加密会自动取 key）。防盗链靠自动带 `User-Agent` + **视频页原地址**作 `Referer` + `Origin`；页面内嵌地址会先还原 HTML 实体（`&amp;` 不还原会把签名参数写坏，CDN 直接 403），解析期间浏览器拿到的 Cookie（`cf_clearance`、登录态）也一并存进任务交给 ffmpeg，下载报 403 / 404 / 410 时还会用原链接重新解析一次换新签名。机器人发链接、Web 手动下载页粘贴链接都支持，落库为 `source=m3u8` 的独立任务，下载完同样生成 NFO 与封面。
   - **SPA / 签名接口站点（无头浏览器兜底）**：很多视频站是单页应用，m3u8 由页面 JS 向带签名的 API 请求得来，静态抓 HTML 根本看不到。此时自动用**无头 Chromium**把页面真正渲染出来、监听网络请求截获真实的 `.m3u8`（含 hls.js 经 fetch 喂给 MSE 的情况，按 `content-type` 识别），再交给 ffmpeg 下载。触发播放按钮、隐藏 `navigator.webdriver` 以降低被识别概率。`Chromium` 由镜像构建阶段 `playwright install chromium` 装好（默认路径 `/opt/playwright`，运行时靠 `PLAYWRIGHT_BROWSERS_PATH` 定位）；**本地开发若想测这条链路，需先 `npx playwright install chromium`**（约 170MB，受限网络可能很慢或下不下来，可只在能联网的部署上验证）。若 Chromium 没装，解析器会优雅降级为原来的报错文案，不会让服务崩溃。
     - **标题取渲染后的**：SPA 常常等数据回来才把真实剧名写进 `<title>`，所以标题在**截获 m3u8 之后**才取；过早取会拿到空壳的初始标题（如站点通用名），导致文件名和 NFO 剧名都不对。
@@ -210,7 +210,8 @@
   - `remux`：mkv / ts / avi 这类容器，但编码能解 —— 服务端用 ffmpeg `-c copy` 换成 fragmented MP4 管道输出，
     能正常播，**但没有进度条**（实时转封装没有总长度），界面上写清楚了；
   - `unsupported`：HEVC / H.265 这类浏览器普遍不支持的编码，列表里直接标灰并说明，点了不会假装能播。
-    媒体库工具条上的「HEVC 试播」开关可以关掉这层拦阻（见下）。
+    媒体库工具条上的「HEVC 试播」开关可以关掉这层拦阻（见下）；该开关**前端默认开启**，
+    所以正常打开页面时 HEVC 不会走到这一支，只有手动关过开关、或直接调接口不带 `hevc=1` 才会标灰。
 - **换封装只在真出数据后才发响应头**：ffmpeg 一个字节都没出就退出（文件损坏、编码不认识）时返回 500 + 最后一行 stderr，
   而不是「200 + 空白」，播放器不会对着空流转圈。客户端关页面时子进程立刻 `SIGKILL`，不留僵尸 ffmpeg。
 - **探测缓存**：`ffmpeg -i` 的解析结果按 `路径 + 大小 + mtime` 缓存，最多 800 条，
@@ -220,6 +221,8 @@
 - **HEVC 试播（`hevc=1`）**：工具条右侧的「HEVC 试播」开关，本质是「我这台浏览器能解 HEVC，别再拦着」——
   Safari、装了 HEVC 扩展的 Edge、带硬解的系统确实能放，多数 Windows 上的 Chrome 不能，
   所以这件事**按浏览器存 localStorage**（`tgsub.media.hevc`），不跟着账号走。
+  **1.3.6 起默认打开**：只有用户在这台浏览器上明确点过关闭（存 `"0"`）才保持关，
+  没存过就当开 —— 初始化写成 `localStorage.getItem(HEVC_STORAGE_KEY) !== "0"`，别退回 `=== "1"`。
   打开后 `/library`、`/series` 带上 `hevc=1`，`playModeOf` 把 HEVC 按容器判成 `direct`（mp4/m4v）或
   `remux`（mkv/ts 等），分集行标一个「试播」角标；换封装时额外加 `-tag:v hvc1`，
   不加的话 Apple 系只认 `hev1`，会判成解不了。真的解不出来时 `<video>` 报错，
@@ -1020,7 +1023,7 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 `renamePlanChecks()` 16 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 按用户确认顺序（`applyOrder`）重排 / 未覆盖文件垫尾 / `buildRenamePlan` 按 `order` 编号、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 307 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 320 项。
 
 `originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
 认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
@@ -1038,6 +1041,55 @@ mp4/h264 直出、mkv/ts/avi 换封装、HEVC 默认判为不支持、HEVC 强�
 
 ---
 
+
+## 帖子评论区链接下载（1.3.6）
+
+手动下载 / 机器人现在能接 **帖子评论区里的单条评论链接**：
+
+```
+https://t.me/MMWYX1/3516?comment=55488
+https://t.me/MMWYX1/3516?comment=55499
+https://t.me/c/1234567890/3516?comment=55488
+```
+
+### 之前为什么下不了
+
+`parseTelegramLink()` 的正则只取路径里的第一个数字，**没有锚定结尾**，`?comment=55488` 被当成普通查询串静默丢掉：
+系统去下载帖子 `3516`，纯文本帖报「这条消息没有可下载的媒体文件（纯文本）」，有媒体的帖则下回来帖子的文件而不是评论的。
+更根本的是，评论**不在频道里**——帖子开了评论后 Telegram 会把它转发进关联的 megagroup（讨论组），
+`?comment=55488` 的 55488 是**讨论组内部**的消息 ID，用频道当 peer 永远取不到。
+
+### 修复分层
+
+| 文件 | 职责 |
+| --- | --- |
+| `tg/link.ts`（纯函数） | 解析 `?comment=`：`postId` = 路径里的帖子 ID、`commentId` = 评论 ID；`isCommentLink()`、`extractTelegramLinks()` 原样保留 query。不 import db/env，自检可直接调 |
+| `tg/discussionplan.ts`（纯函数） | `pickDiscussionGroup()` 从 `messages.GetDiscussionMessage` 的返回里挑讨论组：优先 `messages[0].peerId`，若指向频道自身则回退到 chats 里的 megagroup；`discussionEntityKey()` 有 username 用 username（重启后仍可解析），否则 `-100<id>` |
+| `tg/discussion.ts` | `resolveDiscussionGroup()` 调 `Api.messages.GetDiscussionMessage`，RPC 错误翻成中文（未开评论 / 不是讨论组成员） |
+| `tg/direct.ts` | `downloadFromLink()` 遇评论链接 → `resolveCommentTarget()` → `enqueueFromTarget(target, commentId)` |
+
+**为什么不讨论组 ID 直接存进 downloads 表**：`fetchMessageGroup()`、`enqueueGroup()` 和
+`downloader.run()` 都按 `channel_id → channelEntityKey(channel)` 重新取 peer（下载阶段会再查一次消息）。
+把讨论组登记成一行 `enabled=0` 的频道（标题带「（评论区）」），三段自动统一指向讨论组，
+不用给 downloads 加列、不用改下载器；`channelMessageLink()` 生成的
+`t.me/c/<讨论组ID>/<评论ID>` 也正好是能打开的评论直链。GramJS 的 `invoke` 会把返回的 chats
+放进 entityCache，随后 `getEntity("-100<id>")` 能命中；解析阶段还会预热一次实体，失败当场给出提示。
+
+### 限制
+
+- 登录的账号必须已加入该帖子的关联讨论组，否则 Telegram 不给读评论。
+- 一条链接 = 一条评论；手动下载页可以一次粘多条，逐条解析入队。
+- **不支持**「粘主帖链接自动下整个评论区」，主帖链接行为不变（下主帖的媒体）。
+- 评论里的相册组照常按 `grouped_id` 整组抓取，命名 / NFO / Emby 通知与普通消息一致。
+
+### 自检
+
+`telegramLinkChecks()` 13 项：公开 / 私有链接、评论链接的帖子与评论 ID、多参数 + fragment、
+`?single` 不算评论、非法 comment 值、省略协议 / telegram.me、非消息链接返回 null、
+提取链接保留 query 并去重、`idString` 兼容 bigint / `-100` / PeerChannel、
+讨论组挑选（peerId 优先 / 频道自身回退 / 空数据返回 null）、entityKey 形式。合计 **320** 项。
+
+---
 
 ## 手动下载提交记录（1.3.1）
 
@@ -1280,7 +1332,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 307 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 320 项。
 
 ---
 
@@ -1354,6 +1406,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | `/channels`、`/addch @xxx`、`/rmch 3` | 查看、添加、删除频道 |
 | `/subs`、`/sub 关键词1,关键词2`、`/rmsub 4` | 查看、新建、删除订阅 |
 | `/dl https://t.me/频道名/123` | 按链接直接下载这条消息（直接发链接也可以；`/dl` 同样接受平台口令） |
+| `/dl https://t.me/频道名/123?comment=456` | 下载帖子评论区里指定的那条评论（需已加入关联讨论组） |
 | `/tasks`、`/queue`、`/retry [all]` | 进行中的任务（已完成的会推完成卡片，不在列表中）、下载队列、重试失败任务 |
 | `/pause`、`/resume` | 暂停 / 恢复自动扫描 |
 | `/stats`、`/help` | 累计统计、命令说明 |
@@ -1403,7 +1456,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | POST | `/api/channels/:id/scan` | 立即扫描单个频道 |
 | GET / POST / DELETE | `/api/subscriptions`、`/api/subscriptions/:id` | 订阅规则增删查 |
 | GET | `/api/downloads` | 下载列表（`status`、`channelId`、`q`、`limit`、`offset`） |
-| POST | `/api/downloads/link` | 按 `t.me` 链接或 `channelId + messageId` 直接下载 |
+| POST | `/api/downloads/link` | 按 `t.me` 链接（含 `?comment=` 评论链接）或 `channelId + messageId` 直接下载 |
 | POST | `/api/downloads/:id/retry`、`/api/downloads/retry-failed` | 重试单条 / 全部失败 |
 | POST | `/api/downloads/:id/pause`、`stop`、`resume`、`jump` | 队列管控：暂停 / 停止 / 继续 / 插队 |
 | GET | `/api/downloads/:id/meta` | 单条任务的实时进度（含速度、剩余时间） |
@@ -1527,6 +1580,9 @@ tgsub/
 │   │   │   ├── m3u8Browser.ts  # 无头 Chromium 渲染页面截获真实 m3u8（SPA / 签名接口兜底）
 │   │   │   ├── media.ts        # 媒体信息解析、路径生成
 │   │   │   ├── entity.ts       # 频道实体标识（-100 标记形式）与消息链接
+│   │   │   ├── link.ts         # Telegram 消息 / 评论链接解析（纯函数，不碰 db）
+│   │   │   ├── discussionplan.ts # 从 GetDiscussionMessage 返回里挑讨论组、生成 entityKey（纯函数）
+│   │   │   ├── discussion.ts   # 调 messages.GetDiscussionMessage 定位帖子关联讨论组
 │   │   │   ├── naming.ts       # 剧集命名策略（剧名 / 季集 / 封面挑图）
 │   │   │   ├── legacy.ts       # 历史剧集文件名修正（去掉多余的 -NN 序号）
 │   │   │   ├── mediatree.ts    # 媒体目录树：下载文件 + 手动来源按文件夹聚合
@@ -1568,12 +1624,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.5`（镜像 `rdevils7/tgsub:v1.3.5` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.6-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.6`（镜像 `rdevils7/tgsub:v1.3.6` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.7-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.6-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.6`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.6` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.7-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.7-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.7`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.7` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.8-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。
