@@ -122,16 +122,23 @@ LABEL org.opencontainers.image.title="tgsub" \
 # 而硬件转码（N100 这类带核显的 NAS 把 HEVC 实时转成 H.264）依赖 libva + iHD 驱动。
 # 系统 ffmpeg 由 Debian 编译，VAAPI / QSV 都带；用 FFMPEG_PATH 指向它（优先于内置静态版）。
 # intel-media-va-driver 是第 11 代以后核显（含 N100 / N305 的 Gen12）的 iHD 驱动。
-RUN apt-get update \
- && apt-get install -y --no-install-recommends tini util-linux ca-certificates \
-    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-    libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 libxshmfence1 \
-    libx11-6 libxcb1 libxext6 fonts-liberation \
-    ffmpeg libva2 libva-drm2 intel-media-va-driver \
- && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /data /downloads \
- && chown -R node:node /data /downloads /app
+# 注意：这个包只有 x86 版本（Debian 上仅 amd64 / i386），arm64 装了会直接「Unable to locate package」，
+# 所以按架构判断，只有 x86 才装（arm64 NAS 没有 Intel 核显，本来也用不上）。
+RUN set -eux; \
+    apt-get update; \
+    case "$(dpkg --print-architecture)" in \
+      amd64|i386) HW_DRIVER="intel-media-va-driver" ;; \
+      *)          HW_DRIVER="" ;; \
+    esac; \
+    apt-get install -y --no-install-recommends tini util-linux ca-certificates \
+      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+      libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+      libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 libxshmfence1 \
+      libx11-6 libxcb1 libxext6 fonts-liberation \
+      ffmpeg libva2 libva-drm2 ${HW_DRIVER}; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /data /downloads; \
+    chown -R node:node /data /downloads /app
 
 # yt-dlp：B站 / 抖音 / 小红书的下载引擎（约 30MB，自带 Python 运行时）。
 # 这三个平台的播放地址都要签名，自己实现会随平台改版失效，交给 yt-dlp 跟版更稳。
