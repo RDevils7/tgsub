@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import { env, isDirWritable } from "../env";
 import { db, getEmbyKeyHint, getPlatformCookieHint, getSessionMeta, getSettings } from "../db";
 import { APP_VERSION } from "../version";
-import { ffmpegInfo } from "../tg/ffmpeg";
+import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
 import { ytdlpInfo, clearYtdlpCache } from "../platform/ytdlp";
 import { engineState } from "../platform/updater";
 import { loadSharp } from "../tg/sharp";
@@ -374,11 +374,12 @@ async function toolReport(
 ): Promise<ToolProbe[]> {
   // 三个慢探测并行；其余都是同步读文件 / 读内存
   if (force) clearYtdlpCache();
-  const [ffmpeg, engine, chromium, sharpOk] = await Promise.all([
+  const [ffmpeg, engine, chromium, sharpOk, hw] = await Promise.all([
     ffmpegInfo(force),
     engineState(),
     probeChromium(force),
     loadSharp().then(Boolean).catch(() => false),
+    hwCapability(force),
   ]);
   const ytdlp = engine.info;
   const update = engine.update;
@@ -411,7 +412,19 @@ async function toolReport(
       path: ffmpeg.ffmpeg,
       source: ffmpeg.source ? FFMPEG_SOURCE[ffmpeg.source] ?? ffmpeg.source : null,
       note: ffmpeg.available ? null : clip(ffmpeg.error) ?? "未找到 ffmpeg",
-      usedBy: "m3u8 下载 / 视频截帧 / 封面生成",
+      usedBy: "m3u8 下载 / 视频截帧 / 封面生成 / 媒体库转码",
+    },
+    {
+      id: "hwdecode",
+      label: "硬件解码",
+      status: toolStatus({ available: hw.available, optional: true }),
+      version: hw.encoder ?? null,
+      path: hw.device ?? null,
+      source: hw.accel ? hw.accel.toUpperCase() : null,
+      note: hw.available
+        ? `媒体库里浏览器解不了的编码（HEVC 等）会用 ${hw.label} 实时转码成 H.264`
+        : clip(hw.reason ?? "") || "没检测到可用显卡：浏览器解不了的编码只能下载后用本地播放器看",
+      usedBy: "媒体库播放（HEVC / ProRes 实时转码）",
     },
     {
       id: "ytdlp",

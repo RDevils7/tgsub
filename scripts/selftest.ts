@@ -97,11 +97,13 @@ import {
 import {
   applyFields,
   buildNfo,
+  displayText,
   EMPTY_FIELDS as EMPTY_NFO_FIELDS,
   fieldsFromNfo,
   isNfoEditable,
   mergeGeneratedNfo,
   parseNfo,
+  unwrapCdata,
   validateNfo,
   type NfoFields,
 } from "../server/src/tg/nfo";
@@ -3200,6 +3202,24 @@ function nfoChecks(): void {
     assert.equal(isNfoEditable(parseNfo(raw)), true);
   });
 
+  check("CDATA 只是容器：读出来的 plot 不带 <![CDATA[", () => {
+    const raw = ep("  <plot><![CDATA[小镇熟母……竟然偷偷钻进男厕所露出？]]></plot>");
+    const fields = fieldsFromNfo(parseNfo(raw));
+    assert.equal(fields.plot, "小镇熟母……竟然偷偷钻进男厕所露出？");
+    assert.ok(!fields.plot.includes("CDATA"));
+  });
+
+  check("畸形 CDATA（<![[CDATA[ / 残留 ]]>）也能剥干净", () => {
+    assert.equal(unwrapCdata("<![[CDATA[正文]]>"), "正文");
+    assert.equal(unwrapCdata("<![[CDATA[正文]]>>"), "正文");
+    assert.equal(unwrapCdata("普通正文"), "普通正文");
+  });
+
+  check("displayText 去掉 CDATA、HTML 标签并压掉空白", () => {
+    assert.equal(displayText("<![CDATA[<b>粗体</b>\n  与 <i>斜体</i>]]>"), "粗体 与 斜体");
+    assert.equal(displayText(""), "");
+  });
+
   check("同名标签优先显示非空值，保存时收敛成一个", () => {
     const raw = ep("  <showtitle></showtitle>\n  <showtitle>旧剧名</showtitle>\n  <title>剧</title>");
     assert.equal(fieldsFromNfo(parseNfo(raw)).showtitle, "旧剧名");
@@ -3419,7 +3439,7 @@ async function embyViewChecks(): Promise<void> {
  */
 async function mediaLibChecks(): Promise<void> {
   // medialib 顶层 import 了 db / env，动态引入避免自检一启动就建库
-  const { existingEpisodeThumb, findSeriesArt, isTrialCodec, playModeOf, thumbTimeFor } = await import(
+  const { existingEpisodeThumb, findSeriesArt, isTrialCodec, playModeOf, streamUrl, thumbTimeFor } = await import(
     "../server/src/tg/medialib"
   );
   const fs = await import("node:fs");
@@ -3478,30 +3498,50 @@ async function mediaLibChecks(): Promise<void> {
       assert.equal(playModeOf("a.AVI", probe("mpeg4")), "remux");
     });
 
-    check("播放：HEVC / H.265 默认判为不支持，别假装能播", () => {
+    check("播放：没有显卡时 HEVC / H.265 判为播不了，别假装能播", () => {
       assert.equal(playModeOf("a.mp4", probe("hevc")), "unsupported");
       assert.equal(playModeOf("a.mkv", probe("hevc")), "unsupported");
       assert.equal(playModeOf("a.mp4", probe("h265")), "unsupported");
-      // 关掉开关与不传 opts 的行为必须一致（默认不变）
+      // 关掉直连开关与不传 opts 的行为必须一致（默认不变）
       assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: false }), "unsupported");
+      assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: false, hw: false }), "unsupported");
     });
 
-    check("播放：开了 HEVC 试播后按容器决定直出还是换封装", () => {
-      // mp4 装 HEVC：浏览器能不能解由它自己说，服务端不再拦
-      assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: true }), "direct");
-      assert.equal(playModeOf("a.m4v", probe("h265"), { allowHevc: true }), "direct");
-      // mkv / ts 装 HEVC：换封装只换壳、编码还是 HEVC，但至少给了浏览器一次机会
-      assert.equal(playModeOf("a.mkv", probe("hevc"), { allowHevc: true }), "remux");
-      assert.equal(playModeOf("a.ts", probe("h265"), { allowHevc: true }), "remux");
+    check("播放：有显卡时 HEVC 改走显卡转码（不再标播不了）", () => {
+      // 容器是什么都无所谓：转码输出统一是 fMP4 + H.264
+      assert.equal(playModeOf("a.mp4", probe("hevc"), { hw: true }), "transcode");
+      assert.equal(playModeOf("a.mkv", probe("h265"), { hw: true }), "transcode");
+      assert.equal(playModeOf("a.ts", probe("hevc"), { hw: true }), "transcode");
     });
 
-    check("播放：试播开关只放行 HEVC，别的怪编码仍然拦下", () => {
-      // prores / mpeg2 这些不是「看浏览器」的问题，开了开关也不该放过去
+    check("播放：直连开关优先于转码（Safari 这类能自解的不烧显卡）", () => {
+      assert.equal(playModeOf("a.mp4", probe("hevc"), { allowHevc: true, hw: true }), "direct");
+      assert.equal(playModeOf("a.mkv", probe("hevc"), { allowHevc: true, hw: true }), "remux");
+    });
+
+    check("播放：其它浏览器解不了的编码（ProRes / MPEG-2）有显卡也转码", () => {
+      assert.equal(playModeOf("a.mov", probe("prores"), { hw: true }), "transcode");
+      assert.equal(playModeOf("a.mpg", probe("mpeg2video"), { hw: true }), "transcode");
+      // 没有显卡时这些照样是播不了
+      assert.equal(playModeOf("a.mov", probe("prores")), "unsupported");
+    });
+
+    check("播放：直连开关只放行 HEVC，别的怪编码仍然拦下", () => {
+      // prores / mpeg2 这些不是「看浏览器」的问题，开了直连也不该放过去
       assert.equal(playModeOf("a.mov", probe("prores"), { allowHevc: true }), "unsupported");
       assert.equal(playModeOf("a.mpg", probe("mpeg2video"), { allowHevc: true }), "unsupported");
-      // 正常编码不受开关影响
-      assert.equal(playModeOf("a.mp4", probe("h264"), { allowHevc: true }), "direct");
-      assert.equal(playModeOf("a.mkv", probe("h264"), { allowHevc: true }), "remux");
+      // 正常编码不受开关影响，也不该被转码（能直出就直出，省 GPU）
+      assert.equal(playModeOf("a.mp4", probe("h264"), { allowHevc: true, hw: true }), "direct");
+      assert.equal(playModeOf("a.mkv", probe("h264"), { hw: true }), "remux");
+    });
+
+    check("播放地址：转码带 mode=transcode，拖进度条带 start", () => {
+      assert.ok(streamUrl("a.mkv", "transcode").includes("mode=transcode"));
+      assert.ok(streamUrl("a.mp4", "direct").includes("path="));
+      assert.ok(!streamUrl("a.mp4", "direct").includes("mode="));
+      // 实时流拖动：从 125 秒重新起一路
+      assert.ok(streamUrl("a.mkv", "transcode", 125.7).includes("start=125"));
+      assert.ok(!streamUrl("a.mp4", "direct", 0).includes("start="));
     });
 
     check("播放：isTrialCodec 只认 hevc / h265，大小写不敏感", () => {
@@ -3556,6 +3596,138 @@ async function mediaLibChecks(): Promise<void> {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 硬件解码 / 显卡转码                                                 */
+/* ------------------------------------------------------------------ */
+
+async function hwDecodeChecks(): Promise<void> {
+  const { buildTranscodeArgs, parseEncoders, parseHwaccels, pickAccel, transcodeBitrateKbps, transcodeHeight } =
+    await import("../server/src/tg/hwdecode");
+
+  check("硬解：解析 ffmpeg -hwaccels 的输出", () => {
+    const out = ["Hardware acceleration methods:", "vaapi", "qsv", "cuda", "vaapi", ""].join("\n");
+    const list = parseHwaccels(out);
+    assert.deepEqual(list, ["vaapi", "qsv", "cuda"]);
+    // 空输入 / 只有标题也不能崩
+    assert.deepEqual(parseHwaccels(""), []);
+    assert.deepEqual(parseHwaccels("Hardware acceleration methods:\n"), []);
+  });
+
+  check("硬解：只从 -encoders 里挑视频编码器，别把音频当视频", () => {
+    const out = [
+      "Encoders:",
+      " V..... = Video",
+      " A..... = Audio",
+      " ------",
+      " V....D h264_vaapi           H.264/AVC (VAAPI)",
+      " V....D h264_qsv             H.264/AVC (Intel Quick Sync Video)",
+      " V..... libx264              libx264 H.264",
+      " A....D aac                  AAC",
+      " A....D h264_nvenc_audio_fake_not_real",
+    ].join("\n");
+    const list = parseEncoders(out);
+    assert.ok(list.includes("h264_vaapi"));
+    assert.ok(list.includes("h264_qsv"));
+    assert.ok(list.includes("libx264"));
+    assert.ok(!list.includes("aac"));
+    assert.ok(!list.includes("h264_nvenc_audio_fake_not_real"));
+  });
+
+  check("硬解：Linux 优先 VAAPI，其次 QSV；Windows 不选 VAAPI", () => {
+    assert.deepEqual(pickAccel(["vaapi", "qsv"], ["h264_vaapi", "h264_qsv"], "linux"), {
+      accel: "vaapi",
+      encoder: "h264_vaapi",
+    });
+    // 只编了 qsv 的精简镜像
+    assert.deepEqual(pickAccel(["qsv"], ["h264_qsv"], "linux"), { accel: "qsv", encoder: "h264_qsv" });
+    // Windows 上 ffmpeg 不会列 vaapi，即使列了也不能用
+    assert.deepEqual(pickAccel(["vaapi", "qsv"], ["h264_vaapi", "h264_qsv"], "win32"), {
+      accel: "qsv",
+      encoder: "h264_qsv",
+    });
+    // 有加速方式但没有对应的 H.264 编码器 → 用不了
+    assert.equal(pickAccel(["vaapi"], ["libx264"], "linux"), null);
+    assert.equal(pickAccel([], ["libx264"], "linux"), null);
+  });
+
+  check("硬解：转码目标高度不超过 1080，不放大，取偶数", () => {
+    assert.equal(transcodeHeight(2160), 1080);
+    assert.equal(transcodeHeight(1080), 1080);
+    assert.equal(transcodeHeight(720), 720);
+    assert.equal(transcodeHeight(481), 480);
+    assert.equal(transcodeHeight(null), 1080);
+    assert.equal(transcodeHeight(0), 1080);
+  });
+
+  check("硬解：码率按高度分档", () => {
+    assert.equal(transcodeBitrateKbps(1080), 6000);
+    assert.equal(transcodeBitrateKbps(720), 3500);
+    assert.equal(transcodeBitrateKbps(480), 1800);
+    assert.equal(transcodeBitrateKbps(240), 1000);
+  });
+
+  check("硬解：VAAPI 参数包含硬解设备、hwupload 与硬编 h264_vaapi", () => {
+    const args = buildTranscodeArgs({
+      input: "/downloads/a.mkv",
+      accel: "vaapi",
+      device: "/dev/dri/renderD128",
+      sourceHeight: 2160,
+    });
+    const text = args.join(" ");
+    assert.ok(text.includes("-hwaccel vaapi"), "要有硬解");
+    assert.ok(text.includes("-hwaccel_device /dev/dri/renderD128"), "解码设备");
+    assert.ok(text.includes("-vaapi_device /dev/dri/renderD128"), "滤镜设备");
+    assert.ok(text.includes("scale=-2:1080"), "4K 降到 1080");
+    assert.ok(text.includes("hwupload"), "系统内存帧要上传才能硬编");
+    assert.ok(text.includes("-c:v h264_vaapi"), "硬编 H.264");
+    assert.ok(text.includes("-c:a aac"), "音频转 AAC");
+    assert.ok(text.includes("frag_keyframe+empty_moov"), "要能边转边播");
+    assert.equal(args[args.length - 1], "pipe:1");
+    // 只带首条视频 + 首条音频，字幕 / 数据轨不进流
+    assert.ok(text.includes("-map 0:v:0?"));
+    assert.ok(text.includes("-sn -dn"));
+  });
+
+  check("硬解：QSV 走 h264_qsv，不塞 hwupload", () => {
+    const args = buildTranscodeArgs({
+      input: "/downloads/a.mkv",
+      accel: "qsv",
+      device: "/dev/dri/renderD128",
+      sourceHeight: 1080,
+    });
+    const text = args.join(" ");
+    assert.ok(text.includes("-hwaccel qsv"));
+    assert.ok(text.includes("-c:v h264_qsv"));
+    assert.ok(!text.includes("hwupload"));
+    assert.ok(!text.includes("vaapi"));
+  });
+
+  check("硬解：软件兜底用 libx264（只在显式配置时才会走到）", () => {
+    const args = buildTranscodeArgs({ input: "/downloads/a.mov", accel: "software", sourceHeight: 720 });
+    const text = args.join(" ");
+    assert.ok(text.includes("-c:v libx264"));
+    assert.ok(text.includes("-crf 22"));
+    assert.ok(!text.includes("hwaccel"));
+  });
+
+  check("硬解：拖动进度条时 -ss 必须放在 -i 之前（输入侧 seek）", () => {
+    const args = buildTranscodeArgs({
+      input: "/downloads/a.mkv",
+      accel: "vaapi",
+      device: "/dev/dri/renderD128",
+      sourceHeight: 1080,
+      startSec: 125.7,
+    });
+    const ss = args.indexOf("-ss");
+    const input = args.indexOf("-i");
+    assert.ok(ss >= 0 && input > ss, "-ss 要在 -i 前面");
+    assert.equal(args[ss + 1], "125.700");
+    // 不带 start 时不能出现 -ss
+    const plain = buildTranscodeArgs({ input: "a.mkv", accel: "vaapi", device: "/dev/dri/renderD128" });
+    assert.equal(plain.includes("-ss"), false);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -3566,6 +3738,7 @@ async function main(): Promise<void> {
     ["Emby 入库用例", () => embyNotifyChecks()],
     ["Emby 媒体库用例", () => embyViewChecks()],
     ["本地媒体库用例", () => mediaLibChecks()],
+    ["硬件解码用例", () => hwDecodeChecks()],
     ["缓存清理用例", () => cacheChecks()],
     ["网络代理用例", () => proxyChecks()],
     ["网络线路用例", () => netRouteChecks()],

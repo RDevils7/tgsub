@@ -180,7 +180,7 @@
 - **兜底与补推**：页面上的「让 Emby 全库扫描」用于补历史文件；「补推路径」可对单个老剧集目录补一次通知。
 - **密钥安全**：API Key 与 session / bot token 一样用 `SESSION_SECRET` 加密落盘，`/api/settings` 只回掩码与是否已配置。
 
-### 媒体库（本地目录浏览与播放，1.3.5）
+### 媒体库（本地目录浏览与播放，1.3.5；界面 1.3.7 重做）
 
 侧边栏第二位「**媒体库**」展示**你自己选的目录**（默认下载目录）里的剧集，点剧集看分集、点某一集直接播。
 这一页**不依赖 Emby**：NFO、封面、视频全在本地磁盘上，Emby 没配也照样能看。
@@ -188,6 +188,20 @@
 这三块（媒体信息 / 入库通知 / Emby 端还要做三件事）装在**同一个卡片框**里，块之间用分隔线，
 不再各占一张卡（`CollapsibleCard` 与 `EmbyNotifyPanel` 的 `flat` 属性，外层由 `section.card divide-y` 兜住）。
 
+- **界面结构（1.3.7 重做，仿 SenPlayer / Hills / Infuse 那类现代播放器）**：
+  - 目录页 = **沉浸式 Hero + 自适应海报墙 + 横向片架**。Hero 取「最近更新」的那部剧，
+    有横版剧照（`landscape`）就用剧照铺底；**只有竖版海报时放大虚化当氛围底**，
+    不要把 2:3 直接 `object-cover` 拉成横条（会把画面裁糊）；两样都没有才用网格底纹。
+  - 海报墙用 `auto-fill`（`minmax(148px→166px, 1fr)`），窗口宽窄自己排，
+    不要写死 `grid-cols-5 xl:grid-cols-6` —— 换个窗口宽度就会在右边留一片空洞。
+  - 剧集页 = 背景主视觉（海报 + 标题 + 年份 / 集数 / 体积 / 类型 / 评分 + 简介）+ 选集，
+    选集有**网格**（16:9 缩略图 + 集号 + 标题 + 简介 + 参数）和**列表**（信息密度高、适合几十集）两种视图，
+    切换记在 `localStorage['tgsub.media.epview']`；网格同样用 `auto-fill`。
+  - 播放是**影院式弹窗**（`max-w-6xl`），`[` / `]` 切上一集下一集、`Esc` 关闭，底部「下载」外链原文件。
+  - 工具条：面包屑（相对下载根逐级，可点回上层）、搜索（`/` 聚焦）、排序（最近更新 / 名称）、
+    「HEVC 试播」、选择目录、刷新。浏览位置 `tgsub.media.dir`、排序 `tgsub.media.sort` 都记在本机。
+  - **Hero 是独立深色卡片**：浅色主题下也不变白，压在图上的文字必须写死 `text-[#fff]`
+    （主题自适应的 `text-white` 在浅色主题下会变深色，压黑遮罩直接看不见）。
 - **看的是哪个目录**：默认下载根，可以用「选择目录」逐层浏览切换，也接受设置里那 5 个来源目录与手动登记的外部来源。
   选择结果记在浏览器本地，刷新后还停在原处。只认「下载根内或已登记来源」，别的路径服务端直接 403。
 - **一屏 = 这个目录下的剧集**：目录里每个「自己装了视频的文件夹」算一部剧（`collectSeriesDirs` 的同一套判定），
@@ -205,29 +219,69 @@
      首选时点抽不出画面时自动退回第 0 帧。抽完落缓存，同一文件不再重复抽。
   同一文件的并发请求合并成一次抽帧（海报墙滑过去会打好几个请求），抽不出来就 404，
   前端显示占位图标 —— 视频损坏也只是一格没图，不影响整页。
-- **播放三种情况**（`playModeOf`）：
+- **播放四种情况**（`playModeOf`）：
   - `direct`：mp4 / webm 且编码是 h264 / vp9 / av1，`/api/media/stream` 按 Range 直出，能拖进度条；
   - `remux`：mkv / ts / avi 这类容器，但编码能解 —— 服务端用 ffmpeg `-c copy` 换成 fragmented MP4 管道输出，
-    能正常播，**但没有进度条**（实时转封装没有总长度），界面上写清楚了；
-  - `unsupported`：HEVC / H.265 这类浏览器普遍不支持的编码，列表里直接标灰并说明，点了不会假装能播。
-    媒体库工具条上的「HEVC 试播」开关可以关掉这层拦阻（见下）；该开关**前端默认开启**，
-    所以正常打开页面时 HEVC 不会走到这一支，只有手动关过开关、或直接调接口不带 `hevc=1` 才会标灰。
-- **换封装只在真出数据后才发响应头**：ffmpeg 一个字节都没出就退出（文件损坏、编码不认识）时返回 500 + 最后一行 stderr，
-  而不是「200 + 空白」，播放器不会对着空流转圈。客户端关页面时子进程立刻 `SIGKILL`，不留僵尸 ffmpeg。
+    能正常播；实时流没有总长度，前端自己画一条进度条，拖动就用 `start=` 重新起一路；
+  - `transcode`：编码浏览器解不了（HEVC / H.265、ProRes、MPEG-2），但服务端有可用显卡 ——
+    硬解 + 硬编成 H.264 实时串出去（见下面的「硬件解码 / 显卡转码」）；
+  - `unsupported`：既不能直连、又没有显卡可转，列表标灰并说明，点了给「下载」引导，不假装能播。
+  优先级是「能直出就直出（不占 GPU）→ HEVC 且用户要求直连就先直连 → 有显卡才转码」。
+- **换封装 / 转码只在真出数据后才发响应头**：ffmpeg 一个字节都没出就退出（文件损坏、编码不认识、显卡没权限）时
+  返回 500 + 最后一行 stderr，而不是「200 + 空白」，播放器不会对着空流转圈。
+  客户端关页面 / 拖动重开时子进程立刻 `SIGKILL`，不留僵尸 ffmpeg。
 - **探测缓存**：`ffmpeg -i` 的解析结果按 `路径 + 大小 + mtime` 缓存，最多 800 条，
   并发上限 4 —— 一季几十集不会同时把机器打满，二次进入秒开。
-- **可播边界说明**：浏览器解码能力由浏览器决定，服务端只做换封装不做转码。真遇到播不了的编码，
-  弹窗里有「下载」按钮，可以拉下来用本地播放器看。
-- **HEVC 试播（`hevc=1`）**：工具条右侧的「HEVC 试播」开关，本质是「我这台浏览器能解 HEVC，别再拦着」——
-  Safari、装了 HEVC 扩展的 Edge、带硬解的系统确实能放，多数 Windows 上的 Chrome 不能，
-  所以这件事**按浏览器存 localStorage**（`tgsub.media.hevc`），不跟着账号走。
-  **1.3.6 起默认打开**：只有用户在这台浏览器上明确点过关闭（存 `"0"`）才保持关，
-  没存过就当开 —— 初始化写成 `localStorage.getItem(HEVC_STORAGE_KEY) !== "0"`，别退回 `=== "1"`。
-  打开后 `/library`、`/series` 带上 `hevc=1`，`playModeOf` 把 HEVC 按容器判成 `direct`（mp4/m4v）或
-  `remux`（mkv/ts 等），分集行标一个「试播」角标；换封装时额外加 `-tag:v hvc1`，
-  不加的话 Apple 系只认 `hev1`，会判成解不了。真的解不出来时 `<video>` 报错，
-  弹窗直说「这台浏览器解不了 HEVC」，而不是一直转圈。
-- **开关不影响别人**：存在浏览器本地，同账号换台机器、换浏览器互不干扰；关掉后分集立刻恢复标灰。
+- **可播边界说明**：浏览器解码能力由浏览器决定；服务端只会「换封装」或「显卡转码」，不做软件转码（那会把 CPU 烧穿）。
+- **HEVC 直连（`hevc=1`）**：工具条上的开关，本质是「我这台浏览器能自己解 HEVC，别占用显卡」。
+  Safari、装了 HEVC 扩展的 Edge、带硬解的机器确实能放，多数 Windows / Linux 上的 Chrome 不能。
+  这件事**按浏览器存 localStorage**（`tgsub.media.hevc`），不跟着账号走：
+  - **没存过时按浏览器能力自动决定**：`canPlayType('video/mp4; codecs="hvc1…"')` 有值就默认直连，否则默认关（走转码）；
+  - 打开后 `/library`、`/series` 带上 `hevc=1`，HEVC 按容器判成 `direct`（mp4/m4v）或 `remux`（mkv/ts 等），
+    分集标「试播」角标；换封装时额外加 `-tag:v hvc1`，不加的话 Apple 系只认 `hev1`，会判成解不了；
+  - 关掉后 HEVC 交给显卡转码，分集标「显卡转码」；解不出来时播放弹窗直说原因，而不是一直转圈。
+- **直连与转码互斥**：`trial` 只在 `direct` / `remux` 时才是真（“靠直连才可播”），
+  转码的集不会再叠一个「试播」角标 —— 两个角标叠在同一位置会互相压住（踩过）。
+
+### 硬件解码 / 显卡转码（N100 这类带核显的 NAS）
+
+浏览器普遍不解 HEVC，但 NAS 上的 Intel 核显（N100 / N305 / 群晖带 iGPU 的机型）能硬解。
+本版把这条路打通：**能直出就直出，编码不兼容才用显卡实时转码**，CPU 基本不烧。
+
+- **能力探测**（`tg/hwdecode.ts` 纯逻辑 + `tg/ffmpeg.ts` 的 `hwCapability()`）：三步，任何一步不过都如实说原因：
+  1. `ffmpeg -hwaccels` 里有 `vaapi` / `qsv`，且 `-encoders` 里有 `h264_vaapi` / `h264_qsv`；
+  2. VAAPI 需要 `/dev/dri/renderD128`（依次试 128/129/130）——容器必须映射显卡设备；
+  3. **真编一帧黑底视频**验证驱动可用（`-f lavfi color=… -c:v h264_vaapi -f null -`）。
+     只查参数不试，容器里少驱动时会误报可用，播放时才 500。
+  结果缓存 10 分钟（容器加显卡要重启才生效），`HW_ACCEL=auto|none|vaapi|qsv|software` 可强制指定。
+- **转码参数**（`buildTranscodeArgs()`）：**只把解码交给显卡，滤镜留在 CPU**。
+  强制 `-hwaccel_output_format vaapi` 的话，遇到 vaapi 解不了的编码 ffmpeg 会退回软解，
+  帧变成系统内存格式，后面的 `*_vaapi` 滤镜直接报错；不强制输出格式就是「能硬解就硬解、不能自动软解」。
+  - VAAPI：`-hwaccel vaapi -hwaccel_device D -vaapi_device D -vf scale=-2:H,format=nv12,hwupload -c:v h264_vaapi`；
+  - QSV：`-hwaccel qsv [-hwaccel_device D] -vf scale=-2:H,format=nv12 -c:v h264_qsv`（qsv 编码器吃系统内存帧，不用 hwupload）；
+  - `software`：`libx264 -preset veryfast -crf 22`，只在显式 `HW_ACCEL=software` 时用（无显卡环境 / 自测）；
+  - 目标高度 `min(1080, 源高)` 取偶数、不放大；码率按高度分档 6M / 3.5M / 1.8M / 1M；
+    音频统一 AAC 160k 双声道（浏览器对 AC3 / DTS 支持很差）；输出 `frag_keyframe+empty_moov+default_base_moof` 的 fMP4 管道。
+- **拖动进度条**：实时流没有 Content-Length，`<video>` 原生进度条是废的。
+  `/api/media/stream?mode=transcode|remux&start=秒` 用**输入侧 seek**（`-ss` 在 `-i` 之前）重新起一路流，
+  前端按 `durationSec` 自绘进度条，松手就带着 `start` 重挂播放器，转码约等 1~3 秒。
+- **部署**（docker-compose.yml 里已写好注释，取消注释即可）：
+  ```yaml
+  devices:
+    - /dev/dri:/dev/dri
+  group_add:
+    - "video"
+    - "render"     # 容器内用户要属于 render 组才能打开 renderD128
+  ```
+  镜像里装的是 Debian 的 `ffmpeg` + `libva2` + `libva-drm2` + `intel-media-va-driver`（Gen12 的 iHD 驱动），
+  并用 `FFMPEG_PATH=/usr/bin/ffmpeg` 指过去 —— npm 里的静态 ffmpeg 在部分平台没编入 VAAPI，不能只靠它。
+  默认不设 `LIBVA_DRIVER_NAME`，让 libva 自己挑驱动（Intel 选 iHD、AMD 选 radeonsi）；
+  老平台 / 异常时可在 compose 里加 `LIBVA_DRIVER_NAME: iHD` 强制指定。
+  宿主机没有 `/dev/dri`（ARM NAS / VPS）时不要放开这两段，否则容器会因找不到设备起不来。
+- **怎么看有没有生效**：媒体库工具条右侧的绿色「硬解 · VAAPI」徽章（没有则是灰色「无硬解」，悬停看原因）；
+  概览页工具链里也多了一项「硬件解码」，显示编码器与设备节点或失败原因。
+
+### 元数据编辑
 
 ### 元数据编辑
 
@@ -359,7 +413,7 @@ React 18 + Vite + TailwindCSS，无 UI 框架，玻璃质感 + 亮色/暗色双�
   「复制诊断」把版本、工具、服务、目录拼成纯文本，贴给维护者即可定位问题。
 - **服务状态**（9 项）：Telegram 账号、机器人、自动扫描、下载队列、Emby 入库、网络代理、
   网页下载线路、管理界面登录、第三方平台；点卡片直达对应页面。
-- **工具链**（7 个组件）：Node.js、ffmpeg、yt-dlp、Chromium（Playwright）、sharp、
+- **工具链**（8 个组件）：Node.js、ffmpeg、硬件解码（VAAPI / QSV 能力探测）、yt-dlp、Chromium（Playwright）、sharp、
   SQLite / better-sqlite3、Telegram SDK，逐项给出**版本 / 状态 / 绝对路径 / 来源 / 用途**，点路径可复制。
   - 路径口径与设置页一致（设置指定 → 环境变量 → 内置包 → PATH），显示的是**实际生效**的那个；
   - Chromium 版本优先取 `playwright-core/browsers.json` 的 `browserVersion`：
@@ -1023,7 +1077,9 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 `renamePlanChecks()` 16 项：自然排序、有集号优先、集号重复按文件名序、编号连续、
 按用户确认顺序（`applyOrder`）重排 / 未覆盖文件垫尾 / `buildRenamePlan` 按 `order` 编号、
 扩展名保留、剧名清洗、临时名唯一且在同目录、冲突检测（含「目标是本次要移动的文件本身」）、
-集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。合计 320 项。
+集号重复/缺集号/多季混用的提醒、单集命名、`samePath` 大小写规则。
+另外 `hwDecodeChecks()` 9 项覆盖硬件转码的纯逻辑（`-hwaccels` / `-encoders` 解析、加速方式选择、
+目标高度与码率分档、VAAPI / QSV / libx264 三套参数、拖动时 `-ss` 必须在 `-i` 之前）。合计 335 项。
 
 `originChecks()` 10 项：默认目录、空值回落、用户改过的目录名、Telegram / m3u8 / 三个平台目录、
 认不出归「其它」、手动来源在根内与根外的区别、反斜杠路径、多来源合成 mixed；
@@ -1332,7 +1388,7 @@ if (!state.configured || (!state.authDisabled && !state.authenticated)) return <
 #### 自检
 
 `loginChecks()` 9 项：哈希格式与不含明文、正确/错误密码、盐随机（同密码两次结果不同）、
-坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 320 项。
+坏数据与超参数哈希只判失败不抛错、用户名规则、密码规则、二次确认、cookie 解析（含同名多值）。合计 335 项。
 
 ---
 
@@ -1498,11 +1554,11 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | POST | `/api/emby/test` | 测试 Emby 连接（可带未保存的 `url` / `apiKey`，返回服务器名与版本） |
 | POST | `/api/emby/refresh` | 让 Emby 立刻全库扫描（兜底用） |
 | POST | `/api/emby/notify` | 手动补推一个路径（相对路径按下载目录解析） |
-| GET | `/api/media/library` | 列目录里的剧集（`dir` 可省，默认下载根；可选 `hevc=1`）：`series` / `loose` / `roots` / `isSeries` |
-| GET | `/api/media/series` | 一部剧的详情与全部分集（`dir` 必填，可选 `hevc=1`），每集带 `plot`（单集 NFO 简介）、`playMode`、`trial`（HEVC 试播才可播）、可塞进 `<video>` 的 `streamUrl` 和 `thumbUrl` |
+| GET | `/api/media/library` | 列目录里的剧集（`dir` 可省，默认下载根；`hevc=1` 表示「浏览器能自己解 HEVC，优先直连」）：`series` / `loose` / `roots` / `isSeries`，另带 `hw`（显卡能力：`available` / `accel` / `label` / `reason`） |
+| GET | `/api/media/series` | 一部剧的详情与全部分集（`dir` 必填，可选 `hevc=1`），每集带 `plot`（单集 NFO 简介）、`playMode`（`direct` / `remux` / `transcode` / `unsupported`）、`trial`（靠直连才可播）、可塞进 `<video>` 的 `streamUrl` 和 `thumbUrl`；同样带 `hw` |
 | GET | `/api/media/art` | 剧集封面（`dir` + `kind=poster\|landscape`），服务端按固定槽位查找，只回图片 |
 | GET | `/api/media/thumb` | 单集缩略图（`path` = 视频路径，必须过 `isVideoFile` + 允许路径）：有现成 `-thumb` 图直接发，没有就抽帧并缓存；抽不出来回 404 + 原因 |
-| GET | `/api/media/stream` | 播放本地视频：直出透传 `Range` / `206`；`mode=remux` 或容器不兼容时用 ffmpeg 换封装成 fMP4（HEVC 自动加 `-tag:v hvc1`） |
+| GET | `/api/media/stream` | 播放本地视频：直出透传 `Range` / `206`；`mode=remux` 换封装成 fMP4（HEVC 自动加 `-tag:v hvc1`）；`mode=transcode` 用显卡硬解 + 硬编 H.264 实时转码；`start=秒` 从指定位置重开一路流（拖进度条用） |
 | GET | `/api/media/roots` | 可切换的库位置（下载根 + 各平台目录 + 已登记来源） |
 | GET | `/api/emby/library` | 媒体库分区列表；没配置时返回 `ok:false` + `error`（不抛 4xx） |
 | GET | `/api/emby/items` | 条目列表：`libraryId` / `parentId`（剧集分集）/ `search` / `types` / `start` / `limit` |
@@ -1624,12 +1680,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.6`（镜像 `rdevils7/tgsub:v1.3.6` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.7-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.7`（镜像 `rdevils7/tgsub:v1.3.7` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.8-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.7-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.7`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.7` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.8-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.8-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.8`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.8` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.9-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

@@ -1,48 +1,68 @@
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { MediaEpisode, MediaLibraryResponse, MediaSeries, MediaSeriesResponse } from "../types";
-import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
+import type { MediaEpisode, MediaHwInfo, MediaLibraryResponse, MediaSeries, MediaSeriesResponse } from "../types";
+import { Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import {
   IconAlert,
   IconCheck,
   IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
+  IconCpu,
   IconDownload,
   IconFolder,
   IconImage,
   IconPlay,
   IconRefresh,
   IconSearch,
+  IconTv,
   IconVideo,
 } from "../components/icons";
 import { formatBytes, formatDateTime, formatDuration, formatRelative } from "../utils";
 
 /**
- * 媒体库。
+ * 媒体库 —— 仿现代化播放器（SenPlayer / Hills / Infuse 一类）的浏览方式：
  *
- * 展示的是「你选的目录」（默认下载目录）里的东西，不依赖 Emby：
- *   目录 → 剧集（海报墙）→ 分集列表 → 点某一集直接播
+ *   目录 → 沉浸式 Hero + 海报墙 + 横向片架 → 剧集详情（背景主视觉 + 选集卡片）→ 影院式播放
  *
  * 数据全部来自磁盘上的 NFO / 封面槽位；播放走 /api/media/stream，
  * 能原生播的按 Range 直出（可拖进度条），容器不兼容的由服务端用 ffmpeg 换封装。
+ *
+ * 视觉约定：
+ * - Hero 是**独立深色卡片**，浅色主题下也不变白，所以压图的白字一律写死 `text-[#fff]`
+ *   （主题自适应的 `text-white` 在浅色主题下会变成深色，压在黑遮罩上就看不见了）。
+ * - 其余部分全部用主题变量（slate / brand / panel），亮暗两套都要好看。
  */
 
 const DIR_STORAGE_KEY = "tgsub.media.dir";
 const SORT_STORAGE_KEY = "tgsub.media.sort";
+const EPVIEW_STORAGE_KEY = "tgsub.media.epview";
 /**
- * 「我的浏览器能放 HEVC，强制尝试」。
+ * 「浏览器自己解 HEVC」的开关（存本机）。
  *
- * HEVC 能不能播是**每台浏览器**的事（Safari / 带 HEVC 扩展的 Edge 能放，
- * 多数 Windows 上的 Chrome 不能），所以这个开关存在本地，不跟着账号走。
- * 打开后请求带 `hevc=1`，服务端不再把 HEVC 判成 unsupported。
- *
- * **默认打开**：只有在这台浏览器上手动关过（存了 "0"）才保持关闭；
- * 没存过（新装 / 清过缓存 / 换设备）一律按开处理，不用每次进媒体库先点一下。
+ * 默认值不再写死「开」：
+ * - 浏览器真能解 HEVC（Safari、装了 HEVC 扩展 / 带硬解的 Edge）→ 默认直连，省显卡；
+ * - 解不了（多数 Windows / Linux 上的 Chrome）→ 默认关，交给服务端显卡转码。
+ * 用户手动点过就以他存的值为准（`"1"` / `"0"`）。
  */
 const HEVC_STORAGE_KEY = "tgsub.media.hevc";
 
+/** 这台浏览器能不能自己解 HEVC（Safari / 带硬解的 Edge 返回 "probably"） */
+function browserCanPlayHevc(): boolean {
+  try {
+    const probe = document.createElement("video");
+    return (
+      probe.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') !== "" ||
+      probe.canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"') !== ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 type SortKey = "updated" | "name";
+type EpView = "grid" | "list";
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -102,6 +122,143 @@ function episodeCode(ep: MediaEpisode): string {
   return "—";
 }
 
+/** NFO 里可能夹着 CDATA 容器或 HTML 标签（抓取工具写的），显示前压成一行干净文本 */
+function cleanText(raw: string | null | undefined): string {
+  const text = String(raw ?? "");
+  if (!text) return "";
+  return text
+    .replace(/<!\s*\[+CDATA\s*\[+/gi, "")
+    .replace(/\]\]\s*>+/g, "")
+    .replace(/<\/?[a-z][\w:-]*(?:\s[^>]*)?\/?>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 参数小胶囊：卡片底部那一排「1080P / 190 MB / HEVC」 */
+function MetaChip({ children, strong = false }: { children: ReactNode; strong?: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center whitespace-nowrap rounded-md bg-white/[0.05] px-1.5 py-0.5 text-[10.5px] tabular-nums ring-1 ring-inset ring-white/[0.07] ${
+        strong ? "font-medium text-slate-300" : "text-slate-400"
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** 覆在图片上的玻璃小标签（Hero / 海报 / 选集卡共用） */
+function GlassTag({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-[#fff]/15 bg-black/55 px-2 py-0.5 text-[10.5px] font-medium text-[#fff]/90 backdrop-blur-md ${className}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** 中央播放按钮：hover 时从图片里浮出来 */
+function PlayOverlay({ large = false }: { large?: boolean }) {
+  return (
+    <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/15 opacity-0 transition duration-200 group-hover:opacity-100">
+      <span
+        className={`flex items-center justify-center rounded-full bg-brand-gradient text-[#fff] shadow-glow transition duration-200 ${
+          large ? "h-14 w-14" : "h-11 w-11"
+        }`}
+      >
+        <IconPlay className={large ? "h-5 w-5" : "h-4 w-4"} />
+      </span>
+    </span>
+  );
+}
+
+/** 无封面时的占位（不要在暗色 Hero 上用主题色，直接写死深色系） */
+function ArtPlaceholder({ title, className = "" }: { title: string; className?: string }) {
+  return (
+    <div className={`flex h-full w-full flex-col items-center justify-center gap-2 bg-ink-800 px-3 text-center ${className}`}>
+      <IconImage className="h-7 w-7 text-slate-600" />
+      <span className="line-clamp-2 text-[11px] leading-tight text-slate-500">{title}</span>
+    </div>
+  );
+}
+
+/** 分区标题 */
+function SectionTitle({
+  title,
+  count,
+  hint,
+  extra,
+}: {
+  title: string;
+  count?: number | string;
+  hint?: string;
+  extra?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-[14px] font-semibold tracking-tight text-slate-100">{title}</h2>
+        {count !== undefined && <span className="text-[11px] tabular-nums text-slate-500">{count} 部</span>}
+      </div>
+      <div className="flex items-center gap-3">
+        {hint && <span className="text-[11px] text-slate-500">{hint}</span>}
+        {extra}
+      </div>
+    </div>
+  );
+}
+
+/** 网格 / 列表视图切换的小图标（只为这一页服务，不污染公共图标库） */
+function GridGlyph({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.3" />
+      <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.3" />
+      <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.3" />
+      <rect x="9" y="9" width="5.5" height="5.5" rx="1.3" />
+    </svg>
+  );
+}
+
+function ListGlyph({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <rect x="1.5" y="2" width="13" height="3" rx="1.2" />
+      <rect x="1.5" y="6.5" width="13" height="3" rx="1.2" />
+      <rect x="1.5" y="11" width="13" height="3" rx="1.2" />
+    </svg>
+  );
+}
+
+/** 首屏骨架屏：Hero + 一排海报，避免只有一行「读取中」的空白感 */
+function LibrarySkeleton() {
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div className="skeleton h-10 w-48" />
+        <div className="skeleton h-9 w-64 rounded-full" />
+      </div>
+      <div className="skeleton h-[264px] w-full rounded-[26px]" />
+      <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(148px,1fr))] sm:[grid-template-columns:repeat(auto-fill,minmax(166px,1fr))]">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="space-y-2">
+            <div className="skeleton aspect-[2/3] rounded-2xl" />
+            <div className="skeleton h-3 w-4/5" />
+            <div className="skeleton h-2.5 w-1/2" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function MediaLibrary() {
   const toast = useToast();
   const [dir, setDir] = useState<string>(() => localStorage.getItem(DIR_STORAGE_KEY) ?? "");
@@ -112,17 +269,26 @@ export default function MediaLibrary() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>(() => (localStorage.getItem(SORT_STORAGE_KEY) as SortKey) || "updated");
-  // 默认开：localStorage 没值（或不是明确的 "0"）就当打开，手动关过才记成 "0"
-  const [hevc, setHevc] = useState(() => localStorage.getItem(HEVC_STORAGE_KEY) !== "0");
+  const [epView, setEpView] = useState<EpView>(() => (localStorage.getItem(EPVIEW_STORAGE_KEY) === "list" ? "list" : "grid"));
+  // 未设置过：浏览器自己能解 HEVC 就默认直连，否则交给服务端显卡转码
+  const [hevc, setHevc] = useState(() => {
+    const saved = localStorage.getItem(HEVC_STORAGE_KEY);
+    if (saved === "0" || saved === "1") return saved === "1";
+    return browserCanPlayHevc();
+  });
+  /** 服务端硬件解码能力（列表 / 剧集接口都会带回来） */
+  const [hw, setHw] = useState<MediaHwInfo | null>(null);
   /**
    * 列表加载要读这个开关，但**不能把它放进依赖**：依赖里带 hevc 的话，
    * 一开开关就会跑一遍列表加载，而列表加载会清掉剧集视图 —— 人直接被踢回海报墙。
    * 用 ref 拿当前值，切换时自己决定是重拉剧集还是重扫列表。
    */
   const hevcRef = useRef(hevc);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [playing, setPlaying] = useState<{ episode: MediaEpisode; list: MediaEpisode[]; index: number } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [heroBusy, setHeroBusy] = useState(false);
   /** 进入剧集前所在的目录：返回时回到这里，而不是剧集的父目录 */
   const [returnDir, setReturnDir] = useState("");
 
@@ -130,6 +296,23 @@ export default function MediaLibrary() {
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  /** 按 `/` 直接聚焦搜索框、Esc 清空（输入框里不抢键） */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape" && searchInput) {
+        setSearchInput("");
+        setSearch("");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [searchInput]);
 
   /** 拉一个目录（不传就是下载根） */
@@ -142,6 +325,7 @@ export default function MediaLibrary() {
       .then((res) => {
         if (!alive) return;
         setListing(res);
+        setHw(res.hw ?? null);
         // 目录变了（或第一次进来）就清掉剧集视图
         setSeriesView(null);
         if (res.dir) {
@@ -154,7 +338,9 @@ export default function MediaLibrary() {
           void api
             .mediaSeries(res.dir, hevcRef.current)
             .then((detail) => {
-              if (alive) setSeriesView(detail);
+              if (!alive) return;
+              setSeriesView(detail);
+              if (detail.hw) setHw(detail.hw);
             })
             .catch((err) => {
               if (alive) setError((err as Error).message);
@@ -181,7 +367,10 @@ export default function MediaLibrary() {
     setError(null);
     void api
       .mediaSeries(target.dir, hevcRef.current)
-      .then((detail) => setSeriesView(detail))
+      .then((detail) => {
+        setSeriesView(detail);
+        if (detail.hw) setHw(detail.hw);
+      })
       .catch((err) => setError((err as Error).message))
       .finally(() => setLoading(false));
   };
@@ -220,13 +409,27 @@ export default function MediaLibrary() {
     );
   }, [listing, search, sort]);
 
+  /** 搜索也覆盖散装视频；注意播放时要用这份「过滤后」的数组当下标基准 */
+  const visibleLoose = useMemo(() => {
+    if (!listing) return [];
+    const keyword = search.toLowerCase();
+    return keyword
+      ? listing.loose.filter((ep) => ep.title.toLowerCase().includes(keyword) || ep.name.toLowerCase().includes(keyword))
+      : [...listing.loose];
+  }, [listing, search]);
+
   const changeSort = (next: SortKey) => {
     setSort(next);
     localStorage.setItem(SORT_STORAGE_KEY, next);
   };
 
+  const changeEpView = (next: EpView) => {
+    setEpView(next);
+    localStorage.setItem(EPVIEW_STORAGE_KEY, next);
+  };
+
   /**
-   * 切「HEVC 试播」：只影响播放方式，不能把人踢出剧集页 ——
+   * 切「HEVC 直连」：只影响播放方式，不能把人踢出剧集页 ——
    * 所以在剧集页里就地重拉详情，在列表页才整体重扫。
    */
   const changeHevc = (next: boolean) => {
@@ -238,7 +441,10 @@ export default function MediaLibrary() {
       setLoading(true);
       void api
         .mediaSeries(target, next)
-        .then((detail) => setSeriesView(detail))
+        .then((detail) => {
+          setSeriesView(detail);
+          if (detail.hw) setHw(detail.hw);
+        })
         .catch((err) => setError((err as Error).message))
         .finally(() => setLoading(false));
       return;
@@ -252,7 +458,8 @@ export default function MediaLibrary() {
     if (!episode) return;
     if (episode.playMode === "unsupported") {
       toast.push(
-        `这个文件是 ${episode.videoCodec?.toUpperCase() ?? "未知编码"}，浏览器播不了，可以用播放器或 Emby 打开`,
+        `这个文件是 ${episode.videoCodec?.toUpperCase() ?? "未知编码"}，浏览器解不了、服务端也没有可用的显卡转码，` +
+          `可以点左下角「下载」用本地播放器看`,
         "error",
       );
       return;
@@ -260,74 +467,68 @@ export default function MediaLibrary() {
     setPlaying({ episode, list: episodes, index });
   };
 
+  /** Hero 上「立即播放」：列表接口没有分集，临时拉一次详情再播第一集 */
+  const playSeries = async (target: MediaSeries) => {
+    setHeroBusy(true);
+    try {
+      const detail = await api.mediaSeries(target.dir, hevcRef.current);
+      if (detail.hw) setHw(detail.hw);
+      const index = detail.episodes.findIndex((ep) => ep.playMode !== "unsupported");
+      if (index < 0) {
+        toast.push("这部剧里的视频浏览器都解不了，服务端也没有可用的显卡转码，可以先下载到本地看", "error");
+        return;
+      }
+      playEpisode(detail.episodes, index);
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setHeroBusy(false);
+    }
+  };
+
+  const featured = !search && !seriesView ? visibleSeries[0] ?? null : null;
+
   /* ------------------------------ 加载态 ------------------------------ */
 
-  if (loading && !listing) {
-    return (
-      <div className="flex items-center justify-center gap-2 py-24 text-[12.5px] text-slate-500">
-        <Spinner className="h-4 w-4" />
-        正在读取媒体库…
-      </div>
-    );
-  }
+  if (loading && !listing) return <LibrarySkeleton />;
+
+  /* -------------------------------- 页面 -------------------------------- */
 
   return (
-    <div className="space-y-4">
-      {/* 工具条：位置 + 面包屑 + 搜索 + 刷新 */}
-      <div className="card p-2.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setBrowseOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg border border-white/[0.07] bg-white/[0.03] px-2.5 py-1.5 text-[12.5px] text-slate-300 transition hover:border-white/[0.14] hover:text-white"
-            title="选择要展示的目录"
-          >
-            <IconFolder className="h-3.5 w-3.5 text-brand-300" />
-            选择目录
-            <IconChevronDown className="h-3 w-3 text-slate-500" />
-          </button>
-
-          <div className="flex min-w-0 flex-wrap items-center gap-1 text-[12px] text-slate-500">
-            <button
-              onClick={() => goDir(listing?.home ?? "")}
-              className="rounded px-1 py-0.5 hover:bg-white/[0.06] hover:text-slate-300"
-              title="回到下载目录"
-            >
-              下载目录
-            </button>
-            {crumbs.map((crumb, i) => (
-              <span key={crumb.path} className="flex items-center gap-1">
-                <span className="text-slate-700">/</span>
-                <button
-                  onClick={() => goDir(crumb.path)}
-                  className={`max-w-[14rem] truncate rounded px-1 py-0.5 hover:bg-white/[0.06] hover:text-slate-300 ${
-                    i === crumbs.length - 1 ? "text-slate-300" : ""
-                  }`}
-                  title={crumb.path}
-                >
-                  {crumb.label}
-                </button>
-              </span>
-            ))}
-            {seriesView && (
-              <span className="flex items-center gap-1">
-                <span className="text-slate-700">/</span>
-                <span className="max-w-[16rem] truncate px-1 text-slate-200">{seriesView.series.title}</span>
-              </span>
-            )}
+    <div className="space-y-5 pb-6">
+      {/* 顶部：标题 + 全局操作 + 位置面包屑 */}
+      <header className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-gradient text-[#fff] shadow-glow">
+              <IconTv className="h-4 w-4" />
+            </span>
+            <div>
+              <h1 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-100">媒体库</h1>
+              <p className="text-[11px] text-slate-500">
+                本地片库 · {visibleSeries.length} 部剧集
+                {visibleLoose.length > 0 && ` · ${visibleLoose.length} 个视频`}
+              </p>
+            </div>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
-              <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+              <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
               <input
-                className="field w-44 py-1.5 pl-8 text-[12.5px] sm:w-56"
-                placeholder="搜索剧名"
+                ref={searchRef}
+                className="field w-44 rounded-full py-1.5 pl-8 pr-8 text-[12.5px] sm:w-56"
+                placeholder="搜索剧名 / 视频"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
               />
+              <kbd className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 rounded border border-white/[0.1] bg-white/[0.05] px-1 text-[10px] text-slate-500 sm:block">
+                /
+              </kbd>
             </div>
+
             {!seriesView && (
-              <div className="flex items-center gap-1 rounded-lg border border-white/[0.06] p-0.5">
+              <div className="flex items-center gap-0.5 rounded-full border border-white/[0.07] bg-white/[0.03] p-0.5">
                 {(
                   [
                     ["updated", "最近更新"],
@@ -337,8 +538,8 @@ export default function MediaLibrary() {
                   <button
                     key={key}
                     onClick={() => changeSort(key)}
-                    className={`rounded-md px-2 py-1 text-[11.5px] transition ${
-                      sort === key ? "bg-white/[0.09] text-white" : "text-slate-500 hover:text-slate-300"
+                    className={`rounded-full px-2.5 py-1 text-[11.5px] transition ${
+                      sort === key ? "bg-brand-gradient text-[#fff]" : "text-slate-500 hover:text-slate-300"
                     }`}
                   >
                     {label}
@@ -346,29 +547,97 @@ export default function MediaLibrary() {
                 ))}
               </div>
             )}
+
+            {/* 显卡能力：部署在有核显的 NAS 上时，浏览器解不了的编码由它转码 */}
+            {hw && (
+              <span
+                className={`hidden items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11.5px] sm:flex ${
+                  hw.available
+                    ? "border-emerald-500/25 bg-emerald-500/[0.1] text-ok"
+                    : "border-white/[0.07] bg-white/[0.02] text-slate-500"
+                }`}
+                title={
+                  hw.available
+                    ? `服务端硬件解码可用（${hw.label}）：HEVC 等浏览器解不了的编码会用显卡实时转码`
+                    : `没有可用的硬件解码：${hw.reason ?? "未检测到显卡"}。HEVC 等编码只能下载到本地播放`
+                }
+              >
+                <IconCpu className="h-3.5 w-3.5" />
+                {hw.available ? `硬解 · ${hw.accel === "software" ? "CPU" : (hw.accel ?? "GPU").toUpperCase()}` : "无硬解"}
+              </span>
+            )}
+
             <button
               onClick={() => changeHevc(!hevc)}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11.5px] transition ${
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11.5px] transition ${
                 hevc
                   ? "border-amber-500/30 bg-amber-500/[0.12] text-warn"
                   : "border-white/[0.07] bg-white/[0.02] text-slate-500 hover:border-white/[0.14] hover:text-slate-300"
               }`}
-              title="默认开启：不再把 HEVC 标成播不了，实际能不能解由这台浏览器决定；放不出来可点这里关掉"
+              title={
+                hevc
+                  ? "HEVC 直连：浏览器自己解，不占显卡（Safari / 带硬解的浏览器才放得出来）。解不了就关掉它，改走显卡转码"
+                  : hw?.available
+                    ? "关：HEVC 等编码交给服务端显卡转码成 H.264；开：浏览器自己直接解 HEVC"
+                    : "开：让浏览器直接试播 HEVC（没有显卡转码时只能这样试）；关：标成播不了"
+              }
             >
               <IconVideo className="h-3.5 w-3.5" />
-              HEVC 试播
-              {hevc && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />}
+              HEVC 直连
+              <span className={`h-1.5 w-1.5 rounded-full ${hevc ? "bg-amber-400" : "bg-slate-600"}`} />
             </button>
+
+            <button
+              onClick={() => setBrowseOpen(true)}
+              className="flex items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.03] px-2.5 py-1.5 text-[11.5px] text-slate-300 transition hover:border-white/[0.14] hover:text-slate-100"
+              title="选择要展示的目录"
+            >
+              <IconFolder className="h-3.5 w-3.5 text-brand-300" />
+              选择目录
+              <IconChevronDown className="h-3 w-3 text-slate-500" />
+            </button>
+
             <Button size="sm" onClick={() => setReloadToken((n) => n + 1)} title="重新扫描目录">
               <IconRefresh className="h-3.5 w-3.5" />
               刷新
             </Button>
           </div>
         </div>
-      </div>
+
+        <nav className="flex min-w-0 flex-wrap items-center gap-1 text-[11.5px] text-slate-500">
+          <button
+            onClick={() => goDir(listing?.home ?? "")}
+            className="flex items-center gap-1 rounded-lg bg-white/[0.04] px-2 py-1 transition hover:bg-white/[0.08] hover:text-slate-300"
+            title="回到下载目录"
+          >
+            <IconFolder className="h-3 w-3" />
+            下载目录
+          </button>
+          {crumbs.map((crumb, i) => (
+            <span key={crumb.path} className="flex items-center gap-1">
+              <IconChevronRight className="h-3 w-3 text-slate-600" />
+              <button
+                onClick={() => goDir(crumb.path)}
+                className={`max-w-[14rem] truncate rounded px-1 py-0.5 hover:bg-white/[0.06] hover:text-slate-300 ${
+                  i === crumbs.length - 1 ? "text-slate-300" : ""
+                }`}
+                title={crumb.path}
+              >
+                {crumb.label}
+              </button>
+            </span>
+          ))}
+          {seriesView && (
+            <span className="flex items-center gap-1">
+              <IconChevronRight className="h-3 w-3 text-slate-600" />
+              <span className="max-w-[16rem] truncate px-1 text-slate-200">{seriesView.series.title}</span>
+            </span>
+          )}
+        </nav>
+      </header>
 
       {error && (
-        <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.08] px-3 py-2 text-[12px] leading-relaxed text-warn">
+        <p className="flex items-start gap-1.5 rounded-2xl border border-amber-500/20 bg-amber-500/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-warn">
           <IconAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           {error}
         </p>
@@ -378,6 +647,8 @@ export default function MediaLibrary() {
         <SeriesView
           detail={seriesView}
           hevc={hevc}
+          epView={epView}
+          onEpViewChange={changeEpView}
           onBack={backToList}
           onPlay={(index) => playEpisode(seriesView.episodes, index)}
         />
@@ -385,10 +656,14 @@ export default function MediaLibrary() {
         <LibraryGrid
           listing={listing}
           series={visibleSeries}
+          loose={visibleLoose}
           search={search}
           loading={loading}
+          featured={featured}
+          heroBusy={heroBusy}
           onOpen={openSeries}
-          onPlayLoose={(index) => playEpisode(listing?.loose ?? [], index)}
+          onPlaySeries={(item) => void playSeries(item)}
+          onPlayLoose={(ep) => playEpisode(visibleLoose, visibleLoose.findIndex((item) => item.path === ep.path))}
         />
       )}
 
@@ -418,337 +693,572 @@ export default function MediaLibrary() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 海报墙                                                              */
+/* 海报墙 + Hero + 横向片架                                            */
 /* ------------------------------------------------------------------ */
 
 function LibraryGrid({
   listing,
   series,
+  loose,
   search,
   loading,
+  featured,
+  heroBusy,
   onOpen,
+  onPlaySeries,
   onPlayLoose,
 }: {
   listing: MediaLibraryResponse | null;
   series: MediaSeries[];
+  loose: MediaEpisode[];
   search: string;
   loading: boolean;
+  featured: MediaSeries | null;
+  heroBusy: boolean;
   onOpen: (item: MediaSeries) => void;
-  onPlayLoose: (index: number) => void;
+  onPlaySeries: (item: MediaSeries) => void;
+  onPlayLoose: (ep: MediaEpisode) => void;
 }) {
   if (!listing) return null;
 
-  const loose = listing.loose;
   const empty = series.length === 0 && loose.length === 0;
+  /**
+   * Hero 背景分三档：横版剧照最好；只有竖版海报时**放大虚化**当氛围底（直接把 2:3 拉成横条会糊着脸）；
+   * 什么都没有才用网格底纹。
+   */
+  const backdrop = featured?.landscapeUrl ?? null;
+  const ambient = !backdrop ? (featured?.posterUrl ?? null) : null;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between px-1">
-        <p className="text-[11.5px] text-slate-500">
-          {search ? `「${search}」的搜索结果` : "这个目录里的剧集"}
-          <span className="ml-2 tabular-nums text-slate-400">{series.length}</span> 部
-          {loose.length > 0 && <span className="ml-2 text-slate-500">· 散装视频 {loose.length} 个</span>}
-        </p>
-        {loading && (
-          <span className="flex items-center gap-1.5 text-[11px] text-slate-500">
-            <Spinner className="h-3 w-3" />
-            读取中
-          </span>
-        )}
-      </div>
+    <div className="space-y-6">
+      {/* 焦点推荐：最近更新的一部剧，直接给「立即播放」 */}
+      {featured && (
+        <section className="relative isolate overflow-hidden rounded-[26px] border border-[#fff]/10 bg-[#080d16] shadow-card">
+          <div className="absolute inset-0">
+            {backdrop ? (
+              <img src={backdrop} alt="" className="h-full w-full scale-105 object-cover object-center opacity-75" />
+            ) : ambient ? (
+              <>
+                <img
+                  src={ambient}
+                  alt=""
+                  className="h-full w-full scale-150 object-cover object-[center_28%] opacity-55 blur-2xl saturate-150"
+                />
+                <div className="h-full w-full bg-grid-fade opacity-45" />
+              </>
+            ) : (
+              <div className="h-full w-full bg-grid-fade opacity-80" />
+            )}
+            <div className="absolute -right-16 -top-24 h-72 w-72 rounded-full bg-brand-500/25 blur-3xl" />
+            <div className="absolute inset-0 media-hero-shade" />
+          </div>
+
+          <div className="relative flex min-h-[248px] flex-col justify-end gap-5 p-5 sm:min-h-[276px] sm:flex-row sm:items-end sm:justify-between sm:p-7">
+            <div className="max-w-2xl flex-1 space-y-3 text-[#fff]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-brand-gradient px-2.5 py-1 text-[10.5px] font-medium text-[#fff] shadow-glow">
+                  最近更新
+                </span>
+                <span className="text-[11px] text-[#fff]/65">{ORIGIN_LABEL[featured.origin] ?? "外部"}</span>
+                {featured.rating != null && <span className="text-[11px] text-amber-300">★ {featured.rating.toFixed(1)}</span>}
+              </div>
+              <h2 className="line-clamp-2 text-[26px] font-semibold leading-tight tracking-tight drop-shadow sm:text-[30px]">
+                {featured.title}
+              </h2>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[#fff]/72">
+                {featured.year && <span className="tabular-nums">{featured.year}</span>}
+                <span>{featured.episodeCount} 集</span>
+                <span>{formatBytes(featured.totalSize)}</span>
+                {featured.genres.length > 0 && <span>{featured.genres.slice(0, 3).join(" / ")}</span>}
+                <span className="text-[#fff]/45">更新于 {formatDateTime(featured.updatedAt)}</span>
+              </div>
+              <p className="line-clamp-2 max-w-xl text-[12.5px] leading-relaxed text-[#fff]/68">
+                {featured.overview?.trim() || "这部剧还没有简介，点「查看分集」看每一集，或去元数据页补一份。"}
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pt-1.5">
+                <button
+                  onClick={() => onPlaySeries(featured)}
+                  disabled={heroBusy}
+                  className="inline-flex items-center gap-2 rounded-xl bg-brand-gradient px-4 py-2 text-[13px] font-medium text-[#fff] shadow-glow transition hover:brightness-110 active:scale-[0.98] disabled:opacity-60"
+                >
+                  {heroBusy ? <Spinner className="h-3.5 w-3.5" /> : <IconPlay className="h-3.5 w-3.5" />}
+                  立即播放
+                </button>
+                <button
+                  onClick={() => onOpen(featured)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-[#fff]/25 bg-[#fff]/10 px-4 py-2 text-[13px] font-medium text-[#fff] backdrop-blur-md transition hover:bg-[#fff]/20"
+                >
+                  查看分集
+                  <IconChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="hidden w-[118px] shrink-0 sm:block">
+              <div className="aspect-[2/3] overflow-hidden rounded-2xl bg-[#0d1520] shadow-2xl ring-1 ring-[#fff]/15">
+                {featured.posterUrl ? (
+                  <img src={featured.posterUrl} alt={featured.title} className="h-full w-full object-cover" />
+                ) : (
+                  <ArtPlaceholder title={featured.title} className="bg-[#0d1520]" />
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {empty ? (
         <div className="card">
           <EmptyState
             icon={<IconImage className="h-5 w-5" />}
-            title={search ? "没有匹配的剧集" : "这个目录里还没有视频"}
+            title={search ? "没有匹配的内容" : "这个目录里还没有视频"}
             description={
               search
                 ? "换个关键词试试，或者清空搜索看全部。"
-                : "下载完成的视频会出现在这里；也可以点左上角「选择目录」换一个已经在用的媒体目录。"
+                : "下载完成的视频会出现在这里；也可以点右上角「选择目录」换一个已经在用的媒体目录。"
             }
           />
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-          {series.map((item) => (
-            <article key={item.dir} className="group">
-              <button onClick={() => onOpen(item)} className="block w-full text-left" title={item.title}>
-                <div className="relative aspect-[2/3] overflow-hidden rounded-xl bg-ink-800 ring-1 ring-white/[0.08] transition duration-300 group-hover:ring-brand-500/40">
-                  {item.posterUrl ? (
-                    <img
-                      src={item.posterUrl}
-                      alt={item.title}
-                      loading="lazy"
-                      className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.04]"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-slate-600">
-                      <IconImage className="h-6 w-6" />
-                      <span className="px-2 text-center text-[10.5px] leading-tight">{item.title}</span>
+        <>
+          {series.length > 0 && (
+            <section className="space-y-3">
+              <SectionTitle
+                title={search ? `「${search}」的搜索结果` : "剧集"}
+                count={series.length}
+                hint={loading ? "读取中…" : "点封面进入分集"}
+              />
+              <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(148px,1fr))] sm:[grid-template-columns:repeat(auto-fill,minmax(166px,1fr))]">
+                {series.map((item) => (
+                  <article key={item.dir} className="group">
+                    <button onClick={() => onOpen(item)} className="block w-full text-left" title={item.title}>
+                      <div className="relative aspect-[2/3] overflow-hidden rounded-2xl bg-ink-800 shadow-card ring-1 ring-white/[0.08] transition duration-300 group-hover:-translate-y-1 group-hover:shadow-glow group-hover:ring-brand-500/50">
+                        {item.posterUrl ? (
+                          <img
+                            src={item.posterUrl}
+                            alt={item.title}
+                            loading="lazy"
+                            className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.06]"
+                          />
+                        ) : (
+                          <ArtPlaceholder title={item.title} />
+                        )}
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/4 bg-gradient-to-t from-black/45 to-transparent" />
+                        <div className="absolute left-2 top-2">
+                          <GlassTag>{item.episodeCount} 集</GlassTag>
+                        </div>
+                        <div className="absolute right-2 top-2">
+                          <GlassTag>{ORIGIN_LABEL[item.origin] ?? "外部"}</GlassTag>
+                        </div>
+                        <PlayOverlay large />
+                      </div>
+                      {/* 标题放图下：海报本身通常自带片名，别再压一层重复文字 */}
+                      <p className="mt-2 truncate text-[12.5px] font-medium text-slate-100 transition group-hover:text-brand-300">
+                        {item.title}
+                      </p>
+                      <p className="truncate text-[10.5px] tabular-nums text-slate-500">
+                        {[item.year ? String(item.year) : null, `${item.episodeCount} 集`, formatBytes(item.totalSize)]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </p>
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* 目录里直接放的视频：横向片架，不占海报墙的位置 */}
+          {loose.length > 0 && (
+            <section className="space-y-3">
+              <SectionTitle title="散装视频" hint={`${loose.length} 个 · 横向滚动，点击直接播放`} />
+              <div className="no-scrollbar -mx-1 flex snap-x snap-mandatory gap-3.5 overflow-x-auto px-1 pb-2">
+                {loose.map((ep) => (
+                  <button
+                    key={ep.path}
+                    onClick={() => onPlayLoose(ep)}
+                    className="group w-[228px] shrink-0 snap-start text-left sm:w-[258px]"
+                    title={ep.name}
+                  >
+                    <div className="relative aspect-video overflow-hidden rounded-2xl bg-ink-800 shadow-card ring-1 ring-white/[0.08] transition duration-300 group-hover:-translate-y-1 group-hover:shadow-glow group-hover:ring-brand-500/50">
+                      {ep.thumbUrl ? (
+                        <img
+                          src={ep.thumbUrl}
+                          alt={ep.title}
+                          loading="lazy"
+                          className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.06]"
+                        />
+                      ) : (
+                        <ArtPlaceholder title={ep.title} />
+                      )}
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/4 bg-gradient-to-t from-black/45 to-transparent" />
+                      {ep.durationSec != null && (
+                        <span className="absolute right-2 top-2 rounded-lg bg-black/60 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-[#fff] backdrop-blur-md">
+                          {formatDuration(ep.durationSec)}
+                        </span>
+                      )}
+                      <PlayOverlay />
                     </div>
-                  )}
-
-                  <span className="absolute left-1.5 top-1.5 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-[#fff]/90 backdrop-blur">
-                    {item.episodeCount} 集
-                  </span>
-                  <span className="absolute right-1.5 top-1.5 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] text-[#fff]/85 backdrop-blur">
-                    {ORIGIN_LABEL[item.origin] ?? "外部"}
-                  </span>
-
-                  <span className="absolute inset-0 flex items-center justify-center opacity-0 transition duration-200 group-hover:opacity-100">
-                    <span className="flex h-10 w-10 items-center justify-center rounded-full bg-black/55 text-[#fff] backdrop-blur">
-                      <IconPlay className="h-4 w-4" />
-                    </span>
-                  </span>
-                </div>
-                <p className="mt-1.5 truncate text-[12.5px] font-medium leading-snug text-slate-200">{item.title}</p>
-                <p className="truncate text-[10.5px] tabular-nums text-slate-500">
-                  {[item.year ? String(item.year) : null, `${item.episodeCount} 集`, formatBytes(item.totalSize)]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-              </button>
-            </article>
-          ))}
-
-          {/* 目录里直接放的视频（没归进剧集文件夹）也列出来 */}
-          {loose.map((ep, index) => (
-            <article key={ep.path} className="group">
-              <button onClick={() => onPlayLoose(index)} className="block w-full text-left" title={ep.name}>
-                <div className="relative aspect-video overflow-hidden rounded-xl bg-ink-800 ring-1 ring-white/[0.08] transition duration-300 group-hover:ring-brand-500/40">
-                  {ep.thumbUrl ? (
-                    <img
-                      src={ep.thumbUrl}
-                      alt={ep.title}
-                      loading="lazy"
-                      className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.04]"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gradient-to-b from-ink-800 to-ink-900 px-2 text-slate-600">
-                      <IconVideo className="h-7 w-7" />
-                      <span className="line-clamp-2 text-center text-[10.5px] leading-tight text-slate-400">{ep.title}</span>
-                    </div>
-                  )}
-                  <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2 pb-1.5 pt-5">
-                    <span className="line-clamp-1 text-[11px] leading-tight text-[#fff]/90">{ep.title}</span>
-                  </span>
-                  {ep.durationSec != null && (
-                    <span className="absolute right-1.5 top-1.5 rounded-md bg-black/65 px-1.5 py-0.5 text-[10px] tabular-nums text-[#fff]/85 backdrop-blur">
-                      {formatDuration(ep.durationSec)}
-                    </span>
-                  )}
-                  <span className="absolute inset-0 flex items-center justify-center opacity-0 transition duration-200 group-hover:opacity-100">
-                    <span className="flex h-10 w-10 items-center justify-center rounded-full bg-black/55 text-[#fff] backdrop-blur">
-                      <IconPlay className="h-4 w-4" />
-                    </span>
-                  </span>
-                </div>
-                <p className="mt-1.5 truncate text-[12.5px] font-medium leading-snug text-slate-200">{ep.title}</p>
-                <p className="truncate text-[10.5px] tabular-nums text-slate-500">
-                  {[formatBytes(ep.size), resolutionLabel(ep.height)].filter(Boolean).join(" · ")}
-                </p>
-              </button>
-            </article>
-          ))}
-        </div>
+                    <p className="mt-1.5 truncate text-[12px] font-medium text-slate-100 transition group-hover:text-brand-300">
+                      {ep.title}
+                    </p>
+                    <p className="truncate text-[10.5px] tabular-nums text-slate-500">
+                      {[resolutionLabel(ep.height), formatBytes(ep.size)].filter(Boolean).join(" · ")}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </>
       )}
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* 剧集详情                                                            */
+/* 剧集详情：背景主视觉 + 选集（网格 / 列表）                          */
 /* ------------------------------------------------------------------ */
 
 function SeriesView({
   detail,
   hevc,
+  epView,
+  onEpViewChange,
   onBack,
   onPlay,
 }: {
   detail: MediaSeriesResponse;
   /** 这台浏览器开了「HEVC 强制尝试」：分集表里标「试播」的那些就是靠它才可播 */
   hevc: boolean;
+  epView: EpView;
+  onEpViewChange: (next: EpView) => void;
   onBack: () => void;
   onPlay: (index: number) => void;
 }) {
   const { series, episodes } = detail;
   const playable = episodes.findIndex((ep) => ep.playMode !== "unsupported");
-  const totalSize = series.totalSize;
+  const backdrop = series.landscapeUrl || episodes.find((ep) => ep.thumbUrl)?.thumbUrl || series.posterUrl || null;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between px-1">
+    <div className="space-y-6">
+      {/* 主视觉 */}
+      <section className="relative isolate overflow-hidden rounded-[26px] border border-[#fff]/10 bg-[#080d16] shadow-card">
+        <div className="absolute inset-0">
+          {backdrop ? (
+            <img src={backdrop} alt="" className="h-full w-full scale-105 object-cover object-center opacity-75" />
+          ) : (
+            <div className="h-full w-full bg-grid-fade opacity-80" />
+          )}
+          <div className="absolute -right-16 -top-24 h-72 w-72 rounded-full bg-violet-500/25 blur-3xl" />
+          <div className="absolute inset-0 media-hero-shade" />
+        </div>
+
         <button
           onClick={onBack}
-          className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-[12px] text-slate-400 transition hover:bg-white/[0.05] hover:text-slate-200"
+          className="absolute left-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-full border border-[#fff]/20 bg-black/40 px-3 py-1.5 text-[12px] font-medium text-[#fff] backdrop-blur-md transition hover:bg-black/60 sm:left-6 sm:top-6"
         >
           <IconChevronLeft className="h-3.5 w-3.5" />
           返回目录
         </button>
-        <span className="text-[11px] text-slate-500">
-          最近更新 {formatDateTime(series.updatedAt)}
-        </span>
-      </div>
 
-      {/* 头部：海报 + 信息 */}
-      <div className="card overflow-hidden">
-        <div className="flex flex-col gap-4 p-4 sm:flex-row">
-          <div className="w-full shrink-0 sm:w-[150px]">
-            <div className="relative aspect-[2/3] overflow-hidden rounded-xl bg-ink-800 ring-1 ring-white/[0.08]">
+        <div className="relative flex flex-col gap-5 p-5 pt-16 sm:flex-row sm:items-end sm:p-7 sm:pt-20">
+          <div className="hidden w-[132px] shrink-0 sm:block">
+            <div className="aspect-[2/3] overflow-hidden rounded-2xl bg-[#0d1520] shadow-2xl ring-1 ring-[#fff]/15">
               {series.posterUrl ? (
                 <img src={series.posterUrl} alt={series.title} className="h-full w-full object-cover" />
               ) : (
-                <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-slate-600">
-                  <IconImage className="h-6 w-6" />
-                  <span className="text-[10.5px]">无海报</span>
-                </div>
+                <ArtPlaceholder title={series.title} className="bg-[#0d1520]" />
               )}
             </div>
           </div>
 
-          <div className="min-w-0 flex-1 space-y-3">
-            <div>
-              <h2 className="text-[17px] font-semibold leading-tight text-white">{series.title}</h2>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-slate-500">
-                {series.year && <span className="tabular-nums">{series.year}</span>}
-                <span>{episodes.length} 集</span>
-                <span>{formatBytes(totalSize)}</span>
-                {series.genres.length > 0 && <span>{series.genres.slice(0, 3).join(" / ")}</span>}
-                {series.rating != null && (
-                  <span className="text-amber-300">
-                    ★ {series.rating.toFixed(1)}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Badge className="border-white/10 bg-white/[0.04] text-slate-300">
+          <div className="min-w-0 flex-1 space-y-3 text-[#fff]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-[#fff]/20 bg-[#fff]/10 px-2.5 py-0.5 text-[10.5px] text-[#fff]/85 backdrop-blur-md">
                 {ORIGIN_LABEL[series.origin] ?? "外部"}
-              </Badge>
+              </span>
               {series.hasNfo ? (
-                <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">已生成 NFO</Badge>
+                <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-0.5 text-[10.5px] text-emerald-200">
+                  已生成 NFO
+                </span>
               ) : (
-                <Badge className="border-white/10 bg-white/[0.04] text-slate-500">无 NFO</Badge>
+                <span className="rounded-full border border-[#fff]/15 bg-[#fff]/5 px-2.5 py-0.5 text-[10.5px] text-[#fff]/60">
+                  无 NFO
+                </span>
               )}
+              {series.rating != null && <span className="text-[12px] text-amber-300">★ {series.rating.toFixed(1)}</span>}
             </div>
 
-            <p className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[12.5px] leading-relaxed text-slate-400">
+            <h2 className="line-clamp-2 text-[26px] font-semibold leading-tight tracking-tight drop-shadow sm:text-[32px]">
+              {series.title}
+            </h2>
+
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-[#fff]/72">
+              {series.year && <span className="tabular-nums">{series.year}</span>}
+              <span>{episodes.length} 集</span>
+              <span>{formatBytes(series.totalSize)}</span>
+              {series.genres.length > 0 && <span>{series.genres.slice(0, 3).join(" / ")}</span>}
+              <span className="text-[#fff]/45">最近更新 {formatDateTime(series.updatedAt)}</span>
+            </div>
+
+            <p className="line-clamp-3 max-w-3xl text-[12.5px] leading-relaxed text-[#fff]/68">
               {series.overview?.trim() || "这部剧还没有简介，可以去元数据页补一份。"}
             </p>
 
-            {playable >= 0 && (
-              <Button size="sm" variant="primary" onClick={() => onPlay(playable)}>
-                <IconPlay className="h-3.5 w-3.5" />
-                播放第 {episodes[playable].episode ?? playable + 1} 集
-              </Button>
-            )}
+            <div className="flex flex-wrap items-center gap-2 pt-1.5">
+              {playable >= 0 && (
+                <button
+                  onClick={() => onPlay(playable)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-brand-gradient px-4 py-2 text-[13px] font-medium text-[#fff] shadow-glow transition hover:brightness-110 active:scale-[0.98]"
+                >
+                  <IconPlay className="h-3.5 w-3.5" />
+                  播放第 {episodes[playable].episode ?? playable + 1} 集
+                </button>
+              )}
+              <span className="text-[11px] text-[#fff]/50">
+                {hevc ? "HEVC 试播已开启，标「试播」的集取决于这台浏览器的解码器" : "点任意一集直接播放"}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* 分集列表 */}
-      <div className="card overflow-hidden">
-        <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-2.5">
-          <p className="text-[11px] uppercase tracking-wider text-slate-500">分集（{episodes.length}）</p>
-          <p className="text-[11px] text-slate-600">
-            {hevc ? "已开启 HEVC 试播：标「试播」的集取决于这台浏览器的解码器" : "点任意一集直接播放"}
-          </p>
-        </div>
-        {episodes.length === 0 ? (
-          <p className="px-4 py-8 text-center text-[12px] text-slate-500">这个目录里没有视频文件。</p>
-        ) : (
-          <div className="divide-y divide-white/[0.04]">
-            {episodes.map((ep, index) => {
-              const unsupported = ep.playMode === "unsupported";
-              const res = resolutionLabel(ep.height);
-              return (
+      {/* 选集 */}
+      <section className="space-y-3">
+        <SectionTitle
+          title="选集"
+          hint={`共 ${episodes.length} 集`}
+          extra={
+            <div className="flex items-center gap-0.5 rounded-full border border-white/[0.07] bg-white/[0.03] p-0.5">
+              {(
+                [
+                  ["grid", <GridGlyph key="g" />, "网格视图"],
+                  ["list", <ListGlyph key="l" />, "列表视图"],
+                ] as Array<[EpView, ReactNode, string]>
+              ).map(([key, glyph, label]) => (
                 <button
-                  key={ep.path}
-                  onClick={() => onPlay(index)}
-                  className={`group/ep flex w-full items-start gap-3 px-4 py-3 text-left transition ${
-                    unsupported ? "opacity-60" : "hover:bg-white/[0.03]"
+                  key={key}
+                  onClick={() => onEpViewChange(key)}
+                  title={label}
+                  aria-label={label}
+                  className={`rounded-full p-1.5 transition ${
+                    epView === key ? "bg-brand-gradient text-[#fff]" : "text-slate-500 hover:text-slate-300"
                   }`}
-                  title={unsupported ? `${ep.videoCodec ?? "该编码"} 浏览器不支持` : ep.name}
                 >
-                  {/* 缩略图：下载时生成的图优先，没有就服务端抽一帧 */}
-                  <span className="relative block aspect-video w-[116px] shrink-0 overflow-hidden rounded-lg bg-ink-800 ring-1 ring-white/[0.06] sm:w-[132px]">
-                    {ep.thumbUrl ? (
-                      <img
-                        src={ep.thumbUrl}
-                        alt={ep.title}
-                        loading="lazy"
-                        className="h-full w-full object-cover transition duration-500 group-hover/ep:scale-[1.03]"
-                      />
-                    ) : (
-                      <span className="flex h-full w-full items-center justify-center text-slate-600">
-                        <IconVideo className="h-5 w-5" />
-                      </span>
-                    )}
-                    {ep.durationSec != null && (
-                      <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[10px] font-medium tabular-nums text-[#fff]">
-                        {formatDuration(ep.durationSec)}
-                      </span>
-                    )}
-                    <span className="absolute inset-0 flex items-center justify-center">
-                      <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-[#fff]/90 backdrop-blur transition group-hover/ep:scale-110 group-hover/ep:bg-brand-500/80">
-                        {unsupported ? <IconAlert className="h-3.5 w-3.5" /> : <IconPlay className="h-3.5 w-3.5" />}
-                      </span>
-                    </span>
-                  </span>
-
-                  {/* 集号 / 标题 / 简介 / 参数 */}
-                  <span className="min-w-0 flex-1 pt-0.5">
-                    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[10px] tabular-nums text-slate-400">
-                        {episodeCode(ep)}
-                      </span>
-                      <span className="truncate text-[13px] font-medium text-slate-100">{ep.title}</span>
-                      {unsupported && (
-                        <span className="text-[10.5px] text-warn">浏览器不支持 {ep.videoCodec?.toUpperCase()}</span>
-                      )}
-                      {ep.trial && (
-                        <span
-                          className="rounded bg-amber-500/10 px-1 py-0.5 text-[10px] text-warn"
-                          title="HEVC：靠这台浏览器的解码器播，放不出来会给出提示"
-                        >
-                          试播
-                        </span>
-                      )}
-                    </span>
-                    {ep.plot.trim() && (
-                      <span className="mt-1 line-clamp-2 block text-[11.5px] leading-relaxed text-slate-500">{ep.plot.trim()}</span>
-                    )}
-                    <span className="mt-1 block truncate text-[10.5px] tabular-nums text-slate-500">
-                      {[
-                        res,
-                        formatBytes(ep.size),
-                        ep.videoCodec?.toUpperCase() ?? null,
-                        ep.width && ep.height ? `${ep.width}×${ep.height}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </span>
-                  </span>
-
-                  <span className="hidden shrink-0 pt-1 text-[10.5px] text-slate-600 sm:block">
-                    {formatRelative(ep.updatedAt)}
-                  </span>
+                  {glyph}
                 </button>
-              );
-            })}
+              ))}
+            </div>
+          }
+        />
+
+        {episodes.length === 0 ? (
+          <div className="card px-4 py-10 text-center text-[12px] text-slate-500">这个目录里没有视频文件。</div>
+        ) : epView === "grid" ? (
+          <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(296px,1fr))]">
+            {episodes.map((ep, index) => (
+              <EpisodeCard key={ep.path} ep={ep} index={index} onPlay={() => onPlay(index)} />
+            ))}
+          </div>
+        ) : (
+          <div className="card divide-y divide-white/[0.05] overflow-hidden">
+            {episodes.map((ep, index) => (
+              <EpisodeRow key={ep.path} ep={ep} onPlay={() => onPlay(index)} />
+            ))}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
+/** 网格视图的一集：大图 + 集号 + 简介 + 参数 */
+function EpisodeCard({ ep, index, onPlay }: { ep: MediaEpisode; index: number; onPlay: () => void }) {
+  const unsupported = ep.playMode === "unsupported";
+  const res = resolutionLabel(ep.height);
+  const plot = cleanText(ep.plot);
+  return (
+    <button
+      onClick={onPlay}
+      className={`group group/ep flex flex-col overflow-hidden rounded-2xl border border-white/[0.07] bg-panel/75 text-left shadow-card transition duration-300 hover:-translate-y-1 hover:border-brand-500/40 hover:shadow-glow ${
+        unsupported ? "opacity-70" : ""
+      }`}
+      title={unsupported ? `${ep.videoCodec ?? "该编码"} 浏览器不支持` : ep.name}
+    >
+      <div className="relative aspect-video shrink-0 overflow-hidden bg-ink-800">
+        {ep.thumbUrl ? (
+          <img
+            src={ep.thumbUrl}
+            alt={ep.title}
+            loading="lazy"
+            className="h-full w-full object-cover transition duration-500 group-hover/ep:scale-[1.05]"
+          />
+        ) : (
+          <ArtPlaceholder title={ep.title} />
+        )}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/70 to-transparent" />
+        <div className="absolute left-2 top-2">
+          <GlassTag className="font-mono">{episodeCode(ep)}</GlassTag>
+        </div>
+        {unsupported && (
+          <div className="absolute right-2 top-2">
+            <GlassTag className="border-amber-400/40 bg-amber-500/25">播不了</GlassTag>
+          </div>
+        )}
+        {ep.playMode === "transcode" && (
+          <div className="absolute right-2 top-2">
+            <GlassTag className="border-emerald-400/35 bg-emerald-500/25">显卡转码</GlassTag>
+          </div>
+        )}
+        {ep.trial && !unsupported && (
+          <div className="absolute right-2 top-2">
+            <GlassTag className="border-amber-400/40 bg-amber-500/20">试播</GlassTag>
+          </div>
+        )}
+        {ep.durationSec != null && (
+          <span className="absolute bottom-2 right-2 rounded-lg bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-[#fff] backdrop-blur">
+            {formatDuration(ep.durationSec)}
+          </span>
+        )}
+        <PlayOverlay />
+      </div>
+
+      {/* 文字区：标题最多两行、简介固定三行高度，同一排卡片永远对得齐 */}
+      <div className="flex flex-1 flex-col gap-2 p-3.5">
+        <div className="flex items-start gap-2">
+          <span className="mt-[1px] shrink-0 rounded-md bg-brand-500/[0.12] px-1.5 py-[1px] font-mono text-[10.5px] font-medium tabular-nums text-brand-300 ring-1 ring-inset ring-brand-500/25">
+            #{String(index + 1).padStart(2, "0")}
+          </span>
+          <p className="line-clamp-2 text-[13px] font-medium leading-snug text-slate-100 transition group-hover/ep:text-brand-300">
+            {ep.title}
+          </p>
+        </div>
+        <p
+          title={plot || undefined}
+          className={`line-clamp-3 min-h-[3.9em] text-[12px] leading-relaxed ${
+            plot ? "text-slate-400" : "text-slate-600"
+          }`}
+        >
+          {plot || "这一集还没有简介，可以去元数据页补一份。"}
+        </p>
+        <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-0.5">
+          {res && <MetaChip strong>{res}</MetaChip>}
+          <MetaChip>{formatBytes(ep.size)}</MetaChip>
+          {ep.videoCodec && <MetaChip strong>{ep.videoCodec.toUpperCase()}</MetaChip>}
+          <span className="ml-auto whitespace-nowrap text-[10.5px] tabular-nums text-slate-500">
+            {formatRelative(ep.updatedAt)}
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/** 列表视图的一集：信息密度高，适合集数多的剧 */
+function EpisodeRow({ ep, onPlay }: { ep: MediaEpisode; onPlay: () => void }) {
+  const unsupported = ep.playMode === "unsupported";
+  const res = resolutionLabel(ep.height);
+  const plot = cleanText(ep.plot);
+  return (
+    <button
+      onClick={onPlay}
+      className={`group/ep flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-white/[0.04] ${
+        unsupported ? "opacity-70" : ""
+      }`}
+      title={unsupported ? `${ep.videoCodec ?? "该编码"} 浏览器不支持` : ep.name}
+    >
+      <span className="relative block aspect-video w-[116px] shrink-0 overflow-hidden rounded-xl bg-ink-800 ring-1 ring-white/[0.06] sm:w-[136px]">
+        {ep.thumbUrl ? (
+          <img
+            src={ep.thumbUrl}
+            alt={ep.title}
+            loading="lazy"
+            className="h-full w-full object-cover transition duration-500 group-hover/ep:scale-[1.04]"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-slate-600">
+            <IconVideo className="h-5 w-5" />
+          </span>
+        )}
+        {ep.durationSec != null && (
+          <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[10px] font-medium tabular-nums text-[#fff]">
+            {formatDuration(ep.durationSec)}
+          </span>
+        )}
+        <span className="absolute inset-0 flex items-center justify-center">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/50 text-[#fff]/90 backdrop-blur transition group-hover/ep:scale-110 group-hover/ep:bg-brand-500/85">
+            {unsupported ? <IconAlert className="h-3.5 w-3.5" /> : <IconPlay className="h-3.5 w-3.5" />}
+          </span>
+        </span>
+      </span>
+
+      <span className="min-w-0 flex-1 pt-0.5">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-slate-400">
+            {episodeCode(ep)}
+          </span>
+          <span className="truncate text-[13px] font-medium text-slate-100">{ep.title}</span>
+          {unsupported && <span className="text-[10.5px] text-warn">浏览器不支持 {ep.videoCodec?.toUpperCase()}</span>}
+          {ep.playMode === "transcode" && (
+            <span
+              className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-ok"
+              title="浏览器解不了这个编码，播放时由服务端显卡实时转码成 H.264"
+            >
+              显卡转码
+            </span>
+          )}
+          {ep.trial && (
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-warn" title="HEVC：靠这台浏览器的解码器播">
+              试播
+            </span>
+          )}
+        </span>
+        {plot && <span className="mt-1 line-clamp-2 block text-[11.5px] leading-relaxed text-slate-400">{plot}</span>}
+        <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {res && <MetaChip strong>{res}</MetaChip>}
+          <MetaChip>{formatBytes(ep.size)}</MetaChip>
+          {ep.videoCodec && <MetaChip strong>{ep.videoCodec.toUpperCase()}</MetaChip>}
+          {ep.width && ep.height ? (
+            <MetaChip>
+              {ep.width}×{ep.height}
+            </MetaChip>
+          ) : null}
+        </span>
+      </span>
+
+      <span className="hidden shrink-0 pt-1 text-[10.5px] text-slate-600 sm:block">{formatRelative(ep.updatedAt)}</span>
+    </button>
+  );
+}
+
 /* ------------------------------------------------------------------ */
-/* 播放                                                                */
+/* 播放：影院式弹窗                                                    */
 /* ------------------------------------------------------------------ */
+
+/** 播放弹窗里的「本集简介」：默认两行，长了手动展开，别让玩家去猜省略号后面是什么 */
+function EpisodeOverview({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return null;
+  const long = text.length > 84;
+  return (
+    <div className="rounded-xl border border-white/[0.07] bg-white/[0.03] px-3.5 py-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[10.5px] font-medium tracking-wide text-slate-500">本集简介</span>
+        {long && (
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="inline-flex items-center gap-0.5 text-[11px] font-medium text-brand-300 transition hover:text-brand-200"
+          >
+            {open ? "收起" : "展开"}
+            <IconChevronDown className={`h-3 w-3 transition ${open ? "rotate-180" : ""}`} />
+          </button>
+        )}
+      </div>
+      <p className={`text-[12.5px] leading-relaxed text-slate-400 ${open || !long ? "" : "line-clamp-2"}`}>{text}</p>
+    </div>
+  );
+}
 
 function PlayerDialog({
   episode,
@@ -766,12 +1276,81 @@ function PlayerDialog({
   onClose: () => void;
 }) {
   const [failed, setFailed] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  /**
+   * 实时流（换封装 / 转码）没有 Content-Length，`<video>` 不知道总长，原生进度条是废的。
+   * 这里用「用 start 重开一路流」的办法做拖动：时长来自 ffmpeg 探测，拖动后重新挂载播放器。
+   */
+  const [start, setStart] = useState(0);
+  const [pos, setPos] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [draft, setDraft] = useState(0);
+  const [seeking, setSeeking] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     setFailed(null);
+    setRetryKey(0);
+    setStart(0);
+    setPos(0);
+    setSeeking(false);
+    setDragging(false);
   }, [episode.path]);
 
+  /** `[` / `]` 切集：不用左右方向键，那是 <video> 自己拖进度用的 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (typing) return;
+      if (e.key === "[" && hasPrev) {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === "]" && hasNext) {
+        e.preventDefault();
+        onNext();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hasPrev, hasNext, onPrev, onNext]);
+
   const remux = episode.playMode === "remux";
+  const transcode = episode.playMode === "transcode";
+  /** 实时流才需要自绘进度条；直出模式交给浏览器原生控件 */
+  const seekable = remux || transcode;
+  const duration = Math.max(0, episode.durationSec ?? 0);
+
+  const src = useMemo(() => {
+    if (!seekable || start <= 0) return episode.streamUrl;
+    return `${episode.streamUrl}${episode.streamUrl.includes("?") ? "&" : "?"}start=${Math.floor(start)}`;
+  }, [episode.streamUrl, seekable, start]);
+
+  /** 拖到某处：重新起一路流（输入侧 seek），播放器重挂载后自动播 */
+  const commitSeek = (value: number) => {
+    if (!seekable || !duration) return;
+    const target = Math.min(duration - 0.5, Math.max(0, value));
+    setDragging(false);
+    if (Math.abs(target - start) < 0.5) return;
+    setStart(target);
+    setPos(target);
+    setSeeking(true);
+  };
+
+  const errorCopy = () => {
+    const codec = episode.videoCodec?.toUpperCase() ?? "";
+    if (transcode) {
+      return `显卡转码失败${codec ? `（源编码 ${codec}）` : ""}：服务端没能把这一集转成 H.264。` +
+        "常见原因是显卡设备没映射进容器（docker-compose 里的 devices: /dev/dri）、驱动缺失，或这一路转码被中断。" +
+        "可以点「重试播放」，或点左下角「下载」用本地播放器看。";
+    }
+    if (episode.trial) {
+      return "这台浏览器解不了 HEVC：当前是「HEVC 直连」，能不能解码由浏览器决定。" +
+        "把工具栏的「HEVC 直连」关掉，就会改走服务端显卡转码。";
+    }
+    return `浏览器播不了这个文件${codec ? `（${codec}）` : ""}：多数是容器或编码不受支持。` +
+      "可以点左下角「下载」用本地播放器看，或在元数据页重新归档到 Emby 观看。";
+  };
 
   return (
     <Modal
@@ -783,65 +1362,123 @@ function PlayerDialog({
         episode.durationSec ? formatDuration(episode.durationSec) : null,
         resolutionLabel(episode.height),
         episode.videoCodec?.toUpperCase() ?? null,
+        transcode ? "显卡转码" : null,
       ]
         .filter(Boolean)
         .join(" · ")}
-      width="max-w-5xl"
+      width="max-w-6xl"
       footer={
         <>
           <a
             href={episode.streamUrl}
             download={episode.name}
-            className="btn-ghost flex items-center gap-1.5 text-[12.5px]"
-            title="下载这个文件"
+            className="btn-ghost mr-auto flex items-center gap-1.5 text-[12.5px]"
+            title="下载这个文件（原文件，不转码）"
           >
             <IconDownload className="h-3.5 w-3.5" />
             下载
           </a>
-          <Button size="sm" disabled={!hasPrev} onClick={onPrev}>
+          <Button size="sm" disabled={!hasPrev} onClick={onPrev} title="上一集（快捷键 [）">
             <IconChevronLeft className="h-3.5 w-3.5" />
             上一集
           </Button>
-          <Button size="sm" disabled={!hasNext} onClick={onNext}>
+          <Button size="sm" disabled={!hasNext} onClick={onNext} title="下一集（快捷键 ]）">
             下一集
             <IconChevronRight className="h-3.5 w-3.5" />
           </Button>
         </>
       }
     >
-      <div className="space-y-2">
-        {failed ? (
-          <div className="rounded-xl border border-rose-500/25 bg-rose-500/[0.08] px-3.5 py-3 text-[12px] leading-relaxed text-err">
-            {failed}
+      <div className="space-y-2.5">
+        <div className="relative overflow-hidden rounded-2xl bg-black ring-1 ring-white/[0.06]">
+          {failed ? (
+            <div className="flex aspect-video flex-col items-center justify-center gap-3 px-6 text-center">
+              <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/25 bg-rose-500/10 text-err">
+                <IconAlert className="h-5 w-5" />
+              </span>
+              <p className="max-w-lg text-[12.5px] leading-relaxed text-err">{failed}</p>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setFailed(null);
+                  setRetryKey((n) => n + 1);
+                }}
+              >
+                <IconRefresh className="h-3.5 w-3.5" />
+                重试播放
+              </Button>
+            </div>
+          ) : (
+            <video
+              ref={videoRef}
+              key={`${src}#${retryKey}`}
+              src={src}
+              controls
+              autoPlay
+              playsInline
+              className="aspect-video w-full bg-black"
+              onLoadedData={() => setSeeking(false)}
+              onTimeUpdate={(e) => {
+                const t = e.currentTarget.currentTime;
+                setPos(start + t);
+              }}
+              onError={() => setFailed(errorCopy())}
+            />
+          )}
+          {seeking && !failed && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 text-[12.5px] text-[#fff] backdrop-blur-sm">
+              <span className="flex items-center gap-2 rounded-full bg-black/60 px-3.5 py-2">
+                <Spinner className="h-3.5 w-3.5" />
+                正在从 {formatDuration(start)}
+                {transcode ? " 重新转码…" : " 重新换封装…"}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* 实时流自己画一条进度：浏览器原生进度条对无长度流是废的 */}
+        {seekable && duration > 0 && (
+          <div className="flex items-center gap-2.5 px-0.5">
+            <span className="shrink-0 text-[11px] tabular-nums text-slate-500">
+              {formatDuration(Math.min(duration, dragging ? draft : pos))}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={Math.max(1, Math.floor(duration))}
+              step={1}
+              value={Math.min(duration, dragging ? draft : pos)}
+              onChange={(e) => {
+                setDragging(true);
+                setDraft(Number(e.target.value));
+              }}
+              onPointerUp={() => commitSeek(draft)}
+              onKeyUp={() => commitSeek(draft)}
+              onBlur={() => dragging && commitSeek(draft)}
+              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.12] accent-brand-500"
+              title={transcode ? "拖动会重新转码，等 1~3 秒" : "拖动会重新开始一路流，等 1 秒左右"}
+            />
+            <span className="shrink-0 text-[11px] tabular-nums text-slate-500">{formatDuration(duration)}</span>
           </div>
-        ) : (
-          <video
-            key={episode.streamUrl}
-            src={episode.streamUrl}
-            controls
-            autoPlay
-            playsInline
-            className="aspect-video w-full rounded-xl bg-black"
-            onError={() =>
-              setFailed(
-                episode.trial
-                  ? `这台浏览器解不了 HEVC：开关「HEVC 试播」只是不再拦着，能不能解码还是看浏览器自己。` +
-                    "可以关掉开关让列表恢复标记，或点左下角「下载」用本地播放器看。"
-                  : `浏览器播不了这个文件${episode.videoCodec ? `（${episode.videoCodec.toUpperCase()}）` : ""}：` +
-                    "多数是容器或编码不受支持。可以点左下角「下载」用本地播放器看，或在元数据页重新归档到 Emby 观看。",
-              )
-            }
-          />
         )}
-        <p className="text-[11px] leading-relaxed text-slate-500">
-          {episode.trial && <span className="mr-1 text-warn">HEVC 试播：</span>}
-          {episode.trial
-            ? "这一集的编码是 HEVC，靠这台浏览器的解码器播；黑屏或报错就说明它解不了。"
-            : remux
-              ? "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放 —— 能正常看，但拖不了进度条。"
-              : "原文件直出，支持拖动进度条。"}
-          <span className="ml-1 text-slate-600">{episode.name}</span>
-        </p>
+
+        {/* 卡片里只能放三行，完整简介放这儿看 */}
+        <EpisodeOverview text={cleanText(episode.plot)} />
+
+        <div className="flex flex-wrap items-center justify-between gap-2 px-0.5 text-[11px] leading-relaxed text-slate-500">
+          <p>
+            {transcode && <span className="mr-1 text-ok">显卡转码：</span>}
+            {transcode
+              ? "浏览器解不了这个编码，服务端用显卡把画面实时转成 H.264（解码和编码都在 GPU 上，CPU 基本不烧）——能正常看，拖动进度条会重新起一段，等 1~3 秒。"
+              : episode.trial
+                ? "HEVC 直连：靠这台浏览器的解码器播；黑屏或报错说明它解不了，可在工具栏关掉「HEVC 直连」改走显卡转码。"
+                : remux
+                  ? "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放；拖动进度条会重新起一段流。"
+                  : "原文件直出，支持拖动进度条。"}
+            <span className="ml-1 text-slate-600">{episode.name}</span>
+          </p>
+          <span className="shrink-0 text-slate-600">[ / ] 切集 · Esc 关闭</span>
+        </div>
       </div>
     </Modal>
   );

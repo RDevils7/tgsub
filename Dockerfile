@@ -94,7 +94,7 @@ WORKDIR /app
 
 # 版本号：与 package.json / server/src/version.ts 保持一致。
 # /api/health 与设置页都读它，镜像标签由 git tag 决定（v1.2.4 → v1.2.4 / latest）。
-ARG APP_VERSION=1.3.6
+ARG APP_VERSION=1.3.7
 
 ENV NODE_ENV=production \
     PORT=6789 \
@@ -105,7 +105,8 @@ ENV NODE_ENV=production \
     PUID=1000 \
     PGID=1000 \
     APP_VERSION=${APP_VERSION} \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    FFMPEG_PATH=/usr/bin/ffmpeg
 
 # OCI 标准标签：docker inspect / Docker Hub 都能看到版本与来源
 LABEL org.opencontainers.image.title="tgsub" \
@@ -116,12 +117,18 @@ LABEL org.opencontainers.image.title="tgsub" \
 
 # util-linux 提供 setpriv：入口脚本用它把 root 降权成 PUID/PGID
 # 同时装 Chromium 运行所需的系统库（无头浏览器解析 SPA 站点的 m3u8 用）
+#
+# ffmpeg 装系统包而不是只用 npm 里的静态版：静态版在部分平台没编入 VAAPI，
+# 而硬件转码（N100 这类带核显的 NAS 把 HEVC 实时转成 H.264）依赖 libva + iHD 驱动。
+# 系统 ffmpeg 由 Debian 编译，VAAPI / QSV 都带；用 FFMPEG_PATH 指向它（优先于内置静态版）。
+# intel-media-va-driver 是第 11 代以后核显（含 N100 / N305 的 Gen12）的 iHD 驱动。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini util-linux ca-certificates \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libasound2 libpango-1.0-0 libcairo2 libatspi2.0-0 libxshmfence1 \
     libx11-6 libxcb1 libxext6 fonts-liberation \
+    ffmpeg libva2 libva-drm2 intel-media-va-driver \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /downloads \
  && chown -R node:node /data /downloads /app

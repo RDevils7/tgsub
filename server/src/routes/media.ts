@@ -4,7 +4,8 @@ import { Router } from "express";
 import { asyncHandler, assert } from "../lib/http";
 import { env } from "../env";
 import { logger } from "../logger";
-import { ffmpegInfo } from "../tg/ffmpeg";
+import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
+import { buildTranscodeArgs } from "../tg/hwdecode";
 import { isVideoFile } from "../tg/mediapath";
 import {
   artUrl,
@@ -22,6 +23,7 @@ import {
   thumbUrl,
   type LibraryEpisode,
   type LibrarySeries,
+  type PlayMode,
 } from "../tg/medialib";
 import { isAllowedPath } from "../tg/mediatree";
 import { spawn } from "node:child_process";
@@ -56,14 +58,28 @@ function decorateEpisode(episode: LibraryEpisode) {
     ...episode,
     streamUrl: streamUrl(episode.path, episode.playMode),
     thumbUrl: thumbUrl(episode.path, episode.updatedAt || undefined),
-    /** 因为「强制尝试 HEVC」才变成可播的：界面标个「试播」，和解不了的区分开 */
-    trial: isTrialCodec(episode.videoCodec) && episode.playMode !== "unsupported",
+    /**
+     * 「试播」= 这一集是 HEVC，本来浏览器解不了，靠用户打开「直连」才变成直出/换封装。
+     * 转码（transcode）不算试播：那条路是显卡兜住的，和解不了的情况区分开。
+     */
+    trial: isTrialCodec(episode.videoCodec) && (episode.playMode === "direct" || episode.playMode === "remux"),
   };
 }
 
-/** 前端「我的浏览器能放 HEVC」开关会带 hevc=1，逐层透传给 playModeOf */
+/** 前端「直连优先」开关会带 hevc=1，逐层透传给 playModeOf */
 function allowHevcOf(req: import("express").Request): boolean {
   return String(req.query.hevc ?? "") === "1";
+}
+
+/** 硬件解码能力（缓存 10 分钟），前端用它决定工具栏徽章与文案 */
+async function hwInfo() {
+  const cap = await hwCapability();
+  return {
+    available: cap.available,
+    accel: cap.accel,
+    label: cap.label,
+    reason: cap.reason,
+  };
 }
 
 /**
@@ -77,7 +93,8 @@ mediaRouter.get(
   asyncHandler(async (req, res) => {
     const dir = resolveDir(req.query.dir);
     assert(fs.existsSync(dir), 404, "目录不存在");
-    const listing = await listLibrary(dir, { allowHevc: allowHevcOf(req) });
+    const hw = await hwCapability();
+    const listing = await listLibrary(dir, { allowHevc: allowHevcOf(req), hw: hw.available });
     res.json({
       ok: true,
       dir: listing.dir,
@@ -85,6 +102,7 @@ mediaRouter.get(
       home: listing.home,
       roots: listing.roots,
       isSeries: listing.isSeries,
+      hw: await hwInfo(),
       series: listing.series.map(decorateSeries),
       loose: listing.loose.map(decorateEpisode),
     });
@@ -98,10 +116,12 @@ mediaRouter.get(
     const dir = resolveDir(req.query.dir);
     const stat = await fs.promises.stat(dir).catch(() => null);
     assert(stat?.isDirectory(), 404, "目录不存在");
-    const detail = await seriesDetail(dir, { allowHevc: allowHevcOf(req) });
+    const hw = await hwCapability();
+    const detail = await seriesDetail(dir, { allowHevc: allowHevcOf(req), hw: hw.available });
     res.json({
       ok: true,
       dir,
+      hw: await hwInfo(),
       series: decorateSeries(detail.series),
       episodes: detail.episodes.map(decorateEpisode),
     });
@@ -253,11 +273,37 @@ mediaRouter.get(
     assert(stat && stat.isFile(), 404, "文件不存在或已被删除");
 
     const probe = await probeFile(file).catch(() => null);
-    const wanted = req.query.mode === "remux" ? "remux" : playModeOf(file, probe, { allowHevc: allowHevcOf(req) });
+    const startSec = Math.max(0, Number(req.query.start ?? 0) || 0);
+    const modeParam = String(req.query.mode ?? "");
+    let wanted: PlayMode;
+    if (modeParam === "remux" || modeParam === "transcode") {
+      wanted = modeParam;
+    } else {
+      const hw = await hwCapability();
+      wanted = playModeOf(file, probe, { allowHevc: allowHevcOf(req), hw: hw.available });
+    }
     const mime = MIME_BY_EXT[path.extname(file).toLowerCase()] ?? "application/octet-stream";
 
+    if (wanted === "transcode") {
+      const hw = await hwCapability();
+      if (!hw.available || !hw.accel) {
+        res.status(503).json({
+          ok: false,
+          error: `这个文件的编码浏览器解不了，需要显卡转码，但服务端没有可用的硬件解码（${hw.reason ?? "未检测到显卡"}）。`,
+        });
+        return;
+      }
+      await pipeTranscode(file, res, {
+        accel: hw.accel,
+        device: hw.device,
+        sourceHeight: probe?.height ?? null,
+        startSec,
+      });
+      return;
+    }
+
     if (wanted === "remux") {
-      await pipeRemux(file, res, probe?.videoCodec ?? null);
+      await pipeRemux(file, res, probe?.videoCodec ?? null, startSec);
       return;
     }
 
@@ -302,6 +348,7 @@ async function pipeRemux(
   file: string,
   res: import("express").Response,
   videoCodec: string | null = null,
+  startSec = 0,
 ): Promise<void> {
   const info = await ffmpegInfo();
   if (!info.available || !info.ffmpeg) {
@@ -316,6 +363,8 @@ async function pipeRemux(
     "-hide_banner",
     "-loglevel",
     "error",
+    // 拖动进度条：输入侧 seek（关键帧对齐），换封装也是秒开
+    ...(startSec > 0 ? ["-ss", startSec.toFixed(3)] : []),
     "-i",
     file,
     // 只带首条视频 + 首条音频：数据轨、多音轨留在原文件里，浏览器用不到还添乱
@@ -323,6 +372,8 @@ async function pipeRemux(
     "0:v:0?",
     "-map",
     "0:a:0?",
+    "-sn",
+    "-dn",
     "-c",
     "copy",
     // HEVC 进 MP4 要写 hvc1：Apple 系与部分浏览器只认这个标签，默认的 hev1 会被判成解不了
@@ -334,8 +385,54 @@ async function pipeRemux(
     "pipe:1",
   ];
 
+  await pipeFfmpeg(info.ffmpeg, args, file, res, "换封装");
+}
+
+/**
+ * 显卡转码：HEVC / ProRes 这类浏览器解不了的编码，硬解 + 硬编成 H.264 实时吐出去。
+ *
+ * 参数由 `buildTranscodeArgs()`（纯函数，自检覆盖）拼；
+ * 这里只负责起进程、把 stdout 管道给浏览器、失败时说清楚原因。
+ */
+async function pipeTranscode(
+  file: string,
+  res: import("express").Response,
+  opts: { accel: "vaapi" | "qsv" | "software"; device: string | null; sourceHeight: number | null; startSec: number },
+): Promise<void> {
+  const info = await ffmpegInfo();
+  if (!info.available || !info.ffmpeg) {
+    res.status(503).json({
+      ok: false,
+      error: `这个文件需要转码，但服务端没有可用的 ffmpeg（${info.error ?? "未安装"}）。`,
+    });
+    return;
+  }
+
+  const args = buildTranscodeArgs({
+    input: file,
+    accel: opts.accel,
+    device: opts.device,
+    sourceHeight: opts.sourceHeight,
+    startSec: opts.startSec,
+  });
+
+  logger.info(
+    { file, accel: opts.accel, device: opts.device, start: opts.startSec },
+    "开始硬件转码（浏览器解不了的编码）",
+  );
+  await pipeFfmpeg(info.ffmpeg, args, file, res, "转码");
+}
+
+/** 共用的「ffmpeg → HTTP」管道；首块数据到了才发响应头，失败时把 stderr 最后一行的原因回给前端 */
+async function pipeFfmpeg(
+  bin: string,
+  args: string[],
+  file: string,
+  res: import("express").Response,
+  label: string,
+): Promise<void> {
   let stderr = "";
-  const child = spawn(info.ffmpeg, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
   const cleanup = () => {
     if (!child.killed) child.kill("SIGKILL");
   };
@@ -345,7 +442,7 @@ async function pipeRemux(
    * 等 ffmpeg 真吐出第一块数据再发响应头。
    *
    * 直接 `stdout.pipe(res)` 的话，进程还没解出任何东西就先发 200；
-   * 万一 ffmpeg 立刻失败（文件损坏、编码不支持），客户端拿到的是
+   * 万一 ffmpeg 立刻失败（文件损坏、编码不支持、显卡没权限），客户端拿到的是
    * 「200 空响应」，只能看到播放器转圈 —— 说清楚失败原因比这有用得多。
    */
   let started = false;
@@ -353,7 +450,7 @@ async function pipeRemux(
     started = true;
     res.status(200);
     res.setHeader("Content-Type", "video/mp4");
-    // 实时转封装没有确定长度，也不能 Range
+    // 实时换封装 / 转码没有确定长度，也不能 Range
     res.setHeader("Cache-Control", "no-store");
     res.write(first);
   };
@@ -371,19 +468,21 @@ async function pipeRemux(
     if (stderr.length > 4000) stderr = stderr.slice(-4000);
   });
   child.on("error", (err) => {
-    logger.warn({ err: err.message, file }, "ffmpeg 换封装启动失败");
+    logger.warn({ err: err.message, file }, `ffmpeg ${label}启动失败`);
     if (!started && !res.headersSent) res.status(500).json({ ok: false, error: `ffmpeg 启动失败：${err.message}` });
     else res.destroy();
   });
   child.on("close", (code) => {
     const failed = (code !== null && code !== 0) || !started;
     if (failed) {
-      logger.warn({ code, file, stderr: stderr.slice(-500) }, "ffmpeg 换封装退出");
+      logger.warn({ code, file, stderr: stderr.slice(-500) }, `ffmpeg ${label}退出`);
       const detail = stderr.split("\n").filter(Boolean).slice(-1)[0];
       if (!res.headersSent && !res.writableEnded) {
         res.status(500).json({
           ok: false,
-          error: detail ? `这个文件无法换封装播放：${detail}` : "ffmpeg 没有输出任何数据，这个文件可能已损坏",
+          error: detail
+            ? `这个文件无法${label}播放：${detail}`
+            : `ffmpeg 没有输出任何数据，这个文件可能已损坏（${label}失败）`,
         });
       } else if (!res.writableEnded) {
         res.destroy();

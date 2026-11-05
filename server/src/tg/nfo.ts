@@ -30,6 +30,31 @@ export function unescapeXml(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
+/**
+ * `<plot><![CDATA[……]]></plot>` 这种写法很常见（老 NFO / 抓取工具都会写）。
+ * CDATA 只是「这段原文别当标签解析」的容器标记，不是内容本身 ——
+ * 不剥掉的话界面上会原样显示 `<![CDATA[`，看着像乱码。
+ *
+ * 顺带兼容手抖写残的 `<![[CDATA[`（多一个 `[`）与残留的 `]]>`。
+ */
+export function unwrapCdata(raw: string): string {
+  if (!/CDATA/i.test(raw)) return raw;
+  return raw
+    .replace(/<!\s*\[+CDATA\s*\[+/gi, "")
+    .replace(/\]\]\s*>+/g, "")
+    .trim();
+}
+
+/** 只用于「给人看」的场景：剥 CDATA、剥 HTML 标签、压掉多余空白 */
+export function displayText(raw: string): string {
+  const text = unwrapCdata(String(raw ?? ""));
+  return text
+    .replace(/<\/?[a-z][\w:-]*(?:\s[^>]*)?\/?>/gi, " ")
+    .replace(/[ \t\u00a0]+/g, " ")
+    .replace(/\s*\n+\s*/g, " ")
+    .trim();
+}
+
 export interface NfoChild {
   name: string;
   attrs: string;
@@ -125,7 +150,7 @@ export function parseNfo(raw: string): ParsedNfo | null {
         children.push({
           name: frame.name,
           attrs: frame.attrs,
-          value: unescapeXml(content.slice(frame.innerStart, tagStart)).trim(),
+          value: unescapeXml(unwrapCdata(content.slice(frame.innerStart, tagStart))).trim(),
           blockStart: frame.start,
           blockEnd: tagStart + full.length,
           innerStart: frame.innerStart,

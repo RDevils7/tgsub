@@ -14,7 +14,7 @@ import {
   listSources,
   scanVideoFiles,
 } from "./mediatree";
-import { fieldsFromNfo, parseNfo, readText } from "./nfo";
+import { displayText, fieldsFromNfo, parseNfo, readText } from "./nfo";
 
 /**
  * 本地媒体库。
@@ -87,7 +87,7 @@ const DIRECT_CODEC = new Set(["h264", "vp8", "vp9", "av1", "theora"]);
 /** 包一层 fMP4 就能播的编码（mkv / ts 里装 h264 很常见） */
 const REMUX_CODEC = new Set(["h264", "vp9", "av1", "mpeg4"]);
 
-export type PlayMode = "direct" | "remux" | "unsupported";
+export type PlayMode = "direct" | "remux" | "transcode" | "unsupported";
 
 /**
  * 浏览器**普遍**不认、但个别环境真能解的编码。
@@ -105,8 +105,10 @@ export function isTrialCodec(codec: string | null | undefined): boolean {
 }
 
 export interface PlayOptions {
-  /** 用户在自己浏览器里打开了「强制尝试 HEVC」，不再把它判成 unsupported */
+  /** 允许浏览器自己解 HEVC（「直连优先」）：不占显卡，但只有 Safari / 带硬解的浏览器放得出来 */
   allowHevc?: boolean;
+  /** 这台机器有可用的硬解（VAAPI / QSV）：浏览器解不了的编码交给显卡转码 */
+  hw?: boolean;
 }
 
 /**
@@ -114,17 +116,21 @@ export interface PlayOptions {
  *
  * - `direct`：mp4/webm + 浏览器能解的编码，走 Range 直出，能拖进度条
  * - `remux`：容器不对但编码能解（mkv/ts/avi 里的 h264），ffmpeg 换封装成 fMP4 再吐给浏览器
- * - `unsupported`：HEVC / H.265 这类浏览器普遍不支持的编码，如实告诉用户，别假装能播。
- *   开了 `allowHevc` 之后 HEVC 也按容器走 direct / remux —— 播不播得出来交给浏览器判，
- *   前端会兜住 `<video>` 的解码错误。
+ * - `transcode`：编码浏览器解不了（HEVC / ProRes / MPEG-2），但服务端有显卡 ——
+ *   用硬件解码 + 硬编 H.264 实时转码，浏览器当普通 mp4 播。没有显卡时走不到这一支。
+ * - `unsupported`：既不能直连、又没有显卡可转，如实告诉用户（给下载入口），别假装能播。
+ *
+ * 优先级：**能直出就直出（不占 GPU）→ 能直连的 HEVC 按用户意愿直连 → 有显卡才转码**。
  */
 export function playModeOf(file: string, probe: VideoProbe | null, opts: PlayOptions = {}): PlayMode {
   const ext = path.extname(file).toLowerCase();
   const codec = (probe?.videoCodec ?? "").toLowerCase();
   if (codec && !DIRECT_CODEC.has(codec) && !REMUX_CODEC.has(codec)) {
-    if (!(opts.allowHevc && TRIAL_CODEC.has(codec))) return "unsupported";
-    // 强制尝试：容器对就直出，mkv/ts 这类还得先换封装（换封装只换壳，不改编码）
-    return DIRECT_EXT.has(ext) ? "direct" : "remux";
+    // 用户打开了「直连优先」且是 HEVC：交给浏览器试，不浪费显卡（Safari 直接能解）
+    if (opts.allowHevc && TRIAL_CODEC.has(codec)) return DIRECT_EXT.has(ext) ? "direct" : "remux";
+    // 有显卡就转码：解码 + 编码都在显卡上，CPU 基本不烧
+    if (opts.hw) return "transcode";
+    return "unsupported";
   }
   // 探测不到编码时按容器赌一把：mp4/webm 多半没问题
   if (DIRECT_EXT.has(ext)) return "direct";
@@ -285,8 +291,8 @@ async function readEpisodeMeta(file: string): Promise<{ title: string; plot: str
   if (!raw) return { title: "", plot: "" };
   const fields = fieldsFromNfo(parseNfo(raw));
   return {
-    title: (fields.title || "").trim(),
-    plot: (fields.plot || fields.outline || "").trim(),
+    title: displayText(fields.title || ""),
+    plot: displayText(fields.plot || fields.outline || ""),
   };
 }
 
@@ -337,7 +343,7 @@ async function buildSeries(dir: string): Promise<LibrarySeries> {
     name: path.basename(dir) || dir,
     title,
     year: Number.isFinite(year) ? year : null,
-    overview: (fields?.plot || fields?.outline || "").trim(),
+    overview: displayText(fields?.plot || fields?.outline || ""),
     genres: fields?.genres ?? [],
     rating: Number.isFinite(rating) ? rating : null,
     episodeCount: files.length,
@@ -481,9 +487,12 @@ export function resolveArtFile(dir: string, kind: "poster" | "landscape"): strin
 }
 
 /** 播放地址：direct 走 Range 直出，remux 走 ffmpeg 换封装 */
-export function streamUrl(file: string, mode: PlayMode): string {
-  const query = mode === "remux" ? "&mode=remux" : "";
-  return `/api/media/stream?path=${encodeURIComponent(file)}${query}`;
+export function streamUrl(file: string, mode: PlayMode, startSec?: number): string {
+  const params = new URLSearchParams({ path: file });
+  if (mode === "remux" || mode === "transcode") params.set("mode", mode);
+  // 实时换封装 / 转码没有总长度，拖进度条靠「用 start 重新起一路流」实现
+  if (startSec && startSec > 0) params.set("start", String(Math.floor(startSec)));
+  return `/api/media/stream?${params.toString()}`;
 }
 
 /* ------------------------------------------------------------------ */

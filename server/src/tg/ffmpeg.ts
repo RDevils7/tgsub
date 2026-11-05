@@ -3,6 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { getSettings } from "../db";
 import { logger } from "../logger";
+import {
+  NO_HW,
+  parseEncoders,
+  parseHwaccels,
+  pickAccel,
+  vaapiDeviceCandidates,
+  type HwAccel,
+  type HwCapability,
+} from "./hwdecode";
 
 /**
  * FFmpeg 定位与调用。
@@ -433,4 +442,162 @@ export async function captureCandidates(
     }
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* 硬件解码能力                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 探测结果缓存。
+ *
+ * 探测要跑两三次 ffmpeg（列加速方式、列编码器、试编一帧），几十到几百毫秒；
+ * 媒体库每次列表都问一次就太亏了，缓存 10 分钟 —— 容器里加显卡是重启才生效的事。
+ */
+let hwCache: { at: number; cap: HwCapability } | null = null;
+let hwInflight: Promise<HwCapability> | null = null;
+const HW_TTL_MS = 10 * 60_000;
+
+/**
+ * 这台机器能不能用显卡转码。
+ *
+ * 判断分三步，任何一步不过就如实说明原因（设置页 / 媒体库里能直接看到）：
+ *   1. ffmpeg 编进了 vaapi / qsv，且有对应的 H.264 编码器；
+ *   2. vaapi 需要 `/dev/dri/renderD*` 设备节点（容器必须映射显卡设备）；
+ *   3. 真跑一次「黑底一帧 + 硬编」验证驱动可用 —— 只查参数不试，容器里少驱动时会误报可用。
+ */
+export async function hwCapability(force = false): Promise<HwCapability> {
+  if (!force && hwCache && Date.now() - hwCache.at < HW_TTL_MS) return hwCache.cap;
+  if (!force && hwInflight) return hwInflight;
+  const job = detectHw()
+    .catch((err) => ({ ...NO_HW, reason: `探测失败：${(err as Error).message}` }) as HwCapability)
+    .then((cap) => {
+      hwCache = { at: Date.now(), cap };
+      hwInflight = null;
+      return cap;
+    });
+  hwInflight = job;
+  return job;
+}
+
+/** 强制重新探测（改了设置 / 换了显卡后调用） */
+export function resetHwCache(): void {
+  hwCache = null;
+  hwInflight = null;
+}
+
+async function detectHw(): Promise<HwCapability> {
+  const info = await ffmpegInfo();
+  if (!info.available || !info.ffmpeg) {
+    return { ...NO_HW, reason: "没有可用的 ffmpeg" };
+  }
+  const bin = info.ffmpeg;
+
+  const forced = String(process.env.HW_ACCEL || "auto").trim().toLowerCase();
+  if (forced === "none" || forced === "off" || forced === "0") {
+    return { ...NO_HW, reason: "已通过 HW_ACCEL 关闭硬件解码" };
+  }
+
+  const encoders = parseEncoders((await runCapture(bin, ["-hide_banner", "-encoders"])).stdout);
+
+  if (forced === "software") {
+    if (!encoders.includes("libx264")) return { ...NO_HW, reason: "这个 ffmpeg 没有编入 libx264" };
+    return {
+      available: true,
+      accel: "software",
+      device: null,
+      encoder: "libx264",
+      label: "CPU 转码（libx264）",
+      reason: null,
+    };
+  }
+
+  const hwaccels = parseHwaccels((await runCapture(bin, ["-hide_banner", "-hwaccels"])).stdout);
+  let picked = pickAccel(hwaccels, encoders);
+  if (!picked) {
+    return {
+      ...NO_HW,
+      reason: hwaccels.length
+        ? `这个 ffmpeg 没有可用的硬件 H.264 编码器（已支持：${hwaccels.join(" / ")}）`
+        : "这个 ffmpeg 没有编入硬件加速",
+    };
+  }
+  // 显式指定了就用指定的那个（调试用），没指定按默认优先级
+  if ((forced === "vaapi" || forced === "qsv") && forced !== picked.accel) {
+    const encoder = forced === "vaapi" ? "h264_vaapi" : "h264_qsv";
+    if (hwaccels.includes(forced) && encoders.includes(encoder)) picked = { accel: forced, encoder };
+  }
+
+  // vaapi 必须有设备节点：容器没映射 /dev/dri 时这里就会挡住，而不是等播放时才 500
+  const devices: Array<string | null> =
+    picked.accel === "vaapi"
+      ? vaapiDeviceCandidates().filter((p) => fs.existsSync(p))
+      : process.platform === "linux"
+        ? vaapiDeviceCandidates().filter((p) => fs.existsSync(p)).slice(0, 1)
+        : [null];
+
+  if (picked.accel === "vaapi" && devices.length === 0) {
+    return {
+      ...NO_HW,
+      reason: "没有找到 /dev/dri/renderD*，容器需要映射显卡设备（devices: /dev/dri:/dev/dri）",
+    };
+  }
+
+  let lastError = "";
+  for (const device of devices) {
+    const probe = await probeAccel(bin, picked.accel as HwAccel, device);
+    if (probe.ok) {
+      return {
+        available: true,
+        accel: picked.accel,
+        device,
+        encoder: picked.encoder,
+        label:
+          picked.accel === "vaapi"
+            ? `VAAPI（${device}）`
+            : device
+              ? `Quick Sync（${device}）`
+              : "Quick Sync",
+        reason: null,
+      };
+    }
+    lastError = probe.detail;
+  }
+
+  return {
+    ...NO_HW,
+    reason: `硬件编码器存在但初始化失败：${lastError || "未知原因"}`,
+  };
+}
+
+/** 真转一帧黑底视频，确认驱动 / 设备真的能用 */
+async function probeAccel(
+  bin: string,
+  accel: HwAccel,
+  device: string | null,
+): Promise<{ ok: boolean; detail: string }> {
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=black:s=256x144:r=10:d=0.2",
+  ];
+  if (accel === "vaapi") {
+    args.push("-vaapi_device", device || "/dev/dri/renderD128", "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi");
+  } else if (accel === "qsv") {
+    if (device) args.push("-qsv_device", device);
+    args.push("-c:v", "h264_qsv");
+  } else {
+    args.push("-c:v", "libx264", "-preset", "ultrafast");
+  }
+  args.push("-f", "null", "-");
+
+  const { code, stderr } = await runCapture(bin, args, 20_000);
+  if (code === 0) return { ok: true, detail: "" };
+  const detail = String(stderr).split("\n").filter(Boolean).slice(-1)[0] ?? "";
+  logger.debug({ accel, device, detail }, "硬件加速自检未通过");
+  return { ok: false, detail };
 }

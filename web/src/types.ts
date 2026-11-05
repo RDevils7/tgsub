@@ -636,8 +636,8 @@ export interface MediaEpisode {
   width: number | null;
   height: number | null;
   videoCodec: string | null;
-  /** direct = 原生播放（可拖进度条），remux = 服务端换封装，unsupported = 播不了 */
-  playMode: "direct" | "remux" | "unsupported";
+  /** direct = 原生播放（可拖进度条），remux = 服务端换封装，transcode = 显卡转码，unsupported = 播不了 */
+  playMode: "direct" | "remux" | "transcode" | "unsupported";
   /** 播放地址（已按 playMode 选好模式） */
   streamUrl: string;
   /** 缩略图地址（下载时生成的图或服务端抽帧，取不到图时为 null） */
@@ -675,13 +675,26 @@ export interface MediaLibraryResponse {
   roots: MediaRoot[];
   /** 这个目录自己就是一部剧（用户已经点进来了） */
   isSeries: boolean;
+  /** 服务端的硬件解码能力（没显卡时 available=false，reason 说明原因） */
+  hw?: MediaHwInfo;
   series: MediaSeries[];
   loose: MediaEpisode[];
+}
+
+/** 显卡转码能力：部署在带核显的 NAS 上时，浏览器解不了的编码交给显卡 */
+export interface MediaHwInfo {
+  available: boolean;
+  accel: "vaapi" | "qsv" | "software" | null;
+  /** 界面展示用，例如「VAAPI（/dev/dri/renderD128）」 */
+  label: string;
+  /** 不可用原因 */
+  reason: string | null;
 }
 
 export interface MediaSeriesResponse {
   ok: boolean;
   dir: string;
+  hw?: MediaHwInfo;
   series: MediaSeries;
   episodes: MediaEpisode[];
 }

@@ -240,3 +240,25 @@ html.dark {
 .glass-line {
   background: linear-gradient(90deg, transparent, rgba(42, 171, 238, 0.45), rgba(124, 92, 255, 0.45), transparent);
 }
+
+/* ------------------------------------------------------------------ */
+/* 媒体库：现代播放器式的沉浸式布局                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * Hero 一律是「独立深色卡片」：浅色主题下也不会变成白底，
+ * 所以压在图片上的文字必须写死 text-[#fff]（主题自适应的 text-white 会变深色）。
+ */
+.media-hero-shade {
+  background:
+    linear-gradient(90deg, rgba(6, 10, 18, 0.94) 0%, rgba(6, 10, 18, 0.76) 38%, rgba(6, 10, 18, 0.28) 100%),
+    linear-gradient(0deg, rgba(6, 10, 18, 0.9) 0%, rgba(6, 10, 18, 0) 62%);
+}
+
+/* 横向分集架：隐藏滚动条，但滚轮 / 触控板 / 拖动仍可横向浏览 */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
