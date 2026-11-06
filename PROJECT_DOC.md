@@ -269,15 +269,17 @@
   ```yaml
   devices:
     - /dev/dri:/dev/dri
-  group_add:
-    - "video"
-    - "render"     # 容器内用户要属于 render 组才能打开 renderD128
   ```
+  **只映射设备就够，不要写 `group_add`。** Docker 的 `group_add` 是按**宿主机 `/etc/group` 的组名**
+  解析的，而群晖 / 威联通 / 绿联的组文件里只有 `video`、没有 `render`，写 `group_add: ["video","render"]`
+  会直接报 `unable to find group render: no matching entries in group file`，容器**创建**阶段就失败
+  （不是启动失败，是根本建不出来）。入口脚本改为在容器内 `stat -c %g /dev/dri/renderD128` 读出设备真实属组，
+  降权时用 `setpriv --groups=<gid>` 加进补充组，所以任何 NAS 都不用配。
   镜像里装的是 Debian 的 `ffmpeg` + `libva2` + `libva-drm2` + `intel-media-va-driver`（Gen12 的 iHD 驱动），
   并用 `FFMPEG_PATH=/usr/bin/ffmpeg` 指过去 —— npm 里的静态 ffmpeg 在部分平台没编入 VAAPI，不能只靠它。
   默认不设 `LIBVA_DRIVER_NAME`，让 libva 自己挑驱动（Intel 选 iHD、AMD 选 radeonsi）；
   老平台 / 异常时可在 compose 里加 `LIBVA_DRIVER_NAME: iHD` 强制指定。
-  宿主机没有 `/dev/dri`（ARM NAS / VPS）时不要放开这两段，否则容器会因找不到设备起不来。
+  宿主机没有 `/dev/dri`（ARM NAS / VPS）时不要放开这段，否则容器会因找不到设备起不来。
 - **怎么看有没有生效**：媒体库工具条右侧的绿色「硬解 · VAAPI」徽章（没有则是灰色「无硬解」，悬停看原因）；
   概览页工具链里也多了一项「硬件解码」，显示编码器与设备节点或失败原因。
 
@@ -1713,12 +1715,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.8`（镜像 `rdevils7/tgsub:v1.3.8` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.9-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.9`（镜像 `rdevils7/tgsub:v1.3.9` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.10-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.9-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.9`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.9` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.10-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.10-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.10`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.10` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.11-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

@@ -4,12 +4,12 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.8-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.9-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
 
-> **版本状态**：当前最新正式版 **1.3.8**（镜像 `rdevils7/tgsub:v1.3.8` 与 `latest`）。
+> **版本状态**：当前最新正式版 **1.3.9**（镜像 `rdevils7/tgsub:v1.3.9` 与 `latest`）。
 > 本页只讲「怎么部署起来用」；全部配置项、HTTP 接口、开发自检与排错见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
@@ -20,24 +20,26 @@
 
 ---
 
-## 本版更新（1.3.8）
+## 本版更新（1.3.9）
 
-**评论区链接终于能下了。** 1.3.7 里所有 `?comment=` 链接都报「这个帖子没有开启评论，或当前账号不在关联讨论组里」——那不是判定的问题，是定位讨论组那条路本身走不通。
+**修掉「照文档加 `group_add` 反而起不来」。** 群晖 / 威联通 / 绿联的宿主机 `/etc/group` 里只有 `video`、没有 `render`，
+Docker 解析组名失败，直接报 `unable to find group render: no matching entries in group file`，容器连创建都失败。
 
-1. **定位讨论组改成五条路依次兜底**：
-   - ① `messages.getDiscussionMessage`（空结果自动重试一次，遇 FLOOD_WAIT 会等）；
-   - ② 直接读帖子自身的 `replies.channel_id`（只读频道就能拿到，不需要任何群权限）；
-   - ③ `messages.getReplies(peer=频道, msg_id=帖子)`，从返回的 chats 里补 `access_hash`；
-   - ④ 拉一次对话框列表里找关联群（**命中才缓存**，空结果不缓存，避免一次网络抖动被记成永久失败）；
-   - ⑤ 最后才试 `getEntity("-100<id>")`。
-   全部失败才报错，且报错文案改成「先结论后诊断」，把每一步 RPC 的结果都附出来，能直接看出是「帖子真没开评论」还是「私密群 + 账号不在群里」。
-2. **不用加入群组**：`getDiscussionMessage` 官方说明就是「without actually joining the group」，代码里也没有任何加入动作。之前真正的坑是**取消息**——讨论组大多没设置 username，`getEntity("-100<id>")` 在 GramJS 里解析不出来（没有 `access_hash` 就拼不出 `InputChannel`），旧代码却把这句失败写成了「请先加入」。
-   - 现在定位时把讨论组的 `access_hash` 一起取到并存进 `channels.access_hash`（**老库自动补列**，不用重建）；
-   - 取消息 / 取评论走 `channels.getMessages` 与 `messages.getHistory`，带 hash 直接读；
-   - hash 过期（`CHANNEL_INVALID` / `ACCESS_HASH_INVALID`）自动退回 `getEntity` 重试一次。
-   - **公开讨论组到此就能直接下**；私密讨论组服务端会直接拒（`CHANNEL_PRIVATE`），这种只能先用同一个账号加群，报错里会明确写出来。
+1. **硬件转码只需要映射设备**：compose 里只留
+   ```yaml
+   devices:
+     - /dev/dri:/dev/dri
+   ```
+   属组由入口脚本在容器内 `stat -c %g /dev/dri/renderD128` 读出真实 gid，降权时用 `setpriv --groups=<gid>`
+   加进运行用户的补充组 —— 不管宿主机有没有 `render` 组都能开设备，**不再需要 `group_add`**。
+   README / PROJECT_DOC / compose 里那两行 `group_add` 已全部删掉，照新版复制就能起。
+2. **入口脚本日志更直白**：检测到 `/dev/dri` 会打印「检测到核显设备 renderD128（属组 gid=…），将加入运行用户的补充组」；
+   没映射设备就完全静默，不影响启动。
+3. **FAQ 补两条实战排查**：`unable to find group render` 怎么改、容器 running 但网页打不开按什么顺序查
+   （先 `docker port`，再 `docker exec ... /api/health`，最后才是浏览器 / 反向代理）。
 
-> 1.3.7 的媒体库界面重做、显卡硬件转码、简介 CDATA 清洗，以及更早的评论区视频下载、HEVC 直连默认打开、合并改名、元数据分区、登录兜底等全部保留。
+> 1.3.8 的评论区链接下载（五路兜底定位讨论组 + `access_hash` 存库，公开组免加群）全部保留；
+> 更早的媒体库界面重做、显卡硬件转码、HEVC 直连、合并改名、元数据分区、登录兜底也都在。
 
 ---
 
@@ -126,12 +128,12 @@ services:
     # ...其余不变
     devices:
       - /dev/dri:/dev/dri
-    group_add:
-      - "video"
-      - "render"     # 容器用户要属于 render 组才能打开 /dev/dri/renderD128
 ```
 
-- 宿主机没有 `/dev/dri`（ARM NAS、VPS）时**不要**加这两段，否则容器会因为找不到设备起不来。
+- **只加 `devices` 这一项就够**。设备属组由入口脚本在容器内自动加进运行用户的补充组，不需要写 `group_add`。
+- **不要写 `group_add: ["video", "render"]`**：Docker 按宿主机 `/etc/group` 解析组名，群晖 / 威联通 / 绿联的组文件里只有 `video`、没有 `render`，会直接报
+  `unable to find group render: no matching entries in group file`，**容器连创建都失败**（1.3.9 起已改成容器内自动处理）。
+- 宿主机没有 `/dev/dri`（ARM NAS、VPS）时**不要**加这一项，否则容器会因为找不到设备起不来。
 - 生效后工具栏出现「硬解 · VAAPI」，分集卡片标「显卡转码」，HEVC 点开直接看。
 - 是否真的可用：概览页工具链看「硬件解码」这一项，会写设备节点或失败原因。显示「初始化失败」时，
   在 environment 里加 `LIBVA_DRIVER_NAME: iHD` 再重启（强行指定 Intel 驱动）。
@@ -233,7 +235,7 @@ downloads/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布的镜像 |
-| `v1.3.8` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.9` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push 到 `main` 只跑构建与冒烟测试（健康检查、两个挂载目录可写、NAS 属主场景、内置 ffmpeg），
 **不发布镜像**；打 tag 才构建 amd64 + arm64 并推送。
@@ -273,8 +275,10 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 网页视频报 `403`，一秒就失败 | 多半是老任务里 `&amp;` 把签名写坏；1.3.1 起已自动还原，点「重试」即可 |
 | 一直 `Just a moment...` / 抓取 403 | 站点在跑 Cloudflare 人机验证，会自动开无头浏览器过挑战（15~30 秒）；代理轮换 IP 会让 Cookie 失效 |
 | `HTTP Error 567`（B站） | 关掉「国内平台也走代理」（海外 IP 会被判 567），再确认 Cookie 没过期 |
-| 媒体库 HEVC 标「播不了」/ 点了黑屏 | 有核显：按「部署 → 硬件转码」加 `devices` / `group_add` 并重启；没有核显：打开「HEVC 直连」用 Safari / Edge 播 |
-| 显示「无硬解」、概览里「硬件解码」是红的 | 没映射 `/dev/dri`、用户不在 `render` 组、或宿主机没装 Intel 驱动；概览里那行会写具体原因 |
+| 媒体库 HEVC 标「播不了」/ 点了黑屏 | 有核显：按「部署 → 硬件转码」加 `devices` 并重启；没有核显：打开「HEVC 直连」用 Safari / Edge 播 |
+| 显示「无硬解」、概览里「硬件解码」是红的 | 没映射 `/dev/dri`、或宿主机没装 Intel 驱动；概览里那行会写具体原因 |
+| 创建容器报 `unable to find group render` | compose 里写了 `group_add: ["video","render"]`，而 NAS 的组文件没有 `render` 组。**删掉整段 group_add**，只留 `devices: ["/dev/dri:/dev/dri"]`（1.3.9 起属组由容器内自动处理） |
+| 容器是 running 但网页打不开 | ① `docker port tgsub` 看有没有 `6789/tcp -> 0.0.0.0:6789`；② `docker exec tgsub wget -qO- http://127.0.0.1:6789/api/health`，有 JSON 返回说明服务正常，问题在端口映射 / NAS 防火墙 / 反向代理；③ 访问 `http://NAS地址:6789`（不是 https），换浏览器无痕窗口再试 |
 | 改名 / 合并后顺序不对 | 顺序按解析出的集号排，解析不出的垫后按文件名自然序；执行前有「旧名 → 新名」预览 |
 
 更多报错与细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。

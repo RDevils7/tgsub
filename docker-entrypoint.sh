@@ -49,6 +49,26 @@ fi
 
 log "以 root 启动，PUID=$PUID PGID=$PGID"
 
+# 核显设备：把 /dev/dri 下设备节点的属组加进运行用户的补充组。
+#
+# 为什么不在 compose 里写 group_add: "render" —— Docker 的 group_add 是按
+# **宿主机 /etc/group 的组名**解析的，而群晖 / 威联通 / 绿联等 NAS 的组文件里
+# 通常只有 video、没有 render，一写就报
+#   "unable to find group render: no matching entries in group file"
+# 容器直接创建失败（不是起不来，是根本建不出来）。
+# 改成在容器内读设备节点的真实 gid 再 --groups 带上，任何 NAS 都不用配 group_add。
+DEV_GROUPS=""
+for dev in /dev/dri/renderD128 /dev/dri/renderD129 /dev/dri/card0; do
+  [ -e "$dev" ] || continue
+  gid="$(stat -c '%g' "$dev" 2>/dev/null || true)"
+  [ -n "$gid" ] || continue
+  case ",$DEV_GROUPS," in
+    *",$gid,"*) ;;
+    *) DEV_GROUPS="${DEV_GROUPS:+$DEV_GROUPS,}$gid" ;;
+  esac
+  log "检测到核显设备 $dev（属组 gid=$gid），将加入运行用户的补充组"
+done
+
 own_ok=1
 
 # 数据目录体积很小（数据库 + session + 封面缓存），递归改属主，
@@ -85,9 +105,16 @@ if [ "$own_ok" = "1" ] && command -v setpriv >/dev/null 2>&1; then
     # 降权后 HOME 必须指向可写目录，否则部分依赖会往 /root 下写缓存
     HOME=/tmp
     export HOME
+    if [ -n "$DEV_GROUPS" ]; then
+      exec setpriv --reuid="$PUID" --regid="$PGID" --groups="$DEV_GROUPS" "$@"
+    fi
     exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$@"
   fi
 fi
 
 log "以 root 启动（如需指定用户，请让宿主机目录属主与 PUID/PGID 一致）"
+# 降权失败但仍映射了核显：保持 root 运行至少能用上硬解（root 无视设备权限）
+if [ -n "$DEV_GROUPS" ]; then
+  log "降权未生效，以 root 运行（核显可用）"
+fi
 exec "$@"
