@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import path from "node:path";
+import bigInt from "big-integer";
 import { matchText } from "../server/src/match";
 import { extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
 import { sanitizeSegment, splitKeywords, toNumber } from "../server/src/utils";
@@ -2721,6 +2722,60 @@ function telegramLinkChecks(): void {
     assert.equal(idString("-1001234567890"), "1234567890");
     assert.equal(idString({ className: "PeerChannel", channelId: BigInt("77") }), "77");
     assert.equal(idString(undefined), null);
+  });
+
+  /* 1.3.10 报「帖子 replies 无 channel_id（comments=true, 90 条）」的真实原因：
+   * gramjs 的 long 是 big-integer 的 BigInteger 实例 —— typeof 是 object、
+   * 身上没有 channelId / id 字段，只能靠 toString()。只认原生 bigint 就会全解析成 null。 */
+  check("idString 认得 gramjs 的 BigInteger（long 不是原生 bigint）", () => {
+    const long = bigInt("1965425283");
+    assert.equal(typeof long, "object");
+    assert.equal((long as { channelId?: unknown }).channelId, undefined);
+    assert.equal(idString(long), "1965425283");
+    assert.equal(idString(bigInt("-1001234567890")), "1234567890");
+    // PeerChannel / Channel / Message 里的 long 字段都是这种对象
+    assert.equal(idString({ className: "PeerChannel", channelId: long }), "1965425283");
+    assert.equal(idString({ className: "Channel", id: long }), "1965425283");
+    assert.equal(idString({ id: bigInt("3516") }), "3516");
+    // 脏对象依然返回 null，别把 "[object Object]" 当 ID
+    assert.equal(idString({}), null);
+    assert.equal(idString([1, 2]), null);
+  });
+
+  check("真实 gramjs 形状：replies / peerId / chats 全是 BigInteger", () => {
+    const info = postReplyInfo(
+      {
+        messages: [
+          { id: bigInt("3516"), replies: { comments: true, replies: 90, channelId: bigInt("1965425283") } },
+        ],
+      },
+      3516,
+    );
+    assert.equal(info.comments, true);
+    assert.equal(info.count, 90);
+    assert.equal(info.channelId, "1965425283");
+
+    const replies = {
+      messages: [{ id: bigInt("55488"), peerId: { className: "PeerChannel", channelId: bigInt("1965425283") } }],
+      chats: [
+        {
+          className: "Channel",
+          id: bigInt("1965425283"),
+          megagroup: true,
+          title: "讨论组",
+          accessHash: bigInt("-7123456789012345678"),
+        },
+      ],
+    };
+    assert.equal(threadGroupId(replies, "1001"), "1965425283");
+    const group = pickDiscussionGroup(replies, "1001");
+    assert.equal(group?.id, "1965425283");
+    assert.equal(group?.accessHash, "-7123456789012345678");
+    assert.equal(discussionEntityKey(group!), "-1001965425283");
+    assert.equal(chatInfoOf(replies, "1965425283")?.accessHash, "-7123456789012345678");
+    assert.equal(groupsFromChats(replies, "1001")[0]?.id, "1965425283");
+    // getFullChannel 的 linkedChatId 也是同一个形状
+    assert.equal(linkedGroupId({ fullChat: { linkedChatId: bigInt("1965425283") } }), "1965425283");
   });
 
   check("从 GetDiscussionMessage 返回里挑出讨论组（peerId 优先）", () => {

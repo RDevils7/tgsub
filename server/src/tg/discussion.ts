@@ -7,6 +7,7 @@ import {
   chatInfoOf,
   discussionEntityKey,
   groupsFromChats,
+  hashString,
   idString,
   linkedGroupId,
   pickDiscussionGroup,
@@ -96,6 +97,8 @@ export async function resolveDiscussionGroup(
   // 公开频道只有 username 时退回 getEntity（这条路本来就能用）。
   const peer: unknown = inputPeer ?? (await client.getEntity(key as never));
   const selfId = idString((peer as { id?: unknown } | null)?.id) ?? idString(key);
+  // 库里没存 hash 时，用刚解析出来的实体补一个（channels.getFullChannel 需要 InputChannel）
+  const channelHash = ref.accessHash ?? hashString((peer as { accessHash?: unknown } | null)?.accessHash);
 
   let group: DiscussionGroup | null = null;
   let postInfo: PostReplyInfo | null = null;
@@ -107,7 +110,7 @@ export async function resolveDiscussionGroup(
    * （含 access_hash）—— 一步就把 ID 和 hash 一起拿到。 */
   if (!group) {
     try {
-      const channelInput = inputChannelOf(key, ref.accessHash) ?? (peer as never);
+      const channelInput = inputChannelOf(key, channelHash) ?? (peer as never);
       const full = await client.invoke(
         new Api.channels.GetFullChannel({ channel: channelInput as never }),
       );
@@ -282,7 +285,7 @@ export async function resolveDiscussionGroup(
       );
     }
     throw new Error(
-      `定位不到帖子的讨论组（5 条路都试过）。诊断：${diag.slice(-3).join("；")}`,
+      `定位不到帖子的讨论组（6 条路都试过）。诊断：${diag.slice(-3).join("；")}`,
     );
   }
 

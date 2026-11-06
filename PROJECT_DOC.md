@@ -1152,6 +1152,24 @@ https://t.me/c/1234567890/3516?comment=55488
 （帖子 `replies` 有没有 `channel_id`、`getReplies` 返回了几条消息几个 chat、`getFullChannel`
 有没有关联讨论组），失败时能直接分辨是「没开评论」「频道没关联讨论组」还是「私密群 + 不在群里」。
 
+### 为什么六条路都「看起来没数据」（1.3.11 根因：BigInteger）
+
+失败时的诊断最诡异的一句是：`帖子 replies 无 channel_id（comments=true, 90 条）`，
+同时 `getReplies 未返回讨论组（messages=1, chats=1）` —— 数据明明都回来了，只是**一个 ID 都没解析出来**。
+
+原因：gramjs 的 `long` **不是** JS 原生 `bigint`，而是 `big-integer` 的 BigInteger 实例
+（`node_modules/telegram/tl/api.d.ts` 里 `type long = BigInteger`）。它 `typeof` 是 `"object"`、
+身上没有 `channelId` / `id` 字段，只有 `toString()`。`idString()` 早先只认 `bigint | number | string`，
+于是 `replies.channelId`、`peerId.channelId`、`chat.id`、`linkedChatId` 全被解析成 `null`：
+
+- 路径 2 → 误判「有评论但没给 channel_id」；
+- 路径 3 → 拿到 1 条消息 1 个 chat，却既挑不出 peerId 也过滤掉了 chats；
+- 路径 0 → 误判「该频道没有关联讨论组」。
+
+现在 `idString()` 先钻进 `channelId / chatId / userId / id`，再兜底 `String(obj)` 并校验是整数串
+（`"[object Object]"` 会被过滤掉）。自检补了两条用**真** `big-integer` 造数据的用例 ——
+之前只用原生 `BigInt` 测，正好绕开了这个 bug（345 → 347 项）。
+
 任一策略拿到 ID 但没 hash 时，后面的策略只补 hash，不会覆盖已确认的 ID。**全部失败**才报错，
 报错文案先写结论再附「诊断：…」，把每一步的 RPC 结果都列出来（前端提交记录只留 300 字，所以结论在前）。
 `CHANNEL_PRIVATE` 单独识别成「私密讨论组、账号不在群里」，不再笼统说「请加群」。
@@ -1723,12 +1741,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.10`（镜像 `rdevils7/tgsub:v1.3.10` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.11-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.11`（镜像 `rdevils7/tgsub:v1.3.11` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.12-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.11-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.11`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.11` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.12-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.12-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.12`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.12` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.13-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

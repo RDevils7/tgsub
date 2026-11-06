@@ -4,12 +4,12 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.10-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.11-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
 
-> **版本状态**：当前最新正式版 **1.3.10**（镜像 `rdevils7/tgsub:v1.3.10` 与 `latest`）。
+> **版本状态**：当前最新正式版 **1.3.11**（镜像 `rdevils7/tgsub:v1.3.11` 与 `latest`）。
 > 本页只讲「怎么部署起来用」；全部配置项、HTTP 接口、开发自检与排错见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
@@ -20,26 +20,32 @@
 
 ---
 
-## 本版更新（1.3.10）
+## 本版更新（1.3.11）
 
-**评论区链接还是定位不到讨论组 —— 补上最该先走的那条路。** 1.3.9 的报错只有「getDiscussionMessage 两次返回空」，后面几条路干了什么完全看不见，等于瞎猜。
+**评论区链接终于能下载了 —— 卡了三个版本的根因是「ID 根本不是数字」。**
 
-1. **新增第 0 条路（最先走）：`channels.getFullChannel`**。关联讨论组的 ID 是**频道级设置**，写在
-   `ChannelFull.linked_chat_id` 里，公开频道对任何已登录账号都可读，压根不需要加入任何群 —— 这是 Telegram
-   官方客户端点「评论」时用的同一个接口。同一份返回的 `chats` 里通常还带着那个讨论组的完整对象，
-   于是 **ID 和 access_hash 一次拿到**。
-   - 之前只有 `messages.getDiscussionMessage` 打头，它对「私密讨论组 + 账号不在群里」会**直接返回空**，
-     一步不通后面全废。
-   - 现在顺序是：`getFullChannel` → `getDiscussionMessage` → 帖子 `replies.channel_id` →
-     `getReplies` → 对话框列表 → `getEntity`。
-2. **诊断信息补全**：每一步都会留痕，包括「帖子 replies 无 channel_id（comments=true, 12 条）」、
-   「getReplies 未返回讨论组（messages=0，chats=0）」、「getFullChannel 显示该频道没有关联讨论组」。
-   下次再失败，从诊断就能直接看出是**没开评论**、**频道没关联讨论组**，还是**讨论组私密且账号不在群里**。
-3. **报错文案分层**：定位到讨论组但拿不到 `access_hash` 时，会明确写出「ID 是多少、这是私密群、需要用同一个
-   账号先加群」，而不是笼统的「5 条路都试过」。
+上一版（1.3.10）的报错里有一句自相矛盾的话：`帖子 replies 无 channel_id（comments=true, 90 条）`，
+同时 `getReplies 未返回讨论组（messages=1, chats=1）`。评论条数读到了、线程消息和 chat 也都回来了，
+却一个 ID 都认不出来 —— 问题不在 RPC 顺序，在解析。
 
-> 1.3.9 的 `group_add` 修复（只留 `devices: /dev/dri:/dev/dri`，属组由容器内自动处理）、
-> 1.3.8 的评论区五路兜底与 `access_hash` 存库、更早的媒体库界面重做 / 显卡硬件转码 / HEVC 直连等全部保留。
+1. **根因**：gramjs 的 `long` **不是** JS 原生 `bigint`，而是 `big-integer` 库的 BigInteger 实例
+   （`telegram/tl/api.d.ts` 里写的就是 `type long = BigInteger`）。它 `typeof` 是 `"object"`、
+   身上没有 `channelId` / `id` 字段、只有 `toString()`。而 `idString()` 只认 `bigint | number | string`，
+   于是帖子的 `replies.channel_id`、线程首条的 `peerId.channelId`、`chats[].id`、
+   以及 `getFullChannel` 的 `linked_chat_id` **全被解析成 null**：
+   - 帖子明明 90 条评论 → 报「有评论但没给 channel_id」；
+   - `getReplies` 明明返回了 1 条消息和 1 个讨论组 → 报「未返回讨论组」；
+   - `getFullChannel` 明明有 `linked_chat_id` → 报「该频道没有关联讨论组」。
+   兜底路加得再多也没用，因为每条路拿到的数据都被同一个函数丢掉了。
+2. **修法**：`idString()` 先往里钻 `channelId / chatId / userId / id`，再兜底 `String(obj)` 并校验
+   是不是整数串（`"[object Object]"` 会被过滤掉），`-100` 前缀与负号照旧归一。
+   另外库里没存频道 hash 时，用刚解析出的实体自带 hash 补一个 `InputChannel`，让第一条路更稳。
+3. **自检补真数据**：新增两条用例**用真的 `big-integer`** 造 `replies` / `peerId` / `chats` / `linkedChatId`。
+   之前自检里用原生 `BigInt` 造数据，正好绕开了这个 bug —— 所以自检一直是绿的、线上一直是挂的
+   （345 → 347 项）。
+
+> 1.3.10 的 `getFullChannel` 领先路、1.3.9 的 `group_add` 修复（只留 `devices: /dev/dri:/dev/dri`）、
+> 1.3.8 的 `access_hash` 存库、更早的媒体库界面重做 / 显卡硬件转码 / HEVC 直连等全部保留。
 
 ---
 
@@ -235,7 +241,7 @@ downloads/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布的镜像 |
-| `v1.3.10` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.11` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push 到 `main` 只跑构建与冒烟测试（健康检查、两个挂载目录可写、NAS 属主场景、内置 ffmpeg），
 **不发布镜像**；打 tag 才构建 amd64 + arm64 并推送。

@@ -29,19 +29,38 @@ export interface DiscussionGroup {
 
 type AnyRecord = Record<string, unknown>;
 
-/** GramJS 里 id 可能是 bigint / number / string，也常包在 PeerChannel 里 */
+/** 去掉 -100 / 负号，只留裸 ID；非整数返回 null */
+function bareId(text: string): string | null {
+  const trimmed = text.trim();
+  if (!/^-?\d+$/.test(trimmed)) return null;
+  return trimmed.replace(/^-100/, "").replace(/^-/, "");
+}
+
+/**
+ * 把 GramJS 的 ID 统一成「裸 ID 十进制字符串」。
+ *
+ * 注意 gramjs 里的 `long` **不是** JS 原生 bigint，而是 `big-integer` 的
+ * BigInteger 实例（`tl/api.d.ts` 里 `type long = BigInteger`）：
+ * `typeof` 是 `"object"`，身上没有 `channelId` / `id` 字段，只有 `toString()`。
+ * 早先只认 bigint / number / string，于是 `replies.channelId`、
+ * `peerId.channelId`、`chat.id` 一律解析成 null —— 评论区 6 条路全部「看起来没数据」，
+ * 就是这个原因（1.3.10 报告：replies 明明 comments=true 90 条却说没有 channel_id）。
+ */
 export function idString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (typeof value === "bigint" || typeof value === "number") {
-    return String(value).replace(/^-100/, "").replace(/^-/, "");
-  }
-  if (typeof value === "string") {
-    const text = value.trim();
-    return /^-?\d+$/.test(text) ? text.replace(/^-100/, "").replace(/^-/, "") : null;
-  }
+  if (typeof value === "bigint" || typeof value === "number") return bareId(String(value));
+  if (typeof value === "string") return bareId(value);
   if (typeof value === "object") {
     const obj = value as AnyRecord;
-    return idString(obj.channelId ?? obj.chatId ?? obj.id ?? null);
+    // PeerChannel / PeerChat / { id } 这类容器：先往里钻一层
+    const nested = obj.channelId ?? obj.chatId ?? obj.userId ?? obj.id;
+    if (nested !== undefined && nested !== null) return idString(nested);
+    // BigInteger（以及别的「数值型对象」）：只能靠 toString()，"[object Object]" 会被过滤掉
+    try {
+      return bareId(String(obj));
+    } catch {
+      return null;
+    }
   }
   return null;
 }

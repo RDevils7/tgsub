@@ -154,7 +154,7 @@ async function resolveCommentTarget(parsed: ParsedLink, postTarget: Target): Pro
   if (!postId) throw new Error("评论链接缺少帖子 ID");
 
   const client = await getClient();
-  // 直接把频道的 entityKey / access_hash 交给定位器：它会按 5 条路依次兜底，
+  // 直接把频道的 entityKey / access_hash 交给定位器：它会按 6 条路依次兜底，
   // 不再依赖单一路径（getDiscussionMessage 偶发返回空，是 1.3.7 里那条
   // 「这个帖子没有开启评论」报错的真实原因）。
   const group = await resolveDiscussionGroup(
