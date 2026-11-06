@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import bigInt from "big-integer";
 import { matchText } from "../server/src/match";
-import { extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
+import { albumIdWindow, extractMedia, groupIdOf, messageText, targetRelativePath } from "../server/src/tg/media";
 import { sanitizeSegment, splitKeywords, toNumber } from "../server/src/utils";
 import {
   deriveSeriesFromText,
@@ -97,6 +97,7 @@ import { parseCookie, parseCookies } from "../server/src/auth/cookie";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
+import { HIT_LINE_LIMIT, hitLine, hitLines, hitSummaryLine, type HitLike } from "../server/src/tg/hitplan";
 import {
   diskLevel,
   ellipsizePath,
@@ -258,6 +259,17 @@ check("匹配文本包含正文与文件名", () => {
 check("相册分组 id 提取", () => {
   assert.equal(groupIdOf({ id: 1, groupedId: "123456" }), "123456");
   assert.equal(groupIdOf({ id: 1 }), null);
+});
+check("相册窗口按 messageId ± 9 点名取 ID", () => {
+  const ids = albumIdWindow(55488);
+  assert.equal(ids.length, 19);
+  assert.equal(ids[0], 55479);
+  assert.equal(ids[ids.length - 1], 55497);
+  assert.ok(ids.includes(55488));
+  // 消息 ID 很小的时候不能出现 0 / 负数
+  assert.deepEqual(albumIdWindow(3), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  // 一条相册最多 10 条：±9 一定覆盖整组
+  assert.ok(albumIdWindow(100, 9).length >= 10);
 });
 
 console.log("\n路径与工具");
@@ -3912,6 +3924,59 @@ async function hwDecodeChecks(): Promise<void> {
   });
 }
 
+function hitPlanChecks(): void {
+  const hit = (over: Partial<HitLike> = {}): HitLike => ({
+    title: "美人局",
+    sub: "短剧4K",
+    keyword: "4K",
+    files: 6,
+    channel: "某频道",
+    ...over,
+  });
+
+  check("订阅命中通知：明细带名字、文件数、订阅名与频道", () => {
+    const line = hitLine(hit());
+    assert.ok(line.startsWith("· 美人局"));
+    assert.ok(line.includes("6 个文件"));
+    assert.ok(line.includes("🏷 短剧4K"));
+    assert.ok(line.includes("📡 某频道"));
+    // 单文件不写「1 个文件」，避免每行都是废话
+    assert.equal(hitLine(hit({ files: 1 })).includes("个文件"), false);
+  });
+
+  check("订阅命中通知：没有订阅名时退回关键词，两者都没有就不挂号", () => {
+    assert.ok(hitLine(hit({ sub: null })).includes("🔎 4K"));
+    const bare = hitLine(hit({ sub: null, keyword: null }));
+    assert.equal(bare.includes("🏷"), false);
+    assert.equal(bare.includes("🔎"), false);
+  });
+
+  check("订阅命中通知：频道名 / 剧名里的尖括号必须转义（否则 Telegram 整条消息解析失败）", () => {
+    const line = hitLine(hit({ title: "A<B>C&D", channel: "<频道>" }));
+    assert.ok(line.includes("A&lt;B&gt;C&amp;D"));
+    assert.ok(line.includes("&lt;频道&gt;"));
+    assert.equal(line.includes("<频道>"), false);
+  });
+
+  check("订阅命中通知：超过上限折成「还有 N 条」", () => {
+    const many = Array.from({ length: HIT_LINE_LIMIT + 3 }, (_, i) =>
+      hit({ title: `剧${i + 1}` }),
+    );
+    const lines = hitLines(many);
+    assert.equal(lines.length, HIT_LINE_LIMIT + 1);
+    assert.ok(lines[lines.length - 1].includes("还有 3 条"));
+    assert.equal(hitLines([]).length, 0);
+  });
+
+  check("订阅命中通知：汇总句只数文件与去重后的订阅", () => {
+    const hits = [hit(), hit({ title: "妈妈我爱你", sub: "短剧4K" }), hit({ title: "别的", sub: null, keyword: "教程" })];
+    assert.equal(hitSummaryLine(hits, 8), "新入队 8 个文件 · 订阅命中 1 条");
+    // 全都没有订阅名：退回「命中 N 条」，不能凭空编出订阅
+    assert.equal(hitSummaryLine([hit({ sub: null })], 1), "新入队 1 个文件 · 命中 1 条");
+    assert.equal(hitSummaryLine([], 3), "新入队 3 个文件");
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -3943,6 +4008,7 @@ async function main(): Promise<void> {
     ["概览状态汇总用例", () => overviewChecks()],
     ["NFO 表单编辑用例", () => nfoChecks()],
     ["NFO 生成追溯用例", () => nfoTraceChecks()],
+    ["订阅命中通知用例", () => hitPlanChecks()],
   ];
   for (const [name, run] of suites) {
     try {

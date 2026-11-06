@@ -2,6 +2,14 @@ import path from "node:path";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Telegram HTML 模式转义：标题 / 文件名里带 < > & 会破坏整条消息的解析 */
+export function escapeHtml(input: unknown): string {
+  return String(input ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 /** 把任意 bigint / big-integer 转成 number */
 export function toNumber(value: unknown): number {
   if (value === null || value === undefined) return 0;

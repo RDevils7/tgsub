@@ -100,6 +100,20 @@ const stmtChannel = db.prepare<
   "SELECT username, tg_id, title FROM channels WHERE id = ?",
 );
 
+/**
+ * 一条消息是哪条订阅命中下来的（订阅名 + 关键词）。
+ *
+ * 键与下载记录一致：相册用 grouped_id，单条消息退回 message_id ——
+ * grouped_id 是 TEXT、message_id 是 INTEGER，必须统一转成 TEXT 再比，
+ * 否则单条消息这边用整数、参数是字符串，SQLite 不做隐式转换，永远查不到。
+ */
+const stmtLogHit = db.prepare<
+  [number, string],
+  { subscription_name: string | null; matched_keyword: string | null }
+>(
+  "SELECT subscription_name, matched_keyword FROM message_logs WHERE channel_id = ? AND COALESCE(NULLIF(grouped_id, ''), CAST(message_id AS TEXT)) = ? LIMIT 1",
+);
+
 /** 运行中的实时进度（只在内存里）：速度靠采样相邻两次回调算，落库只是兜底 */
 export interface LiveProgress {
   startedAt: number;
@@ -338,6 +352,9 @@ class DownloadQueue {
 
       const channel = stmtChannel.get(channelId);
       const link = channel ? channelMessageLink(channel, messageId) : "";
+      // 这条消息是哪条订阅命中下来的？监控记录里存着订阅名与关键词，
+      // 通知带上它，用户才知道「这集为什么会被自动下」。
+      const hit = stmtLogHit.get(channelId, key);
       const seen = new Set<string>();
       const preview: string[] = [];
       for (const r of done) {
@@ -350,6 +367,12 @@ class DownloadQueue {
 
       const lines = ["✅ <b>下载完成</b>"];
       lines.push(`📡 ${esc(channel?.title ?? "频道")}`);
+      if (hit?.subscription_name) {
+        const keyword = hit.matched_keyword ? `（关键词 ${esc(hit.matched_keyword)}）` : "";
+        lines.push(`🏷 订阅：${esc(hit.subscription_name)}${keyword}`);
+      } else if (hit?.matched_keyword) {
+        lines.push(`🏷 关键词：${esc(hit.matched_keyword)}`);
+      }
       lines.push(`📦 共 ${done.length} 个文件${failed.length ? ` · ⚠️ ${failed.length} 个失败` : ""}`);
       if (link) lines.push(`🔗 ${esc(link)}`);
       if (preview.length) {

@@ -1,11 +1,13 @@
 import { db, getSettings } from "../db";
 import { logger } from "../logger";
+import { escapeHtml } from "../utils";
 import { Channel } from "../types";
 import { getClient, hasSession } from "./client";
 import { downloader } from "./downloader";
 import { groupIdOf } from "./media";
 import { channelEntityKey } from "./entity";
 import { enqueueGroup } from "./enqueue";
+import { hitLines, hitSummaryLine } from "./hitplan";
 import { notify } from "./notify";
 
 /**
@@ -38,12 +40,27 @@ const stmtTouchChannel = db.prepare<[number, number | null, number]>(
 const stmtChannelError = db.prepare<[string, number, number]>(
   "UPDATE channels SET last_error = ?, last_scan_at = ? WHERE id = ?",
 );
+/** 本次扫描真正入了队的条目：订阅命中后自动下载的那一条消息 */
+export interface ScanHit {
+  /** 「叫什么」——解析出的剧名 / 兜底文件夹名，认不出时是文件原名 */
+  title: string;
+  /** 命中的订阅名；关键词直取（没有订阅）时为 null */
+  sub: string | null;
+  keyword: string | null;
+  /** 本次新入队的文件数（相册一条消息可能好几个） */
+  files: number;
+  /** 所属频道标题，通知里一起带上，才知道是从哪儿下的 */
+  channel: string;
+}
+
 export interface ScanResult {
   channelId: number;
   scanned: number;
   matched: number;
   queued: number;
   skipped: number;
+  /** 新入队的条目明细（带名字），给机器人通知用 */
+  hits?: ScanHit[];
   error?: string;
 }
 
@@ -186,6 +203,8 @@ async function scanChannelOnce(
   let matched = 0;
   let queued = 0;
   let skipped = 0;
+  /** 真正入队的条目明细：机器人通知靠它把「下了什么」写清楚 */
+  const hits: ScanHit[] = [];
 
   try {
     const entity = await client.getEntity(channelEntityKey(channel) as never);
@@ -225,6 +244,16 @@ async function scanChannelOnce(
         queued += result.queued;
         skipped += result.skipped;
         pendingIds.push(...result.pendingIds);
+        // 只记「真的入队了文件」的条目：命中但全被大小限制过滤掉的不该出现在通知里
+        if (fresh && result.queued > 0) {
+          hits.push({
+            title: result.title ?? result.saveName ?? `消息 #${result.messageId}`,
+            sub: result.subName,
+            keyword: result.keyword,
+            files: result.queued,
+            channel: channel.title,
+          });
+        }
       };
 
       for (const group of freshGroups) handleGroup(group, true);
@@ -240,13 +269,13 @@ async function scanChannelOnce(
     stmtFinishRun.run(scanned, matched, "ok", null, Date.now(), runId);
 
     logger.info({ channel: channel.title, scanned, matched, queued, skipped }, "频道扫描完成");
-    return { channelId, scanned, matched, queued, skipped };
+    return { channelId, scanned, matched, queued, skipped, hits };
   } catch (err) {
     const message = (err as Error)?.message || "扫描失败";
     stmtChannelError.run(message.slice(0, 500), Date.now(), channel.id);
     stmtFinishRun.run(scanned, matched, "error", message.slice(0, 500), Date.now(), runId);
     logger.error({ channel: channel.title, err: message }, "频道扫描失败");
-    return { channelId, scanned, matched, queued, skipped, error: message };
+    return { channelId, scanned, matched, queued, skipped, hits, error: message };
   }
 }
 
@@ -281,11 +310,14 @@ export async function scanAll(reason = "scheduled"): Promise<ScanResult[]> {
   if (reason === "scheduled") {
     const queued = results.reduce((sum, r) => sum + r.queued, 0);
     const failed = results.filter((r) => r.error);
+    const hits = results.flatMap((r) => r.hits ?? []);
     if (queued > 0 || failed.length) {
       const lines = [`📡 <b>自动扫描完成</b>`];
-      if (queued > 0) lines.push(`新入队 ${queued} 个文件`);
+      // 带着名字：下的是什么、哪条订阅触发的、来自哪个频道
+      if (queued > 0) lines.push(hitSummaryLine(hits, queued));
+      if (hits.length) lines.push("", ...hitLines(hits));
       for (const r of failed.slice(0, 3)) {
-        lines.push(`❌ ${r.error?.slice(0, 120) ?? "扫描失败"}`);
+        lines.push(`❌ ${escapeHtml(r.error?.slice(0, 120) ?? "扫描失败")}`);
       }
       await notify(lines.join("\n"));
     }

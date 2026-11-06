@@ -12,6 +12,7 @@ import { Channel, PLATFORM_LABEL, Subscription } from "../types";
 import { deriveName } from "../utils";
 import { currentProxy, getAppCredentials, getAuthState, resolveChannel } from "./client";
 import { getSchedulerState, isScanning, scanAll, scanChannel, type ScanResult } from "./scanner";
+import { hitLines } from "./hitplan";
 import { downloadFromLink, downloadFromForward, extractTelegramLinks, type DirectResult } from "./direct";
 import { downloader } from "./downloader";
 import { setNotifyCard, setNotifySender } from "./notify";
@@ -611,8 +612,11 @@ function summarize(results: ScanResult[], singleTitle?: string): string {
     return `✅ ${esc(title)}：扫到 ${r.scanned} 条 · 命中 ${r.matched} · 新入队 ${r.queued}${extra}`;
   });
   const queued = results.reduce((sum, r) => sum + r.queued, 0);
+  // 命中并下载的条目带名字：不然只知道「下了 3 个文件」，不知道下的是什么
+  const hits = results.flatMap((r) => r.hits ?? []);
+  const detail = hits.length ? `\n\n${hitLines(hits, 5).join("\n")}` : "";
   const tail = queued > 0 ? "\n\n新任务已进入下载队列，稍后可用 /tasks 查看进度" : "";
-  return `📡 <b>扫描完成</b>\n${lines.join("\n")}${tail}`;
+  return `📡 <b>扫描完成</b>\n${lines.join("\n")}${detail}${tail}`;
 }
 
 function buildStatus(account: string): string {

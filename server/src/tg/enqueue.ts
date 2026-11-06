@@ -47,6 +47,15 @@ export interface GroupEnqueueResult {
   saveDir: string | null;
   saveName: string | null;
   pendingIds: number[];
+  /**
+   * 这条消息「叫什么」：解析出的剧名（也就是落盘文件夹名），认不出剧名时退回兜底文件夹名。
+   * 都没有时退回第一个待下载文件的原名。机器人推送把它写进通知，用户才知道下的是什么。
+   */
+  title: string | null;
+  /** 命中的订阅名；手动链接 / 关键词直取时为 null */
+  subName: string | null;
+  /** 命中的关键词；手动链接为 null */
+  keyword: string | null;
 }
 
 const stmtInsertDownload = db.prepare(`
@@ -211,6 +220,20 @@ const runGroup = db.transaction(
       .slice(0, 20)
       .map((entry) => ({ kind: entry.info.kind, name: entry.info.fileName, size: entry.info.size }));
 
+    const hitKeyword = hit?.keyword ?? null;
+    const hitSubId = hit?.subscriptionId ?? null;
+    const hitSubName = hit?.subscriptionName ?? null;
+
+    // 「这条消息叫什么」：剧名（落盘文件夹）优先，其次是兜底文件夹名，
+    // 都没有（文档 / 纯图集）时退回第一个文件的原名 —— 通知里总得有个名字
+    const firstNamedIndex = naming.findIndex((n) => !n.skip);
+    const firstNamed = firstNamedIndex >= 0 ? naming[firstNamedIndex] : undefined;
+    const displayTitle =
+      firstNamed?.dir ??
+      firstNamed?.name ??
+      (firstNamedIndex >= 0 ? media[firstNamedIndex]?.info.fileName : null) ??
+      null;
+
     const result: GroupEnqueueResult = {
       messageId,
       matched: false,
@@ -219,14 +242,13 @@ const runGroup = db.transaction(
       skipped: 0,
       existing: 0,
       hasVideo: hasVideo,
-      saveDir: diskDir(naming.find((n) => !n.skip)?.dir ?? null),
-      saveName: naming.find((n) => !n.skip)?.name ?? null,
+      saveDir: diskDir(firstNamed?.dir ?? null),
+      saveName: firstNamed?.name ?? null,
       pendingIds: [],
+      title: displayTitle,
+      subName: hitSubName,
+      keyword: hitKeyword,
     };
-
-    const hitKeyword = hit?.keyword ?? null;
-    const hitSubId = hit?.subscriptionId ?? null;
-    const hitSubName = hit?.subscriptionName ?? null;
 
     const log = (kind: string): void => {
       if (opts.writeLog === false) return;

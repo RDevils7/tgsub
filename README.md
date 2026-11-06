@@ -4,12 +4,12 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.11-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.12-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
 
-> **版本状态**：当前最新正式版 **1.3.11**（镜像 `rdevils7/tgsub:v1.3.11` 与 `latest`）。
+> **版本状态**：当前最新正式版 **1.3.12**（镜像 `rdevils7/tgsub:v1.3.12` 与 `latest`）。
 > 本页只讲「怎么部署起来用」；全部配置项、HTTP 接口、开发自检与排错见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
@@ -20,32 +20,36 @@
 
 ---
 
-## 本版更新（1.3.11）
+## 本版更新（1.3.12）
 
-**评论区链接终于能下载了 —— 卡了三个版本的根因是「ID 根本不是数字」。**
+**两个「看着像 Telegram 的锅、其实是自己算错」的毛病：评论区相册只下 1 个、机器人通知不说是啥。**
 
-上一版（1.3.10）的报错里有一句自相矛盾的话：`帖子 replies 无 channel_id（comments=true, 90 条）`，
-同时 `getReplies 未返回讨论组（messages=1, chats=1）`。评论条数读到了、线程消息和 chat 也都回来了，
-却一个 ID 都认不出来 —— 问题不在 RPC 顺序，在解析。
+1. **评论是 6 条视频的相册，只下来 1 条**
+   判断出是相册后，代码用 `messages.getHistory({ offsetId: 0, minId, maxId })` 去取整组。
+   但 **`offset_id` 是游标位置**，给 `0` 等于「从最新一条开始往前翻」，我们要的
+   `messageId ± 9` 那个窗口被整个跳过，返回空 → 兜底成手里那一条。
+   现在先用 `channels.getMessages` **点名要 `messageId ± 9`** 这 19 个 ID（相册一条最多 10 个、
+   ID 连续），按 `groupedId` 过滤排序；区间查询降为兜底，`offsetId` 改成窗口上界。
+   `MessageEmpty`（被删的 ID）自动剔除，取全了日志会打「相册整组已取全（count=6）」。
+2. **订阅命中的通知带上名字**
+   定时扫描以前只推一句「新入队 6 个文件」，看不出**下的是什么**、**哪条订阅触发的**、**哪个频道**：
+   ```
+   📡 自动扫描完成
+   新入队 10 个文件 · 订阅命中 1 条
 
-1. **根因**：gramjs 的 `long` **不是** JS 原生 `bigint`，而是 `big-integer` 库的 BigInteger 实例
-   （`telegram/tl/api.d.ts` 里写的就是 `type long = BigInteger`）。它 `typeof` 是 `"object"`、
-   身上没有 `channelId` / `id` 字段、只有 `toString()`。而 `idString()` 只认 `bigint | number | string`，
-   于是帖子的 `replies.channel_id`、线程首条的 `peerId.channelId`、`chats[].id`、
-   以及 `getFullChannel` 的 `linked_chat_id` **全被解析成 null**：
-   - 帖子明明 90 条评论 → 报「有评论但没给 channel_id」；
-   - `getReplies` 明明返回了 1 条消息和 1 个讨论组 → 报「未返回讨论组」；
-   - `getFullChannel` 明明有 `linked_chat_id` → 报「该频道没有关联讨论组」。
-   兜底路加得再多也没用，因为每条路拿到的数据都被同一个函数丢掉了。
-2. **修法**：`idString()` 先往里钻 `channelId / chatId / userId / id`，再兜底 `String(obj)` 并校验
-   是不是整数串（`"[object Object]"` 会被过滤掉），`-100` 前缀与负号照旧归一。
-   另外库里没存频道 hash 时，用刚解析出的实体自带 hash 补一个 `InputChannel`，让第一条路更稳。
-3. **自检补真数据**：新增两条用例**用真的 `big-integer`** 造 `replies` / `peerId` / `chats` / `linkedChatId`。
-   之前自检里用原生 `BigInt` 造数据，正好绕开了这个 bug —— 所以自检一直是绿的、线上一直是挂的
-   （345 → 347 项）。
+   · 美人局 · 6 个文件 · 🏷 短剧4K · 📡 短剧资源站
+   · AI 教程合集 · 3 个文件 · 🔎 教程 · 📡 课程频道
+   ```
+   名字取解析出的剧名（也就是落盘文件夹名），认不出时退到文件名；单文件不写「1 个文件」，
+   超过 8 条折成「…还有 N 条」。下载完成卡片也多一行 `🏷 订阅：短剧4K（关键词 4K）`，
+   手动链接没有订阅就不加这行。手点 `/scan` 的回复同样列明细。
+   顺带修掉一个会炸的隐患：频道名 / 剧名里带 `<` `>` 会破坏 Telegram 的 HTML 解析，现在统一转义。
+3. **自检补真数据**：新增 5 项通知文案用例 + 相册窗口用例，合计 **353 项**；
+   另外这轮的相册用例顺手补了 `albumIdWindow` 的边界检查。
 
-> 1.3.10 的 `getFullChannel` 领先路、1.3.9 的 `group_add` 修复（只留 `devices: /dev/dri:/dev/dri`）、
-> 1.3.8 的 `access_hash` 存库、更早的媒体库界面重做 / 显卡硬件转码 / HEVC 直连等全部保留。
+> 1.3.11 的评论区 ID 解析修复（BigInteger）、1.3.10 的 `getFullChannel` 领先路、
+> 1.3.9 的 `group_add` 修复、1.3.8 的 `access_hash` 存库，以及更早的媒体库界面重做 /
+> 显卡硬件转码 / HEVC 直连 / 合并改名 / 元数据分区等全部保留。
 
 ---
 
@@ -241,7 +245,7 @@ downloads/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布的镜像 |
-| `v1.3.11` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.12` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push 到 `main` 只跑构建与冒烟测试（健康检查、两个挂载目录可写、NAS 属主场景、内置 ffmpeg），
 **不发布镜像**；打 tag 才构建 amd64 + arm64 并推送。

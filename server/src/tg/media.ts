@@ -252,7 +252,10 @@ async function fetchRange(
       const res = await client.invoke(
         new Api.messages.GetHistory({
           peer,
-          offsetId: 0,
+          // offset_id 是「游标位置」：给 0 服务器会从**最新一条**开始取，
+          // 我们想要的区间就被整个跳过去了（相册只下来一条就是这个原因）。
+          // 给它窗口上界，游标正好落在区间顶部，再靠 maxId / minId 收口。
+          offsetId: maxId,
           offsetDate: 0,
           addOffset: 0,
           limit,
@@ -272,6 +275,22 @@ async function fetchRange(
   return (await client.getMessages(entity as never, { minId, maxId, limit })) as unknown as Array<
     Record<string, unknown>
   >;
+}
+
+/**
+ * 相册窗口的 ID 列表。
+ *
+ * 相册（media group）的每一条都是**独立的连续消息**，一条相册最多 10 条，
+ * 所以 messageId ± 9 一定能覆盖整组；中间被删掉的 ID 会以 MessageEmpty 返回，
+ * 调用方过滤即可。用「点名取一批 ID」而不是区间查询，是因为后者的
+ * offset_id / max_id / min_id 语义容易踩空（见 fetchRange 的注释）。
+ */
+export function albumIdWindow(messageId: number, span = 9): number[] {
+  const ids: number[] = [];
+  for (let id = messageId - span; id <= messageId + span; id += 1) {
+    if (id > 0) ids.push(id);
+  }
+  return ids;
 }
 
 /**
@@ -295,10 +314,44 @@ export async function fetchMessageGroup(
   const groupId = groupIdOf(first);
   if (!groupId) return [first];
 
-  const around = await fetchRange(entityKey, accessHash, Math.max(0, messageId - 9), messageId + 10, 20);
-  const sameGroup = around
-    .filter((m) => groupIdOf(m) === groupId)
-    .sort((a, b) => Number((a as { id: number }).id) - Number((b as { id: number }).id));
+  const sameGroupOf = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
+    rows
+      .filter((m) => m && m.className !== "MessageEmpty" && groupIdOf(m) === groupId)
+      .sort((a, b) => Number((a as { id: number }).id) - Number((b as { id: number }).id));
+
+  // 1) 点名取窗口：相册条目在同一个 peer 里 ID 连续（最多 10 条），
+  //    直接把 messageId ± 9 这些 ID 一起要回来，比区间查询稳得多。
+  //    1.3.12 之前只走 messages.getHistory，而 offset_id 给 0 时服务器从
+  //    最新一条开始取，窗口被跳过 —— 6 个视频只下来 1 个就是这么来的。
+  let sameGroup: Array<Record<string, unknown>> = [];
+  try {
+    sameGroup = sameGroupOf(await fetchMessagesById(entityKey, accessHash, albumIdWindow(messageId)));
+  } catch (err) {
+    logger.warn({ entityKey, messageId, err: errText(err) }, "按 ID 取相册窗口失败，改用区间查询");
+  }
+
+  // 2) 区间查询兜底（offsetId 已按窗口上界修正）
+  if (sameGroup.length <= 1) {
+    try {
+      const around = await fetchRange(entityKey, accessHash, Math.max(0, messageId - 9), messageId + 10, 20);
+      const fromRange = sameGroupOf(around);
+      if (fromRange.length > sameGroup.length) sameGroup = fromRange;
+    } catch (err) {
+      logger.warn({ entityKey, messageId, err: errText(err) }, "区间取相册失败");
+    }
+  }
+
+  if (sameGroup.length > 1) {
+    logger.info(
+      { entityKey, messageId, groupedId: groupId, count: sameGroup.length },
+      "相册整组已取全",
+    );
+  } else {
+    logger.warn(
+      { entityKey, messageId, groupedId: groupId },
+      "相册只取到一条（窗口与区间都没命中，可能是相册已删或该条本身就不在相册里）",
+    );
+  }
   return sameGroup.length ? sameGroup : [first];
 }
 
