@@ -278,7 +278,7 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 媒体库 HEVC 标「播不了」/ 点了黑屏 | 有核显：按「部署 → 硬件转码」加 `devices` 并重启；没有核显：打开「HEVC 直连」用 Safari / Edge 播 |
 | 显示「无硬解」、概览里「硬件解码」是红的 | 没映射 `/dev/dri`、或宿主机没装 Intel 驱动；概览里那行会写具体原因 |
 | 创建容器报 `unable to find group render` | compose 里写了 `group_add: ["video","render"]`，而 NAS 的组文件没有 `render` 组。**删掉整段 group_add**，只留 `devices: ["/dev/dri:/dev/dri"]`（1.3.9 起属组由容器内自动处理） |
-| 容器是 running 但网页打不开 | ① `docker port tgsub` 看有没有 `6789/tcp -> 0.0.0.0:6789`；② `docker exec tgsub wget -qO- http://127.0.0.1:6789/api/health`，有 JSON 返回说明服务正常，问题在端口映射 / NAS 防火墙 / 反向代理；③ 访问 `http://NAS地址:6789`（不是 https），换浏览器无痕窗口再试 |
+| 容器是 running 但网页打不开 | ① `docker port tgsub` 看有没有 `6789/tcp -> 0.0.0.0:6789`；② `docker exec tgsub node -e "fetch('http://127.0.0.1:6789/api/health').then(r=>r.text()).then(console.log)"`，有 JSON 返回说明服务正常，问题在端口映射 / NAS 防火墙 / 反向代理（镜像里没有 curl / wget，只能用 node）；③ 访问 `http://NAS地址:6789`（不是 https），换浏览器无痕窗口再试 |
 | 改名 / 合并后顺序不对 | 顺序按解析出的集号排，解析不出的垫后按文件名自然序；执行前有「旧名 → 新名」预览 |
 
 更多报错与细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
