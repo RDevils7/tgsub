@@ -1100,7 +1100,7 @@ mp4/h264 直出、mkv/ts/avi 换封装、HEVC 默认判为不支持、HEVC 强�
 ---
 
 
-## 帖子评论区链接下载（1.3.6 / 1.3.8 免加群）
+## 帖子评论区链接下载（1.3.6 / 1.3.10 免加群）
 
 手动下载 / 机器人现在能接 **帖子评论区里的单条评论链接**：
 
@@ -1123,7 +1123,7 @@ https://t.me/c/1234567890/3516?comment=55488
 | --- | --- |
 | `tg/link.ts`（纯函数） | 解析 `?comment=`：`postId` = 路径里的帖子 ID、`commentId` = 评论 ID；`isCommentLink()`、`extractTelegramLinks()` 原样保留 query。不 import db/env，自检可直接调 |
 | `tg/discussionplan.ts`（纯函数） | `pickDiscussionGroup()` 从 `messages.GetDiscussionMessage` 的返回里挑讨论组：优先 `messages[0].peerId`，若指向频道自身则回退到 chats 里的 megagroup；同时带出该 chat 的 **`accessHash`**（`hashString()` 归一化成十进制串）。`postReplyInfo()` 读帖子自己的 `replies.comments` / `replies.channel_id`；`chatInfoOf()` 按裸 ID 从上任意带 `chats` 的返回里取 hash/username；`groupsFromChats()` 摊开对话框列表；`threadGroupId()` 取线程首条消息的 peer；`validId()` 把 `0` 当空。`discussionEntityKey()` 有 username 用 username，否则 `-100<id>` |
-| `tg/discussion.ts` | `resolveDiscussionGroup()` **五条路依次兜底**（见下），把定位结果连同 access_hash 一起返回；RPC 错误翻成中文并附诊断串 |
+| `tg/discussion.ts` | `resolveDiscussionGroup()` **六条路依次兜底**（见下），把定位结果连同 access_hash 一起返回；RPC 错误翻成中文并附诊断串 |
 | `tg/direct.ts` | `downloadFromLink()` 遇评论链接 → `resolveCommentTarget()` → `enqueueFromTarget(target, commentId)` |
 
 **为什么把讨论组 ID 存进 downloads 表**：`fetchMessageGroup()`、`enqueueGroup()` 和
@@ -1134,15 +1134,23 @@ https://t.me/c/1234567890/3516?comment=55488
 
 **为什么只靠 `GetDiscussionMessage` 不行（1.3.8 复盘）**：1.3.7 里这条链只有一条路。实际对这个账号，
 它**稳定返回空**（`messages: []`、`chats: []`），界面就报「这个帖子没有开启评论，或当前账号不在关联讨论组里」，
-三条链接全挂。所以 1.3.8 改成五条路，任何一条通就能下：
+三条链接全挂。所以 1.3.8 改成五条路（1.3.10 又补了 `getFullChannel` 这条最该先走的路，共六条），任何一条通就能下：
 
 | # | 策略 | 拿到的信息 |
 | --- | --- | --- |
+| 0 | **`channels.getFullChannel(频道)`** → `ChannelFull.linked_chat_id`（1.3.10 新增，最先走） | 讨论组 ID +（`chats` 里带的）access_hash |
 | 1 | `messages.getDiscussionMessage`（官方说明无需加群），**空结果重试一次**（FLOOD_WAIT 会等） | 讨论组 ID + access_hash |
 | 2 | 帖子自己的 `replies.channel_id`（`getMessages` 取帖子即可，不看讨论组） | 讨论组 ID |
 | 3 | `messages.getReplies(peer=频道, msg_id=帖子)` —— 客户端拉评论走的就是它 | 线程消息 + 讨论组 ID + **chats 里的 access_hash** |
 | 4 | 对话框列表（`messages.getDialogs`，命中才缓存 10 分钟）—— 账号其实加过群时 hash 就在里面 | access_hash |
 | 5 | `getEntity("-100<id>")` —— 进程内缓存 / 公开组 | access_hash |
+
+**为什么把 `getFullChannel` 排到第 0 位（1.3.10 复盘）**：`linked_chat_id` 是**频道级设置**，
+写死在 `ChannelFull` 里，公开频道对任何已登录账号都可读 —— 不需要加入讨论组，也不依赖
+`getDiscussionMessage` 对「私密群 + 非成员」返回空的那种行为。1.3.9 的报错只留下
+「getDiscussionMessage 两次返回空」，后面的路做了什么完全看不见；1.3.10 同时把每一步的诊断补齐
+（帖子 `replies` 有没有 `channel_id`、`getReplies` 返回了几条消息几个 chat、`getFullChannel`
+有没有关联讨论组），失败时能直接分辨是「没开评论」「频道没关联讨论组」还是「私密群 + 不在群里」。
 
 任一策略拿到 ID 但没 hash 时，后面的策略只补 hash，不会覆盖已确认的 ID。**全部失败**才报错，
 报错文案先写结论再附「诊断：…」，把每一步的 RPC 结果都列出来（前端提交记录只留 300 字，所以结论在前）。
@@ -1715,12 +1723,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.9`（镜像 `rdevils7/tgsub:v1.3.9` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.10-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.10`（镜像 `rdevils7/tgsub:v1.3.10` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.11-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.10-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.10`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.10` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.11-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.11-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.11`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.11` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.12-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

@@ -85,6 +85,7 @@ import {
   groupsFromChats,
   hashString,
   idString,
+  linkedGroupId,
   pickDiscussionGroup,
   postReplyInfo,
   threadGroupId,
@@ -2841,6 +2842,20 @@ function telegramLinkChecks(): void {
     assert.equal(threadGroupId(payload, "1001"), "2002");
     // 指回频道自己就丢掉
     assert.equal(threadGroupId({ messages: [{ peerId: { channelId: BigInt("1001") } }] }, "1001"), null);
+  });
+
+  check("getFullChannel 的 linked_chat_id 能取出讨论组（免加群的主路径）", () => {
+    const payload = {
+      fullChat: { id: BigInt("1001"), linkedChatId: BigInt("2002") },
+      chats: [{ id: BigInt("2002"), megagroup: true, title: "评论组", accessHash: BigInt("77") }],
+    };
+    assert.equal(linkedGroupId(payload), "2002");
+    // 频道没开评论 / 没关联讨论组时是 0
+    assert.equal(linkedGroupId({ fullChat: { linkedChatId: 0 } }), null);
+    assert.equal(linkedGroupId({ fullChat: {} }), null);
+    assert.equal(linkedGroupId({}), null);
+    // 同一份返回里的 chats 还带着 hash，一步就能补上
+    assert.equal(chatInfoOf(payload, "2002")?.accessHash, "77");
   });
 
   check("对话框列表里排除频道自己和普通用户", () => {

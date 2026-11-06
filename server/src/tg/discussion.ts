@@ -2,12 +2,13 @@ import bigInt from "big-integer";
 import { Api, TelegramClient } from "telegram";
 import { logger } from "../logger";
 import { normalizeEntityKey } from "./entity";
-import { inputPeerOf } from "./media";
+import { inputChannelOf, inputPeerOf } from "./media";
 import {
   chatInfoOf,
   discussionEntityKey,
   groupsFromChats,
   idString,
+  linkedGroupId,
   pickDiscussionGroup,
   postReplyInfo,
   threadGroupId,
@@ -99,6 +100,37 @@ export async function resolveDiscussionGroup(
   let group: DiscussionGroup | null = null;
   let postInfo: PostReplyInfo | null = null;
 
+  /* ---------- 0) channels.getFullChannel：频道级信息里直接写着关联讨论组 ----------
+   * 这是最可靠的一条路，也是 Telegram 官方客户端用的：`ChannelFull.linked_chat_id`
+   * 就是讨论组 ID，公开频道对任何已登录账号都可读，不需要加入任何群。
+   * 而且 `messages.chatFull` 的 `chats` 数组里通常连带那个讨论组的完整对象
+   * （含 access_hash）—— 一步就把 ID 和 hash 一起拿到。 */
+  if (!group) {
+    try {
+      const channelInput = inputChannelOf(key, ref.accessHash) ?? (peer as never);
+      const full = await client.invoke(
+        new Api.channels.GetFullChannel({ channel: channelInput as never }),
+      );
+      const linked = linkedGroupId(full);
+      if (linked) {
+        const info = chatInfoOf(full, linked);
+        group = {
+          id: linked,
+          username: info?.username ?? null,
+          accessHash: info?.accessHash ?? null,
+          title: info?.title ?? "",
+        };
+        diag.push(
+          `getFullChannel 定位到讨论组 ${linked}${info?.accessHash ? "（含 hash）" : "（无 hash）"}`,
+        );
+      } else {
+        diag.push("getFullChannel 显示该频道没有关联讨论组");
+      }
+    } catch (err) {
+      diag.push(`getFullChannel 报错 ${explain(err)}`);
+    }
+  }
+
   /* ---------- 1) 官方接口，空结果重试一次 ---------- */
   for (let attempt = 1; attempt <= 2 && !group; attempt += 1) {
     try {
@@ -135,6 +167,9 @@ export async function resolveDiscussionGroup(
         diag.push(`帖子 replies.channel_id=${postInfo.channelId}`);
       } else if (!postInfo.comments) {
         diag.push("帖子 replies.comments=false");
+      } else {
+        // 有评论但没给 channel_id：以前这里什么都不记，诊断就只剩「返回空」两条
+        diag.push(`帖子 replies 无 channel_id（comments=true, ${postInfo.count} 条）`);
       }
     } catch (err) {
       diag.push(`读帖子失败 ${explain(err)}`);
@@ -175,6 +210,16 @@ export async function resolveDiscussionGroup(
           title: info?.title ?? byChats?.title ?? "",
         };
         diag.push(`getReplies 定位到讨论组 ${id}`);
+      } else {
+        // 成功但什么都没给：把「返回了几条消息 / 几个 chat」记下来，
+        // 才能区分「帖子确实没评论」和「账号看不到这个讨论组」
+        const msgs = (repliesPayload as { messages?: unknown[] })?.messages;
+        const chats = (repliesPayload as { chats?: unknown[] })?.chats;
+        diag.push(
+          `getReplies 未返回讨论组（messages=${Array.isArray(msgs) ? msgs.length : "?"}，chats=${
+            Array.isArray(chats) ? chats.length : "?"
+          }）`,
+        );
       }
     }
     if (group && (!group.accessHash || !group.username)) {

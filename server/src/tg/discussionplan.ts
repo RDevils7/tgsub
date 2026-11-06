@@ -53,6 +53,19 @@ export function validId(value: unknown): string | null {
 }
 
 /**
+ * 从 `channels.getFullChannel` 的返回（`messages.chatFull`）里取关联讨论组 ID。
+ *
+ * 这是最可靠的一条路：`ChannelFull.linked_chat_id` 是频道级设置，
+ * 公开频道对任何已登录账号都可读，不需要加入讨论组。
+ * 同一份返回里的 `chats` 还常带着讨论组本身（含 access_hash）。
+ */
+export function linkedGroupId(payload: unknown): string | null {
+  const fullChat = (payload as AnyRecord | null)?.fullChat;
+  if (!fullChat || typeof fullChat !== "object") return null;
+  return validId((fullChat as AnyRecord).linkedChatId);
+}
+
+/**
  * access_hash 归一化成十进制字符串。
  *
  * gramjs 里可能是 bigint、big-integer 对象或字符串；超过 2^53 所以不能过 Number。

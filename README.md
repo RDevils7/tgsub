@@ -4,12 +4,12 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.9-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.10-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
   <img alt="Docker" src="https://img.shields.io/badge/docker-compose-2496ED.svg">
 </p>
 
-> **版本状态**：当前最新正式版 **1.3.9**（镜像 `rdevils7/tgsub:v1.3.9` 与 `latest`）。
+> **版本状态**：当前最新正式版 **1.3.10**（镜像 `rdevils7/tgsub:v1.3.10` 与 `latest`）。
 > 本页只讲「怎么部署起来用」；全部配置项、HTTP 接口、开发自检与排错见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
@@ -20,26 +20,26 @@
 
 ---
 
-## 本版更新（1.3.9）
+## 本版更新（1.3.10）
 
-**修掉「照文档加 `group_add` 反而起不来」。** 群晖 / 威联通 / 绿联的宿主机 `/etc/group` 里只有 `video`、没有 `render`，
-Docker 解析组名失败，直接报 `unable to find group render: no matching entries in group file`，容器连创建都失败。
+**评论区链接还是定位不到讨论组 —— 补上最该先走的那条路。** 1.3.9 的报错只有「getDiscussionMessage 两次返回空」，后面几条路干了什么完全看不见，等于瞎猜。
 
-1. **硬件转码只需要映射设备**：compose 里只留
-   ```yaml
-   devices:
-     - /dev/dri:/dev/dri
-   ```
-   属组由入口脚本在容器内 `stat -c %g /dev/dri/renderD128` 读出真实 gid，降权时用 `setpriv --groups=<gid>`
-   加进运行用户的补充组 —— 不管宿主机有没有 `render` 组都能开设备，**不再需要 `group_add`**。
-   README / PROJECT_DOC / compose 里那两行 `group_add` 已全部删掉，照新版复制就能起。
-2. **入口脚本日志更直白**：检测到 `/dev/dri` 会打印「检测到核显设备 renderD128（属组 gid=…），将加入运行用户的补充组」；
-   没映射设备就完全静默，不影响启动。
-3. **FAQ 补两条实战排查**：`unable to find group render` 怎么改、容器 running 但网页打不开按什么顺序查
-   （先 `docker port`，再 `docker exec ... /api/health`，最后才是浏览器 / 反向代理）。
+1. **新增第 0 条路（最先走）：`channels.getFullChannel`**。关联讨论组的 ID 是**频道级设置**，写在
+   `ChannelFull.linked_chat_id` 里，公开频道对任何已登录账号都可读，压根不需要加入任何群 —— 这是 Telegram
+   官方客户端点「评论」时用的同一个接口。同一份返回的 `chats` 里通常还带着那个讨论组的完整对象，
+   于是 **ID 和 access_hash 一次拿到**。
+   - 之前只有 `messages.getDiscussionMessage` 打头，它对「私密讨论组 + 账号不在群里」会**直接返回空**，
+     一步不通后面全废。
+   - 现在顺序是：`getFullChannel` → `getDiscussionMessage` → 帖子 `replies.channel_id` →
+     `getReplies` → 对话框列表 → `getEntity`。
+2. **诊断信息补全**：每一步都会留痕，包括「帖子 replies 无 channel_id（comments=true, 12 条）」、
+   「getReplies 未返回讨论组（messages=0，chats=0）」、「getFullChannel 显示该频道没有关联讨论组」。
+   下次再失败，从诊断就能直接看出是**没开评论**、**频道没关联讨论组**，还是**讨论组私密且账号不在群里**。
+3. **报错文案分层**：定位到讨论组但拿不到 `access_hash` 时，会明确写出「ID 是多少、这是私密群、需要用同一个
+   账号先加群」，而不是笼统的「5 条路都试过」。
 
-> 1.3.8 的评论区链接下载（五路兜底定位讨论组 + `access_hash` 存库，公开组免加群）全部保留；
-> 更早的媒体库界面重做、显卡硬件转码、HEVC 直连、合并改名、元数据分区、登录兜底也都在。
+> 1.3.9 的 `group_add` 修复（只留 `devices: /dev/dri:/dev/dri`，属组由容器内自动处理）、
+> 1.3.8 的评论区五路兜底与 `access_hash` 存库、更早的媒体库界面重做 / 显卡硬件转码 / HEVC 直连等全部保留。
 
 ---
 
@@ -235,7 +235,7 @@ downloads/B站/UP主名字/视频标题 [BV1xx411c7mD]/
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布的镜像 |
-| `v1.3.9` | 固定版本（**生产环境建议锁定**） |
+| `v1.3.10` | 固定版本（**生产环境建议锁定**） |
 
 只有这两个标签：push 到 `main` 只跑构建与冒烟测试（健康检查、两个挂载目录可写、NAS 属主场景、内置 ffmpeg），
 **不发布镜像**；打 tag 才构建 amd64 + arm64 并推送。
@@ -270,7 +270,7 @@ docker compose down                           # 停止，./data 与 ./downloads 
 | 新集没出现在 Emby | 检查「Emby 入库通知」的地址 / API Key / 路径映射，点「测试连接」 |
 | `yt-dlp 不可用` | 镜像低于 1.2.0 或本地开发没装；升级镜像或在设置里手填路径 |
 | `要求登录` / `风控拦截（412）` | Cookie 过期，重新复制一次；已下载的文件不受影响 |
-| 评论区链接报「没有开启评论 / 不在讨论组里」 | 1.3.8 起会依次试 5 条路定位讨论组；仍失败时会写明是「帖子确实没开评论」还是「私密讨论组 + 账号不在群里」（后者只能先用同一账号加群） |
+| 评论区链接报「没有开启评论 / 不在讨论组里」 | 1.3.10 起会依次试 6 条路定位讨论组（先读频道的 linked_chat_id）；仍失败时会写明是「帖子确实没开评论」还是「私密讨论组 + 账号不在群里」（后者只能先用同一账号加群） |
 | `连不上 YouTube` | 没配第三方平台代理，或节点在该地区不可用 |
 | 网页视频报 `403`，一秒就失败 | 多半是老任务里 `&amp;` 把签名写坏；1.3.1 起已自动还原，点「重试」即可 |
 | 一直 `Just a moment...` / 抓取 403 | 站点在跑 Cloudflare 人机验证，会自动开无头浏览器过挑战（15~30 秒）；代理轮换 IP 会让 Cookie 失效 |
