@@ -74,6 +74,37 @@ export function parseKeywords(raw: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * 播放器用的等宽时钟：`03:21` / `1:02:15`。
+ *
+ * 和 `formatEta` 的区别只是一句话的事，但这里单独命名是为了让「进度条上的时间」
+ * 一眼能认出来源，别在别处被 formatDuration（中文「1 分 12 秒」）替换掉 —— 播放器里
+ * 中文时长跳动起来没法对齐。
+ */
+export function formatClock(seconds: number | null | undefined): string {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (s < 3600) return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
+  return `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+}
+
+/**
+ * 「跳到第几秒」输入框的解析。
+ *
+ * 接受三种写法：`83`（秒）、`1:23`（分:秒）、`01:02:03`（时:分:秒）。
+ * 返回 null 表示这个输入没法用（空、含非法字符、超过三段），调用方不要动播放位置。
+ */
+export function parseSeekText(raw: string): number | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const parts = text.split(":").map((p) => p.trim());
+  if (parts.length > 3) return null;
+  if (parts.some((p) => p === "" || !/^\d+(\.\d+)?$/.test(p))) return null;
+  let total = 0;
+  for (const part of parts) total = total * 60 + Number(part);
+  return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
 export function statusMeta(status: string): { label: string; className: string; dot: string } {
   switch (status) {
     case "done":

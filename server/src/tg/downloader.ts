@@ -3,11 +3,12 @@ import path from "node:path";
 import { db, getPlatformCookie, getSettings } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
-import { Download } from "../types";
+import { Channel, Download } from "../types";
 import { formatDateFolder, sanitizeSegment, toNumber } from "../utils";
 import { getClient } from "./client";
 import { extractMedia, fetchMessagesById, targetRelativePath } from "./media";
-import { channelEntityKey, channelMessageLink } from "./entity";
+import { channelEntityKey, channelInternalId, channelMessageLink } from "./entity";
+import { entityAccessHash } from "./discussionplan";
 import { decodeMeta, describeMeta, finalizeMedia } from "./emby";
 import { queueEmbyUpdate } from "./embyapi";
 import { canNotifyCard, notifyCard } from "./notify";
@@ -93,12 +94,86 @@ const stmtResetStuck = db.prepare(
 const stmtRoute = db.prepare<[string, number]>("UPDATE downloads SET net_route = ? WHERE id = ?");
 /** 线路切换说明（直连失败 → 改用代理），下载列表里显示成一行提示，不是错误 */
 const stmtRouteNote = db.prepare<[string | null, number]>("UPDATE downloads SET route_note = ? WHERE id = ?");
-const stmtChannel = db.prepare<
-  [number],
-  { username: string | null; tg_id: string | null; access_hash: string | null; title: string }
->(
-  "SELECT username, tg_id, title FROM channels WHERE id = ?",
-);
+/**
+ * 整行取出来 —— 这里以前只 SELECT username, tg_id, title，
+ * 类型上却写了 access_hash，运行时永远是 undefined：
+ * 没有 username 的频道（评论区讨论组 / 私有频道）拼不出 InputChannel，
+ * 只能退回 getEntity，而 getEntity 靠 session 里的实体缓存，
+ * 一旦重启或缓存被清理就报「Could not find the input entity」，
+ * 表现就是「同一个频道之前能下、现在全下不了」。用 * 免得再加列时又漏。
+ */
+const stmtChannel = db.prepare<[number], Channel>("SELECT * FROM channels WHERE id = ?");
+const stmtSetAccessHash = db.prepare<[string, number]>("UPDATE channels SET access_hash = ? WHERE id = ?");
+
+/**
+ * 频道没存 access_hash 时，去对话框列表里捞一次（顺手入库，下次直接用）。
+ *
+ * 私有频道 / 评论区讨论组没有 username，只有 hash 才拼得出 InputChannel；
+ * 没有 hash 就只能走 getEntity，而后者依赖 session 里的实体缓存 ——
+ * 重启、换账号、缓存被清理之后就解析不出来了，报
+ * 「Could not find the input entity for {channelId:...}」。
+ * 这条兜底把「之前能下、现在全下不了」的频道救回来。
+ */
+async function recoverAccessHash(
+  client: Awaited<ReturnType<typeof getClient>>,
+  channel: Channel,
+  force = false,
+): Promise<string | null> {
+  if (!force && channel.access_hash) return channel.access_hash;
+  const internal = channelInternalId(channel.tg_id);
+  if (!internal) return null;
+  try {
+    const dialogs = await client.getDialogs({ limit: 500 });
+    const entities = dialogs
+      .map((dialog) => (dialog as { entity?: Record<string, unknown> } | null)?.entity)
+      .filter((entity): entity is Record<string, unknown> => Boolean(entity));
+    const hash = entityAccessHash(entities, internal);
+    if (!hash) {
+      logger.warn(
+        { channel: channel.title, tgId: internal },
+        "对话框列表里也没找到这个频道（账号可能不在该群），继续走实体解析",
+      );
+      return null;
+    }
+    stmtSetAccessHash.run(hash, channel.id);
+    logger.info(
+      { channel: channel.title, tgId: internal },
+      "频道缺少 access_hash，已从对话框列表补回并入库",
+    );
+    return hash;
+  } catch (err) {
+    logger.warn(
+      { channel: channel.title, err: (err as Error)?.message },
+      "从对话框列表补 access_hash 失败",
+    );
+  }
+  return null;
+}
+
+/** 按消息 ID 取消息：hash 缺失或失效时先补 hash 再试一次 */
+async function fetchMessageForDownload(
+  client: Awaited<ReturnType<typeof getClient>>,
+  channel: Channel,
+  messageId: number,
+): Promise<Array<Record<string, unknown>>> {
+  const key = channelEntityKey(channel);
+  try {
+    return await fetchMessagesById(key, channel.access_hash, [messageId]);
+  } catch (err) {
+    const text = (err as Error)?.message ?? "";
+    if (!/Could not find the input entity|CHANNEL_INVALID|ACCESS_HASH_INVALID|CHANNEL_PRIVATE/.test(text)) {
+      throw err;
+    }
+    const recovered = await recoverAccessHash(client, channel, true);
+    if (!recovered || recovered === channel.access_hash) {
+      throw new Error(
+        `取不到消息（${channel.title}）：${text.slice(0, 100)}；` +
+          "这个频道没有可用 access_hash，账号也不在会话缓存里 —— 先登录该账号对应的对话框重新同步一次再下",
+      );
+    }
+    return await fetchMessagesById(key, recovered, [messageId]);
+  }
+}
 
 /**
  * 一条消息是哪条订阅命中下来的（订阅名 + 关键词）。
@@ -671,9 +746,7 @@ class DownloadQueue {
       // 评论区（讨论组）大多没有 username，只有 access_hash 才能按消息 ID 取到评论；
       // 这条路不需要加入群组。有 username 的频道照旧走 getEntity。
       this.checkCancel(id);
-      const messages = (await fetchMessagesById(channelEntityKey(channel), channel.access_hash, [
-        row.message_id,
-      ])) as unknown[];
+      const messages = await fetchMessageForDownload(client, channel, row.message_id);
       const message = messages?.[0];
       if (!message || !(message as { media?: unknown }).media) throw new Error("消息不存在或媒体已失效");
       // 准备阶段（连 DC、取消息）也可能被打断，早点退回队列，别白等

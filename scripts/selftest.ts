@@ -83,6 +83,7 @@ import { commentIdOf, extractTelegramLinks, isCommentLink, parseTelegramLink } f
 import {
   chatInfoOf,
   discussionEntityKey,
+  entityAccessHash,
   groupsFromChats,
   hashString,
   idString,
@@ -121,6 +122,7 @@ import {
   type NfoFields,
 } from "../server/src/tg/nfo";
 import { nfoTraceOf } from "../server/src/tg/nfotrace";
+import { formatClock, parseSeekText } from "../web/src/utils";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -2850,6 +2852,19 @@ function telegramLinkChecks(): void {
     assert.equal(discussionEntityKey(group!), "-1002002");
   });
 
+  check("对话框实体里按 ID 找回 access_hash（重启后救回「没有 hash 的频道」）", () => {
+    const entities = [
+      { id: bigInt("1111"), accessHash: bigInt("5555") },
+      // 讨论组用真 BigInteger：1.3.11 之前 idString 认不出它，正好卡在这里
+      { id: bigInt("3887627346"), accessHash: bigInt("7123456789012345678") },
+      { id: bigInt("2222"), accessHash: null },
+    ];
+    assert.equal(entityAccessHash(entities, "3887627346"), "7123456789012345678");
+    assert.equal(entityAccessHash(entities, "2222"), null);
+    assert.equal(entityAccessHash(entities, "9999"), null);
+    assert.equal(entityAccessHash(entities, "abc"), null);
+  });
+
   check("hashString 只认整数串，脏值一律 null", () => {
     assert.equal(hashString(BigInt("-9007199254740993")), "-9007199254740993");
     assert.equal(hashString("12345"), "12345");
@@ -3977,6 +3992,40 @@ function hitPlanChecks(): void {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* 播放器控制条：时长写法与「跳到第几秒」输入                            */
+/* ------------------------------------------------------------------ */
+
+function playerChecks(): void {
+  check("播放器时钟：不足 1 小时 / 超过 1 小时两种写法", () => {
+    assert.equal(formatClock(0), "00:00");
+    assert.equal(formatClock(83), "01:23");
+    assert.equal(formatClock(3725), "1:02:05");
+    // 脏数据不能变成 NaN:NaN
+    assert.equal(formatClock(null), "00:00");
+    assert.equal(formatClock(Number.NaN), "00:00");
+    assert.equal(formatClock(-5), "00:00");
+  });
+
+  check("跳到第几秒：秒 / 分:秒 / 时:分:秒 三种写法都认", () => {
+    assert.equal(parseSeekText("83"), 83);
+    assert.equal(parseSeekText("1:23"), 83);
+    assert.equal(parseSeekText("01:02:03"), 3723);
+    assert.equal(parseSeekText(" 2:30 "), 150);
+    assert.equal(parseSeekText("0"), 0);
+  });
+
+  check("跳到第几秒：非法输入一律 null（调用方不要动播放位置）", () => {
+    assert.equal(parseSeekText(""), null);
+    assert.equal(parseSeekText("   "), null);
+    assert.equal(parseSeekText("abc"), null);
+    assert.equal(parseSeekText("1:2:3:4"), null);
+    assert.equal(parseSeekText("1::2"), null);
+    assert.equal(parseSeekText("-5"), null);
+    assert.equal(parseSeekText("1:2a"), null);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -4009,6 +4058,7 @@ async function main(): Promise<void> {
     ["NFO 表单编辑用例", () => nfoChecks()],
     ["NFO 生成追溯用例", () => nfoTraceChecks()],
     ["订阅命中通知用例", () => hitPlanChecks()],
+    ["播放器控制条用例", () => playerChecks()],
   ];
   for (const [name, run] of suites) {
     try {

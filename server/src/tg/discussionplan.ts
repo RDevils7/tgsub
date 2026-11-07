@@ -106,6 +106,25 @@ function chatList(payload: unknown): AnyRecord[] {
   return Array.isArray(chats) ? (chats as AnyRecord[]) : [];
 }
 
+/**
+ * 从一批实体（对话框里的 entity / chats 数组）里找出指定频道的 access_hash。
+ *
+ * 用途：频道表里没存 hash 的旧记录，重启后 session 里也没有实体缓存，
+ * `getEntity("-100<id>")` 会直接报「Could not find the input entity」。
+ * 这时拿对话框列表里的实体补一次 hash，就能恢复正常下载。
+ */
+export function entityAccessHash(list: Array<Record<string, unknown>>, internalId: string): string | null {
+  const want = String(internalId ?? "").trim();
+  if (!/^\d+$/.test(want)) return null;
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    if (idString(item.id) !== want) continue;
+    const hash = hashString(item.accessHash);
+    if (hash) return hash;
+  }
+  return null;
+}
+
 function messageList(payload: unknown): AnyRecord[] {
   const messages = (payload as AnyRecord | null)?.messages;
   return Array.isArray(messages) ? (messages as AnyRecord[]) : [];

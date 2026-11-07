@@ -227,6 +227,23 @@
     硬解 + 硬编成 H.264 实时串出去（见下面的「硬件解码 / 显卡转码」）；
   - `unsupported`：既不能直连、又没有显卡可转，列表标灰并说明，点了给「下载」引导，不假装能播。
   优先级是「能直出就直出（不占 GPU）→ HEVC 且用户要求直连就先直连 → 有显卡才转码」。
+- **播放器控制条（1.3.14 自绘，不再用 `<video controls>`）**：`web/src/components/VideoPlayer.tsx`。
+  原生控件在实时流上等于废的（fMP4 没有 `Content-Length`，`duration` 是 `Infinity`，
+  原生进度条画不出来也拖不动），所以整套自绘，两种模式共用一条：
+  - 按钮：播放/暂停、后退 10 秒、前进 10 秒、当前/总时长、**「跳到 00:00」输入框 + 跳转键**、
+    音量（含滑杆）、倍速（0.5–2×，面板里带「连播」开关）、截图当前帧、画中画、上一集/下一集、全屏；
+  - **跳转是「曲线」实现的**：`direct` 直接改 `video.currentTime`（瞬时、可随意拖）；
+    `remux` / `transcode` 没法 seek —— 把目标秒数拼成 `?start=` **重开一路流**，服务端 `-ss` 输入侧 seek，
+    ffmpeg 会从目标前一个关键帧解码并丢弃到目标点，所以落点是准的；
+    重开有 **280ms 防抖**（连按快进只起一个 ffmpeg），期间 UI 用目标位置占位，第一帧到了再对真实位置。
+  - 输入框接受 `83`（秒）/ `1:23` / `01:02:03` 三种写法（`parseSeekText`），回车或点跳转键生效；
+    没探测到时长时进度条禁用，但输入框仍可用（知道要看第几秒就够）。
+  - 快捷键：`空格`/`k` 播放暂停、`←`/`→` ±5 秒（`Shift` ±30）、`↑`/`↓` 音量、`m` 静音、`f` 全屏、
+    `Home`/`End` 首尾、`0`–`9` 跳到 10%–90%、`[`/`]` 切集、`Esc` 关闭；单击画面播放暂停，双击全屏。
+  - 全屏是给 `.player-stage` 整体加 `:fullscreen`（样式在 `index.css`），控制条是它的绝对定位子元素，
+    全屏后依旧贴底；视频在全屏里 `object-fit: contain`（不再受 `aspect-video` 限制）。
+  - 控制条 2.8 秒无操作自动淡出（播放中才隐藏），鼠标移回、暂停、重开流时自动出现。
+    压黑底的文字一律写死 `text-[#fff]`，浅色主题下才看得见。
 - **换封装 / 转码只在真出数据后才发响应头**：ffmpeg 一个字节都没出就退出（文件损坏、编码不认识、显卡没权限）时
   返回 500 + 最后一行 stderr，而不是「200 + 空白」，播放器不会对着空流转圈。
   客户端关页面 / 拖动重开时子进程立刻 `SIGKILL`，不留僵尸 ffmpeg。
@@ -1186,6 +1203,31 @@ InputChannel），报错还容易让人误以为是「没加群」。
 **不需要 username、也不需要加入群组**；hash 失效（换账号、被移出、服务器轮换）时自动退回
 `getEntity` 再试一次，不让一条过期 hash 卡死下载。
 
+### 「重启之后同一个频道全下不了」（1.3.13 根因）
+
+**现象**：评论区链接能解析、能入队，下载却全报
+`Could not find the input entity for {"channelId":"3887627346","className":"PeerChannel"}`；
+重启容器之前同一个频道是好的。
+
+**根因**：`tg/downloader.ts` 取频道的那条 SQL 写的是
+`SELECT username, tg_id, title FROM channels WHERE id = ?`，而 TS 类型里声明了 `access_hash` ——
+**类型有、SQL 没查**，运行时永远是 `undefined`。于是下载阶段永远拼不出 `InputChannel`，
+一律退回 `getEntity("-100<id>")`；而 `getEntity` 依赖 gramjs **进程内**的实体缓存
+（不落盘），没缓存的私有频道/讨论组就解析不出来。长跑的进程里缓存有这条实体，
+所以一直「看起来能下」；一重启缓存空了，**同一个频道立刻全挂**。
+
+**修法**：
+
+1. 查询改成 `SELECT * FROM channels WHERE id = ?`（类型直接标 `Channel`）——以后再加列也不会漏；
+2. 新增 `recoverAccessHash()`：hash 缺失或失效时去对话框列表按 `id` 捞一次，捞到就写回
+   `channels.access_hash`（纯逻辑 `discussionplan.entityAccessHash()`，注意 `id` 是
+   BigInteger 不是原生 `bigint`）；
+3. 仍失败时的报错改成能指导操作的一句话，而不是裸的 gramjs 报错。
+
+> 教训：**TS 类型只是声明，不会校验 SQL 的投影**。凡是把行当成 `Channel` 用、又要读新增字段的
+> 地方，一律 `SELECT *`；出问题时的第一反应应该是「这行数据到底有没有查出来」，
+> 而不是怀疑 Telegram 不认这个账号。
+
 ### 限制
 
 - **公开讨论组不需要加入**：有 access_hash 就能按消息 ID 读评论（1.3.8 起）。
@@ -1763,12 +1805,12 @@ tgsub/
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.12`（镜像 `rdevils7/tgsub:v1.3.12` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.13-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.14`（镜像 `rdevils7/tgsub:v1.3.14` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.15-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.13-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.13`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.13` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.14-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.15-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.15`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.15` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.16-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

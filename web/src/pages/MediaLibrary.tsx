@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { MediaEpisode, MediaHwInfo, MediaLibraryResponse, MediaSeries, MediaSeriesResponse } from "../types";
 import { Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
+import { VideoPlayer } from "../components/VideoPlayer";
 import {
   IconAlert,
   IconCheck,
@@ -298,11 +299,13 @@ export default function MediaLibrary() {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
-  /** 按 `/` 直接聚焦搜索框、Esc 清空（输入框里不抢键） */
+  /** 按 `/` 直接聚焦搜索框、Esc 清空（输入框里不抢键；播放器打开时不抢） */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      // 播放器 / 浏览目录这类弹窗打开时不抢键：`/` 会去聚焦背后的搜索框
+      if (document.querySelector('[role="dialog"]')) return;
       if (e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -1277,24 +1280,10 @@ function PlayerDialog({
 }) {
   const [failed, setFailed] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
-  /**
-   * 实时流（换封装 / 转码）没有 Content-Length，`<video>` 不知道总长，原生进度条是废的。
-   * 这里用「用 start 重开一路流」的办法做拖动：时长来自 ffmpeg 探测，拖动后重新挂载播放器。
-   */
-  const [start, setStart] = useState(0);
-  const [pos, setPos] = useState(0);
-  const [dragging, setDragging] = useState(false);
-  const [draft, setDraft] = useState(0);
-  const [seeking, setSeeking] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     setFailed(null);
     setRetryKey(0);
-    setStart(0);
-    setPos(0);
-    setSeeking(false);
-    setDragging(false);
   }, [episode.path]);
 
   /** `[` / `]` 切集：不用左右方向键，那是 <video> 自己拖进度用的 */
@@ -1317,25 +1306,8 @@ function PlayerDialog({
 
   const remux = episode.playMode === "remux";
   const transcode = episode.playMode === "transcode";
-  /** 实时流才需要自绘进度条；直出模式交给浏览器原生控件 */
+  /** 实时流（换封装 / 转码）：没有 Content-Length，跳转只能重开一路流 —— 见 VideoPlayer */
   const seekable = remux || transcode;
-  const duration = Math.max(0, episode.durationSec ?? 0);
-
-  const src = useMemo(() => {
-    if (!seekable || start <= 0) return episode.streamUrl;
-    return `${episode.streamUrl}${episode.streamUrl.includes("?") ? "&" : "?"}start=${Math.floor(start)}`;
-  }, [episode.streamUrl, seekable, start]);
-
-  /** 拖到某处：重新起一路流（输入侧 seek），播放器重挂载后自动播 */
-  const commitSeek = (value: number) => {
-    if (!seekable || !duration) return;
-    const target = Math.min(duration - 0.5, Math.max(0, value));
-    setDragging(false);
-    if (Math.abs(target - start) < 0.5) return;
-    setStart(target);
-    setPos(target);
-    setSeeking(true);
-  };
 
   const errorCopy = () => {
     const codec = episode.videoCodec?.toUpperCase() ?? "";
@@ -1362,7 +1334,7 @@ function PlayerDialog({
         episode.durationSec ? formatDuration(episode.durationSec) : null,
         resolutionLabel(episode.height),
         episode.videoCodec?.toUpperCase() ?? null,
-        transcode ? "显卡转码" : null,
+        transcode ? "显卡转码" : remux ? "实时换封装" : null,
       ]
         .filter(Boolean)
         .join(" · ")}
@@ -1390,76 +1362,42 @@ function PlayerDialog({
       }
     >
       <div className="space-y-2.5">
-        <div className="relative overflow-hidden rounded-2xl bg-black ring-1 ring-white/[0.06]">
-          {failed ? (
-            <div className="flex aspect-video flex-col items-center justify-center gap-3 px-6 text-center">
-              <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/25 bg-rose-500/10 text-err">
-                <IconAlert className="h-5 w-5" />
-              </span>
-              <p className="max-w-lg text-[12.5px] leading-relaxed text-err">{failed}</p>
-              <Button
-                size="sm"
-                onClick={() => {
-                  setFailed(null);
-                  setRetryKey((n) => n + 1);
-                }}
-              >
-                <IconRefresh className="h-3.5 w-3.5" />
-                重试播放
-              </Button>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              key={`${src}#${retryKey}`}
-              src={src}
-              controls
-              autoPlay
-              playsInline
-              className="aspect-video w-full bg-black"
-              onLoadedData={() => setSeeking(false)}
-              onTimeUpdate={(e) => {
-                const t = e.currentTarget.currentTime;
-                setPos(start + t);
-              }}
-              onError={() => setFailed(errorCopy())}
-            />
-          )}
-          {seeking && !failed && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/45 text-[12.5px] text-[#fff] backdrop-blur-sm">
-              <span className="flex items-center gap-2 rounded-full bg-black/60 px-3.5 py-2">
-                <Spinner className="h-3.5 w-3.5" />
-                正在从 {formatDuration(start)}
-                {transcode ? " 重新转码…" : " 重新换封装…"}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* 实时流自己画一条进度：浏览器原生进度条对无长度流是废的 */}
-        {seekable && duration > 0 && (
-          <div className="flex items-center gap-2.5 px-0.5">
-            <span className="shrink-0 text-[11px] tabular-nums text-slate-500">
-              {formatDuration(Math.min(duration, dragging ? draft : pos))}
+        {failed ? (
+          <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-2xl bg-black px-6 text-center ring-1 ring-white/[0.06]">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl border border-rose-500/25 bg-rose-500/10 text-err">
+              <IconAlert className="h-5 w-5" />
             </span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(1, Math.floor(duration))}
-              step={1}
-              value={Math.min(duration, dragging ? draft : pos)}
-              onChange={(e) => {
-                setDragging(true);
-                setDraft(Number(e.target.value));
+            <p className="max-w-lg text-[12.5px] leading-relaxed text-err">{failed}</p>
+            <Button
+              size="sm"
+              onClick={() => {
+                setFailed(null);
+                setRetryKey((n) => n + 1);
               }}
-              onPointerUp={() => commitSeek(draft)}
-              onKeyUp={() => commitSeek(draft)}
-              onBlur={() => dragging && commitSeek(draft)}
-              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.12] accent-brand-500"
-              title={transcode ? "拖动会重新转码，等 1~3 秒" : "拖动会重新开始一路流，等 1 秒左右"}
-            />
-            <span className="shrink-0 text-[11px] tabular-nums text-slate-500">{formatDuration(duration)}</span>
+            >
+              <IconRefresh className="h-3.5 w-3.5" />
+              重试播放
+            </Button>
           </div>
+        ) : (
+          <VideoPlayer
+            key={`${episode.path}#${retryKey}`}
+            src={episode.streamUrl}
+            seekable={seekable}
+            durationSec={episode.durationSec}
+            poster={episode.thumbUrl}
+            badge={[
+              transcode ? "显卡转码" : remux ? "实时换封装" : episode.trial ? "HEVC 直连" : "原文件直出",
+              episode.videoCodec?.toUpperCase() ?? null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+            hasPrev={hasPrev}
+            hasNext={hasNext}
+            onPrev={onPrev}
+            onNext={onNext}
+            onError={() => setFailed(errorCopy())}
+          />
         )}
 
         {/* 卡片里只能放三行，完整简介放这儿看 */}
@@ -1469,15 +1407,18 @@ function PlayerDialog({
           <p>
             {transcode && <span className="mr-1 text-ok">显卡转码：</span>}
             {transcode
-              ? "浏览器解不了这个编码，服务端用显卡把画面实时转成 H.264（解码和编码都在 GPU 上，CPU 基本不烧）——能正常看，拖动进度条会重新起一段，等 1~3 秒。"
+              ? "浏览器解不了这个编码，服务端用显卡把画面实时转成 H.264（解码和编码都在 GPU 上，CPU 基本不烧）。" +
+                "这种流没有总长度，进度条是自绘的：拖动它、或在上方输入框里填「秒 / 分:秒」回车，都会让服务端从那一秒重新起一路流，等 1~3 秒。"
               : episode.trial
-                ? "HEVC 直连：靠这台浏览器的解码器播；黑屏或报错说明它解不了，可在工具栏关掉「HEVC 直连」改走显卡转码。"
+                ? "HEVC 直连：靠这台浏览器的解码器播；黑屏或报错说明它解不了，可在工具栏关掉「HEVC 直连」改走显卡转码。进度条可以直接拖。"
                 : remux
-                  ? "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放；拖动进度条会重新起一段流。"
-                  : "原文件直出，支持拖动进度条。"}
+                  ? "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放；跳转同样是从目标秒重新起一段流，等 1 秒左右。"
+                  : "原文件直出（支持 Range），拖动进度条和「跳到指定秒」都是瞬时的。"}
             <span className="ml-1 text-slate-600">{episode.name}</span>
           </p>
-          <span className="shrink-0 text-slate-600">[ / ] 切集 · Esc 关闭</span>
+          <span className="shrink-0 text-slate-600">
+            空格 播放/暂停 · ←→ 5 秒 · Shift+←→ 30 秒 · 数字键跳 10% · [ / ] 切集 · f 全屏 · Esc 关闭
+          </span>
         </div>
       </div>
     </Modal>

@@ -262,3 +262,32 @@ html.dark {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* ------------------------------------------------------------------ */
+/* 播放器：全屏时铺满屏幕                                             */
+/* ------------------------------------------------------------------ */
+/*
+ * 全屏元素就是 .player-stage 本身（控制条是它的绝对定位子元素，
+ * 所以全屏后控制条依旧贴在底部）。视频在全屏里要把 aspect-video 顶掉，
+ * 否则 21:9 的片子上下会各留一条黑边。
+ */
+.player-stage:fullscreen,
+.player-stage:-webkit-full-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  background: #000;
+}
+.player-stage:fullscreen video,
+.player-stage:-webkit-full-screen video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 播放器里的滑块（音量）在深色底上保持白色 */
+.player-stage input[type="range"] {
+  accent-color: #fff;
+}
+

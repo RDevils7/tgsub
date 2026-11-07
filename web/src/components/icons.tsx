@@ -313,6 +313,59 @@ export const IconChevronDown = (p: Props) => (
   </Svg>
 );
 
+/* ----------------------------- 播放器控件 ----------------------------- */
+
+export const IconVolume = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 9.5h3l4-3.2v11.4l-4-3.2H4Z" />
+    <path d="M14.8 9a4.2 4.2 0 0 1 0 6M17.4 6.4a7.6 7.6 0 0 1 0 11.2" />
+  </Svg>
+);
+
+export const IconVolumeMute = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 9.5h3l4-3.2v11.4l-4-3.2H4Z" />
+    <path d="m15 9.6 4.6 4.8M19.6 9.6 15 14.4" />
+  </Svg>
+);
+
+export const IconFullscreen = (p: Props) => (
+  <Svg {...p}>
+    <path d="M9 3.6H5.6A1.6 1.6 0 0 0 4 5.2V9M15 3.6h3.4A1.6 1.6 0 0 1 20 5.2V9" />
+    <path d="M4 15v3.4A1.6 1.6 0 0 0 5.6 20H9M20 15v3.4A1.6 1.6 0 0 1 18.4 20H15" />
+  </Svg>
+);
+
+export const IconFullscreenExit = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 9h3.4A1.6 1.6 0 0 0 9 7.4V4M20 9h-3.4A1.6 1.6 0 0 1 15 7.4V4" />
+    <path d="M9 20v-3.4A1.6 1.6 0 0 0 7.4 15H4M15 20v-3.4A1.6 1.6 0 0 1 16.6 15H20" />
+  </Svg>
+);
+
+export const IconPip = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="5" width="18" height="14" rx="2.2" />
+    <rect x="12.4" y="11.4" width="6.4" height="5" rx="1.2" />
+  </Svg>
+);
+
+/** 跳转：靶心 */
+export const IconTarget = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="7.4" />
+    <circle cx="12" cy="12" r="2.6" />
+    <path d="M12 2.2v3M12 18.8v3M2.2 12h3M18.8 12h3" />
+  </Svg>
+);
+
+/** 连播：循环箭头 */
+export const IconRepeat = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 9.4A4.4 4.4 0 0 1 8.4 5H19l-2.6-2.6M20 14.6A4.4 4.4 0 0 1 15.6 19H5l2.6 2.6" />
+  </Svg>
+);
+
 export const IconFolder = (p: Props) => (
   <Svg {...p}>
     <path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.3l1.8 2.2h7.5A2.2 2.2 0 0 1 20 9.4v7.4a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 16.8Z" />
