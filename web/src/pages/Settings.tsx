@@ -55,6 +55,8 @@ const SOURCE_DIR_FIELDS: Array<{ key: SourceDirKey; label: string }> = [
 export default function Settings() {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [auth, setAuth] = useState<AuthState | null>(null);
+  /** 登录状态要连 Telegram 探测，别让它挡住整页渲染 */
+  const [authLoading, setAuthLoading] = useState(true);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [savingSection, setSavingSection] = useState<string | null>(null);
   const toast = useToast();
@@ -95,18 +97,21 @@ export default function Settings() {
 
   const load = useCallback(async () => {
     try {
-      const [settingsRes, authRes, cacheRes, proxyRes] = await Promise.all([
-        api.settings(),
-        api.authState(),
-        api.cacheStatus().catch(() => null),
-        api.proxyStatus().catch(() => null),
-      ]);
+      // 只有 settings 是渲染整页必需的；其余三项后台补齐。
+      // 以前四个一起 Promise.all：auth/state 要连 Telegram 探测、cache/status 要递归扫
+      // 上千个缓存文件，最慢的那个决定整个设置页白屏多久。
+      const settingsRes = await api.settings();
       setData(settingsRes);
       setDraft(settingsRes.settings);
-      setAuth(authRes);
       setBot(settingsRes.bot ?? null);
-      if (cacheRes) setCache(cacheRes);
-      if (proxyRes) setProxyInfo(proxyRes);
+      setAuthLoading(true);
+      void api
+        .authState()
+        .then(setAuth)
+        .catch(() => undefined)
+        .finally(() => setAuthLoading(false));
+      void api.cacheStatus().then(setCache).catch(() => undefined);
+      void api.proxyStatus().then(setProxyInfo).catch(() => undefined);
     } catch (err) {
       toast.push((err as Error).message, "error");
     }
@@ -517,6 +522,8 @@ export default function Settings() {
   }
 
   const isLoggedIn = Boolean(auth?.authorized);
+  /** 首次进来还没拿到登录状态时显示骨架，刷新时保留旧状态不闪 */
+  const showAuthSkeleton = authLoading && !auth;
 
   const botStatus = !draft.bot_enabled
     ? {
@@ -547,7 +554,12 @@ export default function Settings() {
         defaultOpen
         extra={
           <>
-            {isLoggedIn ? (
+            {showAuthSkeleton ? (
+              <Badge className="border-white/10 bg-white/[0.03] text-slate-400">
+                <Spinner className="h-3 w-3" />
+                检测中
+              </Badge>
+            ) : isLoggedIn ? (
               <Badge className="border-emerald-500/20 bg-emerald-500/10 text-ok">
                 <StatusDot className="bg-emerald-400" />
                 已登录
@@ -563,7 +575,12 @@ export default function Settings() {
       >
 
         <div className="mt-4">
-          {isLoggedIn ? (
+          {showAuthSkeleton ? (
+            <div className="flex items-center gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3 text-[12.5px] text-slate-400">
+              <Spinner className="h-4 w-4" />
+              正在检测 Telegram 登录状态…
+            </div>
+          ) : isLoggedIn ? (
             <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
               <div className="flex items-center gap-3">

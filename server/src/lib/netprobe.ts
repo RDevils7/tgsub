@@ -495,6 +495,12 @@ export interface HttpResult {
   statusText: string;
   headers: Record<string, string>;
   body: string;
+  /**
+   * 原始的多条 Set-Cookie 响应头。
+   * headers 是 Record<string,string>，同名头会被后一条覆盖，站点的会话 Cookie
+   * 往往一次下发好几条 —— 解析网页时要把它们原样带走，否则 ffmpeg 拿不到登录态。
+   */
+  setCookies?: string[];
   /** 从发出请求到收到响应头的毫秒数 */
   ms: number;
   viaProxy: boolean;
@@ -585,9 +591,14 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
     const status = Number(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(statusLine)?.[1] ?? 0);
     const statusText = statusLine.split(/\s+/).slice(2).join(" ");
     const headers: Record<string, string> = {};
+    const setCookies: string[] = [];
     for (const line of lines) {
       const idx = line.indexOf(":");
-      if (idx > 0) headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+      if (idx <= 0) continue;
+      const name = line.slice(0, idx).trim().toLowerCase();
+      const value = line.slice(idx + 1).trim();
+      headers[name] = value;
+      if (name === "set-cookie") setCookies.push(value);
     }
 
     let body = "";
@@ -606,7 +617,7 @@ export async function httpRequest(rawUrl: string, options: HttpOptions = {}): Pr
         body = chunk.toString("utf8");
       }
     }
-    return { status, statusText, headers, body, ms, viaProxy: Boolean(proxy) };
+    return { status, statusText, headers, body, setCookies, ms, viaProxy: Boolean(proxy) };
   } finally {
     socket.destroy();
   }

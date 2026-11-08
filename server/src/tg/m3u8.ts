@@ -98,6 +98,45 @@ export function normalizeMediaUrl(raw: string): string {
   return text.replace(/^[`"']+/, "").replace(/[`"']+$/, "").trim();
 }
 
+/* ------------------------------------------------------------------ */
+/* Cookie：静态解析也得把会话带下来                                     */
+/* ------------------------------------------------------------------ */
+
+/** 把 `a=1; b=2` 或 `a=1; Path=/; HttpOnly` 里的键值对并进 map */
+function collectCookiePairs(text: string, out: Map<string, string>): void {
+  for (const part of String(text ?? "").split(";")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const name = part.slice(0, idx).trim();
+    if (!name) continue;
+    out.set(name, part.slice(idx + 1).trim());
+  }
+}
+
+function cookieMapToHeader(map: Map<string, string>): string {
+  return [...map].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+/**
+ * 把多条 `Set-Cookie` 响应头拼成可直接塞进请求头 / ffmpeg -headers 的 Cookie 值。
+ * 只取每条的第一段 `name=value`，Path / Expires / HttpOnly 这些属性一律丢掉；
+ * 后下发的同名 Cookie 覆盖先前的。
+ */
+export function cookieHeaderFromSetCookie(raw: Array<string | null | undefined>): string {
+  const map = new Map<string, string>();
+  for (const line of raw) {
+    collectCookiePairs(String(line ?? "").split(";")[0] ?? "", map);
+  }
+  return cookieMapToHeader(map);
+}
+
+/** 合并几段已有的 Cookie 头（重定向沿途累积的会话 + 无头浏览器拿到的那些） */
+export function mergeCookieHeaders(...values: Array<string | null | undefined>): string {
+  const map = new Map<string, string>();
+  for (const value of values) collectCookiePairs(value ?? "", map);
+  return cookieMapToHeader(map);
+}
+
 /** 是否看起来就是个 m3u8 链接 */
 export function looksLikeM3u8(input: string): boolean {
   return /\.m3u8(\?[^ "'`)\s]*)?$/i.test(input.trim());
@@ -246,13 +285,26 @@ export function routeMode(): RouteMode {
 }
 
 /**
- * 按设置排出该按什么顺序试线路。
- * auto 下就是「直连 → 代理」，即「能不用代理的地方尽量直连」。
+ * 把「解析这条地址时走通的线路」排到最前。
+ *
+ * 带签名的 m3u8（auth_key / cf_clearance / 按会话签发的临时地址）常常**绑出口 IP**：
+ * 直连解析出来的地址拿去走代理，或反过来，CDN 一律 403。解析和下载必须同线路。
+ * preferred 不在候选里（例如设置成「只直连」）时原样返回，不会凭空造出一条线路。
  */
-export function plannedRoutes(url: string): NetRoute[] {
+export function preferRoute(routes: NetRoute[], preferred?: NetRoute | null): NetRoute[] {
+  if (!preferred || !routes.includes(preferred)) return routes;
+  return [preferred, ...routes.filter((r) => r !== preferred)];
+}
+
+/**
+ * 按设置排出该按什么顺序试线路。
+ * auto 下就是「直连 → 代理」，即「能不用代理的地方尽量直连」；
+ * 传入 preferred 时优先沿用解析阶段的线路（见 preferRoute）。
+ */
+export function plannedRoutes(url: string, preferred?: NetRoute | null): NetRoute[] {
   const proxy = pickProxy();
   const routes = planRoutes(routeMode(), Boolean(proxy));
-  return orderRoutes(routes, hostOf(url));
+  return preferRoute(orderRoutes(routes, hostOf(url)), preferred);
 }
 
 /* ------------------------------------------------------------------ */
@@ -328,17 +380,38 @@ function guessPlaylistUrls(pageUrl: string): string[] {
   }
 }
 
+interface PageText {
+  body: string;
+  /** 沿途所有 Set-Cookie 拼成的请求头值，交给 ffmpeg 复用同一会话 */
+  cookies: string;
+}
+
 /**
  * 按指定线路抓一个 URL 的正文（跟随重定向）。
  * 直连时 proxy 传 null；走代理时传 parseProxy 后的结果。
+ *
+ * 1.3.15：沿途下发的 Set-Cookie 必须留下来。很多站的 m3u8 写在 HTML 里，
+ * 但播放地址绑定的会话 Cookie 是抓页面时由响应头给的 —— 以前只取 body，
+ * 解析成功、下载却 403，换代理、重新解析都救不回来。
  */
 async function requestText(
   rawUrl: string,
-  opts: { route: NetRoute; proxy?: string; referer?: string; timeoutMs?: number; maxBody?: number },
-): Promise<string> {
+  opts: {
+    route: NetRoute;
+    proxy?: string;
+    referer?: string;
+    timeoutMs?: number;
+    maxBody?: number;
+    cookies?: string;
+  },
+): Promise<PageText> {
   const parsed = opts.route === "proxy" && opts.proxy ? parseProxy(opts.proxy) : null;
   let current = rawUrl;
+  let cookies = opts.cookies ?? "";
   for (let hop = 0; hop < 5; hop += 1) {
+    const headers: Record<string, string> = {};
+    if (opts.referer) headers.Referer = opts.referer;
+    if (cookies) headers.Cookie = cookies;
     const res = await httpRequest(current, {
       proxy: parsed,
       timeoutMs: opts.timeoutMs ?? 15_000,
@@ -346,8 +419,9 @@ async function requestText(
       verifyTls: false,
       maxBody: opts.maxBody ?? 4 * 1024 * 1024,
       userAgent: UA,
-      headers: opts.referer ? { Referer: opts.referer } : undefined,
+      headers: Object.keys(headers).length ? headers : undefined,
     });
+    cookies = mergeCookieHeaders(cookies, cookieHeaderFromSetCookie(res.setCookies ?? []));
     if (res.status >= 300 && res.status < 400 && res.headers.location) {
       current = new URL(res.headers.location, current).toString();
       continue;
@@ -355,16 +429,28 @@ async function requestText(
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`抓取失败：HTTP ${res.status}`);
     }
-    return res.body;
+    return { body: res.body, cookies };
   }
   throw new Error("重定向次数过多，已放弃");
 }
 
 /** 探测一个地址是不是真的 m3u8（能拿到正文且含 #EXTM3U） */
-async function probeM3u8(url: string, route: NetRoute, proxy?: string): Promise<boolean> {
+async function probeM3u8(
+  url: string,
+  route: NetRoute,
+  proxy?: string,
+  cookies?: string,
+): Promise<boolean> {
   try {
-    const text = await requestText(url, { route, proxy, referer: refererOf(url), timeoutMs: 10_000, maxBody: 256 * 1024 });
-    return /#EXTM3U/i.test(text);
+    const page = await requestText(url, {
+      route,
+      proxy,
+      referer: refererOf(url),
+      timeoutMs: 10_000,
+      maxBody: 256 * 1024,
+      cookies,
+    });
+    return /#EXTM3U/i.test(page.body);
   } catch {
     return false;
   }
@@ -388,9 +474,12 @@ async function resolveViaRoute(
 ): Promise<M3u8Target> {
   let staticError: Error | null = null;
   let html = "";
+  let pageCookies = "";
 
   try {
-    html = await requestText(pageUrl, { route, proxy });
+    const page = await requestText(pageUrl, { route, proxy });
+    html = page.body;
+    pageCookies = page.cookies;
   } catch (err) {
     staticError = err as Error;
     logger.warn("静态抓取失败（%s），改用无头浏览器：%s", route, staticError.message);
@@ -400,7 +489,7 @@ async function resolveViaRoute(
     let found = extractM3u8FromHtml(html, pageUrl);
     if (!found) {
       for (const guess of guessPlaylistUrls(pageUrl)) {
-        if (await probeM3u8(guess, route, proxy)) {
+        if (await probeM3u8(guess, route, proxy, pageCookies)) {
           found = guess;
           break;
         }
@@ -412,6 +501,8 @@ async function resolveViaRoute(
         title: titleFromHtml(html) || titleFromUrl(found),
         referer: pageUrl,
         origin: originOf(pageUrl),
+        // 页面响应头里下发的会话 Cookie：m3u8 能解析出来、下载却 403，差的多半就是它
+        cookies: pageCookies || undefined,
         route,
       };
     }
@@ -425,6 +516,8 @@ async function resolveViaRoute(
       return {
         ...viaBrowser,
         title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(pageUrl),
+        // 静态抓页面时拿到的会话 + 浏览器里跑完挑战拿到的 cf_clearance，两边都别丢
+        cookies: mergeCookieHeaders(pageCookies, viaBrowser.cookies) || undefined,
       };
     }
   } catch (e) {
@@ -440,6 +533,8 @@ async function resolveViaRoute(
 
 /** 直连下载失败、自动改走代理时写给下载列表看的一行说明（不是错误） */
 export const ROUTE_FALLBACK_NOTE = "因直连下载失败，使用代理进行下载";
+/** 403 之后自动用原始网页链接重解析过一次，写在提示行里方便对照截图排查 */
+export const RERESOLVE_NOTE = "已自动重新解析网页地址，换取新的签名与 Cookie";
 
 /* ------------------------------------------------------------------ */
 /* 错误分类：什么时候值得换线路 / 重新解析                              */
@@ -464,6 +559,39 @@ export function isSignatureError(message: string): boolean {
   return /\b(403|404|410)\b|签名|防盗链|Forbidden|Not Found/i.test(message);
 }
 
+export interface SignatureFailureContext {
+  /** 用户当初提交的原始输入（网页链接或 m3u8 直链） */
+  original: string | null;
+  /** 这一轮是否已经自动用原网页重解析过 */
+  refreshed: boolean;
+  /** 下载时有没有带上解析阶段拿到的 Cookie */
+  hasCookies: boolean;
+}
+
+/**
+ * 403 最终失败时给用户看的说明。
+ *
+ * 旧文案一律写「重新提交原始网页链接会自动换取新的地址与 Cookie」，
+ * 可程序其实已经自动重解析过了；用户照着反复粘贴同一条链接，只会多出几条
+ * 一模一样的失败记录（截图里那两条相隔 30 秒的任务就是这么来的）。
+ * 直链没有网页可重解析，更不该让人去做无用功 —— 分开说清楚。
+ */
+export function describeSignatureFailure(message: string, ctx: SignatureFailureContext): string {
+  if (!/\b403\b|Forbidden|签名|防盗链/i.test(message)) return message;
+  const original = String(ctx.original ?? "").trim();
+  if (!original || looksLikeM3u8(original)) {
+    return `${message}；这是 m3u8 直链，没有网页可重解析，请回到视频页面重新复制（建议直接粘贴网页地址）`;
+  }
+  if (ctx.refreshed) {
+    return (
+      `${message}；已自动重解析网页地址并重试仍被拒绝` +
+      `（${ctx.hasCookies ? "已带上页面 Cookie" : "页面未下发 Cookie"}），` +
+      `多半是该站要求登录态或当前出口 IP 被拦，请检查代理设置后重试`
+    );
+  }
+  return `${message}；可重新粘贴网页地址换取新的签名与 Cookie`;
+}
+
 /**
  * 下载阶段值不值得换线路。
  *
@@ -484,7 +612,7 @@ export function shouldRetryRoute(message: string): boolean {
  *
  * 线路：默认直连优先。直连抓不到（网络类错误 / 403）才换代理重试。
  */
-export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
+export async function resolveM3u8Input(input: string, routeHint?: NetRoute): Promise<M3u8Target> {
   const url = normalizeMediaUrl(input);
   if (looksLikeM3u8(url)) {
     return {
@@ -492,7 +620,7 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
       title: titleFromUrl(url),
       referer: refererOf(url),
       origin: originOf(url),
-      route: "direct",
+      route: routeHint ?? "direct",
     };
   }
 
@@ -501,7 +629,9 @@ export async function resolveM3u8Input(input: string): Promise<M3u8Target> {
   }
 
   const proxy = pickProxy();
-  const routes = orderRoutes(planRoutes(routeMode(), Boolean(proxy)), hostOf(url));
+  // routeHint 来自上一次「哪条线路下载失败」：重新解析要按同一出口 IP 拿签名，
+  // 否则新地址还是被 CDN 判成别的 IP 请求，重解析等于白跑。
+  const routes = plannedRoutes(url, routeHint);
   let lastError: Error | null = null;
 
   for (const route of routes) {
@@ -686,7 +816,7 @@ export async function downloadM3u8To(
 
 function parseFfmpegError(stderr: string): string {
   if (/403|Forbidden/i.test(stderr))
-    return "源站拒绝下载（403）：登录态 / 防盗链签名已失效，重新提交原始网页链接会自动换取新的地址与 Cookie";
+    return "源站拒绝下载（403）：播放地址 / 防盗链签名 / Cookie 已失效";
   if (/404|Not Found/i.test(stderr)) return "视频地址已失效（404），源站可能已删除，或这是过期的临时链接";
   if (/Connection|timed out|ECONN|resolve|No route to host/i.test(stderr))
     return "网络拉取失败，确认服务器能访问该地址（必要时配置代理）";

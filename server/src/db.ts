@@ -4,6 +4,7 @@ import { env } from "./env";
 import { logger } from "./logger";
 import { AppSettings, DEFAULT_SETTINGS, PlatformId } from "./types";
 import { describeCookie, summarizeCookie } from "./platform/cookie";
+import type { IgnoredIssue } from "./system/overviewFormat";
 
 export const db = new Database(env.dbFile);
 db.pragma("journal_mode = WAL");
@@ -176,6 +177,28 @@ CREATE TABLE IF NOT EXISTS login_sessions (
   ua         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_login_sessions_expires ON login_sessions(expires_at);
+
+/* 视频探测结果（ffmpeg -i 解析出来的编码 / 时长 / 分辨率）。
+   以前只放内存，容器一重启整库重新探测一遍，第一次进媒体库要等很久。
+   key 是绝对路径 + 文件大小 + mtime，文件换了自然失效。 */
+CREATE TABLE IF NOT EXISTS media_probes (
+  path      TEXT PRIMARY KEY,
+  size      INTEGER NOT NULL,
+  mtime_ms  REAL NOT NULL,
+  payload   TEXT NOT NULL,
+  probed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_probes_at ON media_probes(probed_at);
+
+/* 概览页被用户「忽略」的提醒。
+   id 是探针前缀 + 状态指纹，问题变了会生成新 id 自动重新提醒。
+   连文案一起存：状态修好后这条提醒不再出现，界面仍要能列出来让用户取消忽略。 */
+CREATE TABLE IF NOT EXISTS overview_ignored (
+  issue_id   TEXT PRIMARY KEY,
+  label      TEXT NOT NULL,
+  text       TEXT NOT NULL,
+  ignored_at INTEGER NOT NULL
+);
 `);
 
 /** 轻量迁移：老库补列（SQLite 没有 ADD COLUMN IF NOT EXISTS） */
@@ -706,4 +729,34 @@ export function ensurePlatformChannel(): number {
     .run(PLATFORM_CHANNEL_TITLE, Date.now());
   logger.info({ id: Number(res.lastInsertRowid) }, "已创建第三方链接保留频道");
   return Number(res.lastInsertRowid);
+}
+
+/* ------------------------------------------------------------------ */
+/* 概览页提醒的忽略记录                                                */
+/* ------------------------------------------------------------------ */
+
+interface IgnoredRow {
+  issue_id: string;
+  label: string;
+  text: string;
+  ignored_at: number;
+}
+
+export function listIgnoredIssues(): IgnoredIssue[] {
+  const rows = db.prepare("SELECT issue_id, label, text, ignored_at FROM overview_ignored ORDER BY ignored_at DESC").all() as IgnoredRow[];
+  return rows.map((row) => ({ id: row.issue_id, label: row.label, text: row.text, ignoredAt: row.ignored_at }));
+}
+
+export function ignoreIssue(id: string, label: string, text: string): void {
+  db.prepare(
+    "INSERT INTO overview_ignored(issue_id, label, text, ignored_at) VALUES(?, ?, ?, ?) ON CONFLICT(issue_id) DO UPDATE SET ignored_at = excluded.ignored_at",
+  ).run(id, label.slice(0, 120), text.slice(0, 400), Date.now());
+}
+
+export function restoreIgnoredIssue(id: string): boolean {
+  return db.prepare("DELETE FROM overview_ignored WHERE issue_id = ?").run(id).changes > 0;
+}
+
+export function clearIgnoredIssues(): number {
+  return db.prepare("DELETE FROM overview_ignored").run().changes;
 }

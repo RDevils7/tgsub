@@ -697,8 +697,11 @@ export function sdkLoaded(): boolean {
   return sdkAvailable === true;
 }
 
-/** 探测结果缓存：前端每 10 秒轮询一次，没必要每次都打 getMe 上去 */
-const PROBE_CACHE_MS = 8000;
+/**
+ * 探测结果缓存：每次探测都是一次走代理的 MTProto 往返，进设置页就打一次太亏。
+ * 30 秒内复用；真正断线时 getClient()/扫描链路会自己发现并清掉缓存，不会因为这里变慢。
+ */
+const PROBE_CACHE_MS = 30_000;
 let probeCache: { at: number; ok: boolean; code: string | null } | null = null;
 
 export async function getAuthState(opts: { fresh?: boolean } = {}): Promise<AuthState> {

@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { env, isDirWritable } from "../env";
-import { db, getEmbyKeyHint, getPlatformCookieHint, getSessionMeta, getSettings } from "../db";
+import { db, getEmbyKeyHint, getPlatformCookieHint, getSessionMeta, getSettings, listIgnoredIssues } from "../db";
 import { APP_VERSION } from "../version";
 import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
 import { ytdlpInfo, clearYtdlpCache } from "../platform/ytdlp";
@@ -33,9 +33,17 @@ import { getEmbyNotifyState } from "../tg/embyapi";
 import { explainProxyProblem, parseProxy, telegramProxyUnsupported } from "../lib/netprobe";
 import { DIR_KEYS, DIR_LABEL, parseDirSetting, type DirKey } from "../tg/mediadir";
 import { routeMode } from "../tg/m3u8";
-import { PLATFORM_IDS } from "../types";
+import { PLATFORM_IDS, PLATFORM_LABEL } from "../types";
 import { getAccount, activeSessionCount } from "../auth/service";
-import { diskLevel, summarizeProbes, toolStatus, type OverviewSummary, type ProbeStatus } from "./overviewFormat";
+import {
+  diskLevel,
+  summarizeProbes,
+  toolStatus,
+  type OverviewIssue,
+  type OverviewSummary,
+  type ProbeLike,
+  type ProbeStatus,
+} from "./overviewFormat";
 
 /* ------------------------------------------------------------------ */
 /* 对外的数据结构（前端 types.ts 有一份镜像）                          */
@@ -65,6 +73,10 @@ export interface ServiceProbe {
   note: string | null;
   /** 点击后跳哪个页面 */
   page: "settings" | "channels" | "downloads" | "logs" | "manual" | "metadata" | null;
+  /** 概览提醒展开后的逐条说明（不是所有服务都有） */
+  detail?: string[];
+  /** 处理建议 */
+  hint?: string | null;
 }
 
 export interface StorageDirProbe {
@@ -311,6 +323,61 @@ const ROUTE_LABEL: Record<string, string> = {
   off: "只直连",
 };
 
+/**
+ * 每条「留意 / 异常」都给一句能照着做的建议。
+ * 概览页的提醒以前只有「谁 + 一句 note」，用户看完不知道下一步做什么，
+ * 这里按探针 id 配好处理方向，采集层不用重复写。
+ */
+const ISSUE_HINT: Record<string, string> = {
+  "tool:ffmpeg": "在设置页指定 FFMPEG_PATH，或换成带 ffmpeg 的官方镜像；缺了它 m3u8 下载、封面抽帧和媒体库转码都会失败。",
+  "tool:hwdecode": "不影响下载。想在线播 HEVC 等编码，把 /dev/dri 映射进容器并在设置里开启硬件解码。",
+  "tool:ytdlp": "设置页 → 第三方平台点「检查更新」让它自动下载，或检查 yt-dlp 可执行文件 / 自定义路径是否还在。",
+  "tool:chromium": "网页 / m3u8 的动态解析需要 Playwright 浏览器，镜像里没装时可以只走静态解析。",
+  "tool:sharp": "封面缩放会退回原图处理，不影响下载；装上 sharp 依赖即可恢复。",
+  "tool:gramjs": "通常是启动时序问题，重启容器后再看一次。",
+  "service:telegram": "设置页 → Telegram 账号，重新扫码登录；登录态已加密落盘，正常重启不用重扫。",
+  "service:bot": "确认机器人 Token 正确、白名单已填，且容器能连到 Telegram API。",
+  "service:scan": "登录 Telegram 后自动扫描才会真正开始；也能在频道页手动扫一次。",
+  "service:queue": "队列卡住时看下载页的失败原因，或在设置里调大并发上限。",
+  "service:emby": "设置页 → Emby 通知，补齐服务地址与 API Key，或关掉通知。",
+  "service:proxy": "Telegram 走 MTProto，需要 SOCKS5 代理；HTTP 代理只对网页下载生效。",
+  "service:login": "首次访问会要求设置账号密码；AUTH_DISABLED 只用于临时排障，用完立刻去掉。",
+  "service:platform": "设置页 → 第三方平台，补齐 Cookie；如果只下公开视频，可以点「忽略」不再提醒。",
+};
+
+/** 把采集结果转成纯逻辑层要的探针，顺手补 id / 影响范围 / 建议 / 跳转 */
+function toProbeLike(
+  groups: Array<{
+    tools?: ToolProbe[];
+    services?: ServiceProbe[];
+  }>,
+): ProbeLike[][] {
+  return groups.map((group) => [
+    ...(group.tools ?? []).map((t) => ({
+      id: `tool:${t.id}`,
+      status: t.status,
+      label: t.label,
+      value: t.version,
+      note: t.note,
+      impact: t.usedBy,
+      hint: ISSUE_HINT[`tool:${t.id}`] ?? null,
+      page: "settings" as const,
+    })),
+    ...(group.services ?? []).map((s) => ({
+      id: `service:${s.id}`,
+      status: s.status,
+      label: s.label,
+      value: s.value,
+      note: s.note,
+      detail: s.detail,
+      impact: null,
+      hint: s.hint ?? ISSUE_HINT[`service:${s.id}`] ?? null,
+      // 配 Cookie 在设置页，卡片本身仍指向手动下载页
+      page: s.id === "platform" ? ("settings" as const) : s.page,
+    })),
+  ]);
+}
+
 function storageReport(settings: ReturnType<typeof getSettings>): OverviewReport["storage"] {
   const dbSize = fileSize(env.dbFile) + fileSize(`${env.dbFile}-wal`) + fileSize(`${env.dbFile}-shm`);
   let dbTables = 0;
@@ -442,7 +509,7 @@ async function toolReport(
         : update.updateAvailable
           ? `有新版本 ${update.latest}，可在设置页点「检查更新」`
           : update.autoUpdate
-            ? `自动更新：每 ${update.checkHours} 小时检查`
+            ? `自动更新：每 ${Math.max(1, Math.round(update.checkHours / 24))} 天检查`
             : "自动更新已关闭",
       usedBy: "B站 / 小红书 / YouTube 下载",
     },
@@ -552,6 +619,32 @@ async function serviceReport(settings: ReturnType<typeof getSettings>): Promise<
   const mode = routeMode();
   const embyConfigured = Boolean(settings.emby_notify && settings.emby_url && embyKey.set);
 
+  /**
+   * 平台 Cookie 的逐项体检。
+   * 注意 `missing` 是「缺了哪些必要的键」，是数组 —— 空数组也是 truthy，
+   * 以前直接 `cookies.some((c) => c.missing)` 会把「三个平台都配好了」也判成缺 Cookie。
+   */
+  const cookieProblems = PLATFORM_IDS.map((id, i) => ({ id, label: PLATFORM_LABEL[id], hint: cookies[i] })).filter(
+    ({ hint }) => !hint.set || (hint.missing?.length ?? 0) > 0,
+  );
+  const cookieLines = PLATFORM_IDS.map((id, i) => {
+    const c = cookies[i];
+    const label = PLATFORM_LABEL[id];
+    if (!c.set) return `${label}：未配置 Cookie —— 只能取公开内容，登录后才有更高画质 / 受限内容`;
+    if ((c.missing?.length ?? 0) > 0) {
+      return `${label}：已填 ${c.count ?? 0} 项，但缺 ${(c.missing ?? []).join(" / ")} —— 登录态不完整，可能拿不到高清或被平台拦下`;
+    }
+    return `${label}：已配置（${c.count ?? 0} 项）`;
+  });
+  const platformNote = !settings.platform_enabled
+    ? "在设置页开启后可下载 B站 / 小红书 / YouTube"
+    : `画质 ${settings.platform_quality}${cookieProblems.length ? ` · ${cookieProblems.map((p) => p.label).join("、")} 需补 Cookie` : " · 三平台 Cookie 齐全"}`;
+  const platformDetail = [
+    ...cookieLines,
+    `当前画质档位：${settings.platform_quality}（缺登录态时平台会自动回落到匿名可拿到的清晰度）`,
+    "缺 Cookie 不代表不能下：公开视频通常照常，但高清、会员、私密内容会失败或降级。",
+  ];
+
   const services: ServiceProbe[] = [
     {
       id: "telegram",
@@ -655,15 +748,11 @@ async function serviceReport(settings: ReturnType<typeof getSettings>): Promise<
     {
       id: "platform",
       label: "第三方平台",
-      status: !settings.platform_enabled
-        ? "off"
-        : cookies.some((c) => c.missing)
-          ? "warn"
-          : "ok",
+      status: !settings.platform_enabled ? "off" : cookieProblems.length > 0 ? "warn" : "ok",
       value: !settings.platform_enabled ? "未启用" : `${cookies.filter((c) => c.set).length}/3 已配 Cookie`,
-      note: !settings.platform_enabled
-        ? "在设置页开启后可下载 B站 / 小红书 / YouTube"
-        : `画质 ${settings.platform_quality}${cookies.some((c) => c.missing) ? " · 有平台缺 Cookie，部分视频会受限" : ""}`,
+      note: platformNote,
+      detail: platformDetail,
+      hint: "设置页 → 第三方平台，用浏览器登录 B站 / 小红书 / YouTube 后复制整串 Cookie 粘贴保存；只下公开内容可以点「忽略」不再提醒。",
       page: "manual",
     },
   ];
@@ -718,9 +807,25 @@ async function collect(force: boolean): Promise<OverviewReport> {
     storage,
     tools,
     services,
-    summary: summarizeProbes([tools, services]),
+    summary: summarizeProbes(toProbeLike([{ tools }, { services }]), listIgnoredIssues()),
   };
   return report;
+}
+
+/**
+ * 忽略 / 恢复提醒后必须让 30 秒缓存失效，否则用户点了「忽略」，
+ * 下一次 GET 仍拿到旧报告，看起来像按钮没反应。
+ * 重新采集不慢：工具版本与 yt-dlp 探测本身都有各自的缓存。
+ */
+export function invalidateOverview(): void {
+  cached = null;
+}
+
+/** 忽略接口要存一份文案快照，优先从当前报告里取，避免前端随便塞文本 */
+export async function findOverviewIssue(id: string): Promise<Pick<OverviewIssue, "label" | "text"> | null> {
+  const report = await getOverview();
+  const found = [...report.summary.issues, ...report.summary.ignored].find((issue) => issue.id === id);
+  return found ? { label: found.label, text: found.text } : null;
 }
 
 /**

@@ -393,6 +393,8 @@ export async function enqueueM3u8(input: string): Promise<M3u8Result> {
       origin: target.origin,
       // 人机验证（cf_clearance）与登录态都在 Cookie 里，下载时必须原样带上
       cookies: target.cookies ?? null,
+      // 这条地址是在哪条线路上解析出来的：签名常绑出口 IP，下载要优先同线路
+      route: target.route,
     },
   };
 

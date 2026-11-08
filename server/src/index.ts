@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import express, { NextFunction, Request, Response } from "express";
+import compression from "compression";
 import { env } from "./env";
 import { db, getSessionMeta, getSettings } from "./db";
 import { logger } from "./logger";
@@ -32,10 +33,31 @@ import { requireLogin, getAccount } from "./auth/service";
 import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
 import { startYtdlpAutoUpdate } from "./platform/updater";
+import { hwCapability } from "./tg/ffmpeg";
 
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
+
+/**
+ * 所有 JSON 接口与前端 JS/CSS 都开 gzip / brotli。
+ *
+ * 前端主包 500KB+（gzip 后约 150KB），媒体库列表动辄几百条 JSON —— 不压缩时
+ * 在 NAS / 反代 / 手机上慢得很明显。视频流必须原样放行：/api/media/stream 是
+ * 无 Content-Length 的 fMP4 实时流，压缩中间件会把它改写成 chunked 并缓冲首包，
+ * 直接把「点播放到出画面」拖慢甚至卡住。
+ */
+app.use(
+  compression({
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.path === "/api/media/stream" || req.path === "/api/media/art" || req.path === "/api/media/thumb") {
+        return false;
+      }
+      return compression.filter(req, res);
+    },
+  }),
+);
 
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -229,6 +251,10 @@ setTimeout(() => requestCacheTrim(0), 4000).unref();
 // yt-dlp 的解析规则月月在变：按设置的间隔自己去 GitHub 看新版
 // （首检延迟在 startYtdlpAutoUpdate 内部，避开启动时的重连高峰）
 const stopYtdlpUpdate = startYtdlpAutoUpdate();
+
+// 硬解能力探测要「真编一帧」，冷启动 1~3 秒。放在后台尽早预热（纯本地 ffmpeg，
+// 不占 Telegram 连接），别等用户点开媒体库那一刻才开始，否则列表和播放首帧都跟着一起等。
+setTimeout(() => void hwCapability(), 500).unref();
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "正在关闭");

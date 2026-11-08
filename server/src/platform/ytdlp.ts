@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getSettings } from "../db";
+import { getSetting, getSettings, setSetting } from "../db";
 import { env } from "../env";
 import { PlatformId, PLATFORM_LABEL } from "../types";
 import { ffmpegInfo } from "../tg/ffmpeg";
@@ -147,12 +147,62 @@ export function platformUsesProxy(platform: PlatformId, proxy?: string): boolean
   }
 }
 
-let cache: { at: number; info: YtdlpInfo } | null = null;
-const CACHE_MS = 30_000;
+interface ProbeCache {
+  at: number;
+  info: YtdlpInfo;
+}
 
-/** 探测可用性与版本；30 秒内复用结果，避免设置页每次刷新都 spawn 一次 */
+/** 探测一次最多要 spawn 4 个候选路径（各 15 秒超时），别让每次开设置页都等一遍 */
+const CACHE_MS = 6 * 3600_000;
+/** 「没装」的结果短一点，用户刚装好时不用等 6 小时 */
+const UNAVAILABLE_CACHE_MS = 5 * 60_000;
+/** 落盘：进程 / 容器重启后不用重新探测（以前只有内存缓存，重启即失效） */
+const CACHE_KEY = "ytdlp_probe_cache";
+
+let cache: ProbeCache | null = null;
+
+function cacheTtl(info: YtdlpInfo): number {
+  return info.available ? CACHE_MS : UNAVAILABLE_CACHE_MS;
+}
+
+function cacheValid(entry: ProbeCache | null, now: number): entry is ProbeCache {
+  return Boolean(entry && Number.isFinite(entry.at) && entry.info && now - entry.at < cacheTtl(entry.info));
+}
+
+function readDiskCache(): ProbeCache | null {
+  try {
+    const raw = getSetting(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ProbeCache;
+    return parsed && typeof parsed.at === "number" && parsed.info && typeof parsed.info.available === "boolean"
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(info: YtdlpInfo): YtdlpInfo {
+  cache = { at: Date.now(), info };
+  try {
+    setSetting(CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    /* 缓存写不进去不影响探测本身 */
+  }
+  return info;
+}
+
+/** 探测可用性与版本；命中内存 / 落盘缓存时不 spawn，force 用于「重新检测」和更新完成后 */
 export async function ytdlpInfo(force = false): Promise<YtdlpInfo> {
-  if (!force && cache && Date.now() - cache.at < CACHE_MS) return cache.info;
+  if (!force) {
+    const now = Date.now();
+    if (cacheValid(cache, now)) return cache.info;
+    const disk = readDiskCache();
+    if (cacheValid(disk, now)) {
+      cache = disk;
+      return disk.info;
+    }
+  }
 
   let custom = "";
   try {
@@ -166,15 +216,13 @@ export async function ytdlpInfo(force = false): Promise<YtdlpInfo> {
     try {
       const res = await runOnce(item.file, ["--version"], 15_000);
       if (res.code === 0) {
-        const info: YtdlpInfo = {
+        return writeCache({
           available: true,
           path: item.file,
           version: res.out.trim().split("\n")[0] || null,
           source: item.source,
           error: null,
-        };
-        cache = { at: Date.now(), info };
-        return info;
+        });
       }
       lastError = (res.err || res.out).trim().slice(0, 300) || `退出码 ${res.code}`;
     } catch (err) {
@@ -182,13 +230,16 @@ export async function ytdlpInfo(force = false): Promise<YtdlpInfo> {
     }
   }
 
-  const info: YtdlpInfo = { available: false, path: null, version: null, source: null, error: lastError };
-  cache = { at: Date.now(), info };
-  return info;
+  return writeCache({ available: false, path: null, version: null, source: null, error: lastError });
 }
 
 export function clearYtdlpCache(): void {
   cache = null;
+  try {
+    setSetting(CACHE_KEY, "");
+  } catch {
+    /* ignore */
+  }
 }
 
 /* ------------------------------------------------------------------ */

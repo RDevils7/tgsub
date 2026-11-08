@@ -4,7 +4,7 @@ import path from "node:path";
 import { getSetting, getSettings, setSetting } from "../db";
 import { logger } from "../logger";
 import { downloadFile, httpRequest, parseProxy } from "../lib/netprobe";
-import { retryDelayMs, shouldRunCheck } from "./updateplan";
+import { nextCheckAt as planNextCheckAt, nextCheckDelayMs } from "./updateplan";
 import { clearYtdlpCache, localBinaryPath, versionRank, ytdlpInfo } from "./ytdlp";
 
 /**
@@ -21,12 +21,14 @@ import { clearYtdlpCache, localBinaryPath, versionRank, ytdlpInfo } from "./ytdl
 const RELEASE_API = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 const RELEASE_DL = "https://github.com/yt-dlp/yt-dlp/releases/download";
 
-/** 上次检查结果存这里，进程重启后界面上还能看到时间与版本 */
+/** 上次检查时间（无论成败）——界面显示，也是本轮排期的起点 */
 const K_CHECK_AT = "ytdlp_check_at";
+/** 排好的「下次自动检查」绝对时间戳：定时器直接睡到这一刻 */
+const K_NEXT_AT = "ytdlp_next_at";
 const K_LATEST = "ytdlp_latest";
 const K_UPDATED_AT = "ytdlp_updated_at";
 const K_ERROR = "ytdlp_check_error";
-/** 上次失败后的重试时间：失败不该把整个检查周期等满（默认 15 天） */
+/** 旧版遗留的「失败重试时间」：只用于兼容存量数据，新排期一律写 K_NEXT_AT */
 const K_RETRY_AT = "ytdlp_retry_at";
 /** 连续失败次数：用来做指数退避，避免被 GitHub 限流时每小时刷一次日志 */
 const K_FAIL_COUNT = "ytdlp_fail_count";
@@ -37,8 +39,10 @@ export interface EngineUpdateState {
   /** 远端最新版本 */
   latest: string | null;
   updateAvailable: boolean;
-  /** 上次成功检查的时间 */
+  /** 上次检查的时间（成功或失败都记） */
   checkedAt: number | null;
+  /** 下次自动检查的时间；关掉自动更新时为 null */
+  nextCheckAt: number | null;
   /** 上次成功更新的时间 */
   updatedAt: number | null;
   lastError: string | null;
@@ -53,6 +57,8 @@ export interface EngineUpdateState {
 let busy = false;
 let progress = -1;
 let running: Promise<UpdateOutcome> | null = null;
+/** 由启动器注入：检查结束 / 设置变更后立刻按新周期重排定时器 */
+let rearm: (() => void) | null = null;
 
 function readNumber(key: string): number | null {
   const raw = Number(getSetting(key) ?? 0);
@@ -159,11 +165,16 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
   running = (async (): Promise<UpdateOutcome> => {
     busy = true;
     progress = -1;
+    // 检查一开始就记时间：失败也算「查过一次」，下一轮周期从这次算起。
+    // 以前只有 fetchLatest() 成功才写，失败时 checkAt 停在很久以前，
+    // 重试点一过就同时满足「周期已到」，于是永远回不到用户设的 15 天。
+    let failed = false;
+    let failReason = "";
     const before = await ytdlpInfo(true);
     const from = before.version;
     try {
-      const latest = await fetchLatest();
       setSetting(K_CHECK_AT, String(Date.now()));
+      const latest = await fetchLatest();
       setSetting(K_LATEST, latest);
       setSetting(K_ERROR, "");
       setSetting(K_RETRY_AT, "");
@@ -207,7 +218,9 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
       logger.info({ from, to: after.version ?? verified }, "yt-dlp 已更新");
       return { ok: true, updated: true, from, to: after.version ?? verified, error: null };
     } catch (err) {
+      failed = true;
       const message = (err as Error).message || String(err);
+      failReason = message;
       // 两类常见失败：连不上 GitHub（没配代理），和 data/bin 不可写（属主不对）
       let hint = message;
       if (/EACCES|EPERM|permission denied/i.test(message)) {
@@ -219,19 +232,30 @@ export async function updateYtdlp(): Promise<UpdateOutcome> {
         hint = `${message} · 检查更新要访问 GitHub，可在「第三方平台代理」里填代理后重试`;
       }
       setSetting(K_ERROR, hint);
-      // 连续失败就拉长重试间隔。GitHub 的匿名配额是每小时 60 次，
-      // 403 之后固定 30 分钟再撞一次只会一直撞墙（同一个出口 IP 还在限流窗口里），
-      // 退避到最长 24 小时才能真正等到窗口恢复。
+      // 连续失败只用来决定「还插不插队短重试」。GitHub 匿名配额是每小时 60 次，
+      // 403 之后再撞一次只会撞在限流窗口里，所以限流直接等满整个周期。
       const fails = (readNumber(K_FAIL_COUNT) || 0) + 1;
-      const delay = retryDelayMs(fails);
       setSetting(K_FAIL_COUNT, String(fails));
-      setSetting(K_RETRY_AT, String(Date.now() + delay));
-      logger.warn({ err: message, fails, retryInMin: Math.round(delay / 60_000) }, "yt-dlp 检查更新失败");
+      logger.warn({ err: message, fails }, "yt-dlp 检查更新失败");
       return { ok: false, updated: false, from, to: null, error: hint };
     } finally {
+      // 不管成功失败都把「下次自动检查」算成绝对时间落库。
+      // 这是唯一的排期来源：定时器睡到它，界面也直接显示它。
+      const settings = getSettings();
+      const delay = nextCheckDelayMs({
+        ok: !failed,
+        failCount: failed ? readNumber(K_FAIL_COUNT) || 1 : 0,
+        checkHours: settings.ytdlp_check_hours,
+        rateLimited: /403|频率上限|rate.?limit|quota|限流/i.test(failReason),
+      });
+      setSetting(K_NEXT_AT, String(Date.now() + delay));
+      // 旧字段会让排期绕过 checkHours，新逻辑不再写它，存量值也一并作废
+      setSetting(K_RETRY_AT, "");
+      logger.debug({ nextInHours: Math.round(delay / 3600_000) }, "yt-dlp 下次自动检查已排期");
       busy = false;
       progress = -1;
       running = null;
+      rearm?.();
     }
   })();
   return running;
@@ -244,6 +268,13 @@ export async function engineState(): Promise<{ info: Awaited<ReturnType<typeof y
   const latest = getSetting(K_LATEST) || null;
   const currentRank = versionRank(info.version);
   const latestRank = versionRank(latest);
+  const scheduled = planNextCheckAt({
+    autoUpdate: settings.ytdlp_auto_update,
+    checkHours: settings.ytdlp_check_hours,
+    checkAt: readNumber(K_CHECK_AT),
+    nextAt: readNumber(K_NEXT_AT),
+    now: Date.now(),
+  });
   return {
     info,
     update: {
@@ -251,6 +282,7 @@ export async function engineState(): Promise<{ info: Awaited<ReturnType<typeof y
       latest,
       updateAvailable: Boolean(latestRank && currentRank && latestRank > currentRank),
       checkedAt: readNumber(K_CHECK_AT),
+      nextCheckAt: scheduled,
       updatedAt: readNumber(K_UPDATED_AT),
       lastError: getSetting(K_ERROR) || null,
       busy,
@@ -265,43 +297,90 @@ export async function engineState(): Promise<{ info: Awaited<ReturnType<typeof y
 /* 定时检查                                                            */
 /* ------------------------------------------------------------------ */
 
-const TICK_MS = 60 * 60 * 1000; // 每小时醒一次，实际间隔看设置
+/** Node 的 setTimeout 上限略小于 2^31 ms；设成 30 天时要分段睡 */
+const MAX_TIMER_MS = 2_147_000_000;
+/** 进程刚起来时下载队列和 Telegram 都在重连，别在那一刻去抢网络和 CPU */
+const STARTUP_GRACE_MS = 90_000;
 
-function dueForCheck(): boolean {
+function scheduledCheckAt(): number | null {
   const settings = getSettings();
-  return shouldRunCheck({
+  return planNextCheckAt({
     autoUpdate: settings.ytdlp_auto_update,
     checkHours: settings.ytdlp_check_hours,
     checkAt: readNumber(K_CHECK_AT),
-    retryAt: readNumber(K_RETRY_AT),
+    nextAt: readNumber(K_NEXT_AT),
     now: Date.now(),
   });
+}
+
+function dueForCheck(): boolean {
+  const at = scheduledCheckAt();
+  return at !== null && at <= Date.now();
+}
+
+/** 设置页改了开关 / 周期，或手动点过「检查更新」后，立刻按新时间重排 */
+export function rescheduleYtdlpAutoUpdate(opts: { fromSettingsChange?: boolean } = {}): void {
+  if (opts.fromSettingsChange) {
+    // 忽略旧排期，按新周期从「上次检查」重算一次，避免改大周期后仍按旧的短周期跑
+    const settings = getSettings();
+    const at = planNextCheckAt({
+      autoUpdate: settings.ytdlp_auto_update,
+      checkHours: settings.ytdlp_check_hours,
+      checkAt: readNumber(K_CHECK_AT),
+      now: Date.now(),
+    });
+    setSetting(K_NEXT_AT, at === null ? "" : String(at));
+    setSetting(K_RETRY_AT, "");
+  }
+  rearm?.();
 }
 
 /**
  * 启动定时检查。返回停止函数。
  *
- * 首检延迟 90 秒：刚启动时下载队列和 Telegram 都在重连，
- * 别在这时候去抢网络和 CPU。
+ * 以前是 `setInterval(1 小时)` + `dueForCheck()` 轮询：即使设了 15 天，
+ * 进程每小时也会醒一次，失败过之后更是整个周期都被 retryAt 顶掉。
+ * 现在直接算出「下次检查」的绝对时间，setTimeout 睡到那一刻；
+ * 检查完 / 设置变更后重新算一次。中间 15 天里一次定时器唤醒、一次网络请求都没有。
  */
 export function startYtdlpAutoUpdate(): () => void {
   let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let first = true;
+
+  const schedule = (): void => {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    const at = scheduledCheckAt();
+    if (at === null) return; // 自动更新关了：不排任何定时器
+    const minDelay = first ? STARTUP_GRACE_MS : 1_000;
+    first = false;
+    const delay = Math.max(minDelay, Math.min(at - Date.now(), MAX_TIMER_MS));
+    timer = setTimeout(() => void tick(), delay);
+    timer.unref();
+  };
+
   const tick = async (): Promise<void> => {
     if (stopped) return;
-    if (!dueForCheck()) return;
+    // 时钟被回拨 / 外部改了库：没到点就重新睡，绝不提前联网
+    if (!dueForCheck()) {
+      schedule();
+      return;
+    }
     try {
       await updateYtdlp();
     } catch (err) {
       logger.debug({ err: (err as Error).message }, "自动检查 yt-dlp 更新失败");
     }
+    schedule();
   };
-  const first = setTimeout(() => void tick(), 90_000);
-  first.unref();
-  const timer = setInterval(() => void tick(), TICK_MS);
-  timer.unref();
+
+  rearm = schedule;
+  schedule();
   return () => {
     stopped = true;
-    clearTimeout(first);
-    clearInterval(timer);
+    if (timer) clearTimeout(timer);
+    if (rearm === schedule) rearm = null;
   };
 }

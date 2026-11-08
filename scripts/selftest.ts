@@ -51,18 +51,26 @@ import {
 import { pickNext, type JobRef } from "../server/src/tg/queueplan";
 import {
   cleanTitle,
+  cookieHeaderFromSetCookie,
   decodeHtmlEntities,
+  describeSignatureFailure,
   extractM3u8FromHtml,
   isRetryableResolve,
   isSignatureError,
+  mergeCookieHeaders,
   normalizeMediaUrl,
+  preferRoute,
+  RERESOLVE_NOTE,
   ROUTE_FALLBACK_NOTE,
   shouldRetryRoute,
 } from "../server/src/tg/m3u8";
 import {
   DEFAULT_CHECK_HOURS,
+  MAX_AUTO_RETRIES,
   MAX_RETRY_DELAY_MS,
   daysToHours,
+  nextCheckAt,
+  nextCheckDelayMs,
   retryDelayMs,
   shouldRunCheck,
 } from "../server/src/platform/updateplan";
@@ -100,12 +108,15 @@ import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferp
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
 import { HIT_LINE_LIMIT, hitLine, hitLines, hitSummaryLine, type HitLike } from "../server/src/tg/hitplan";
 import {
+  buildIssue,
   diskLevel,
   ellipsizePath,
   humanUptime,
+  issueId,
   statusRank,
   summarizeProbes,
   toolStatus,
+  type IgnoredIssue,
   type ProbeLike,
 } from "../server/src/system/overviewFormat";
 import {
@@ -123,6 +134,7 @@ import {
 } from "../server/src/tg/nfo";
 import { nfoTraceOf } from "../server/src/tg/nfotrace";
 import { formatClock, parseSeekText } from "../web/src/utils";
+import { mapLimit } from "../server/src/lib/async";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -2077,6 +2089,61 @@ function updatePlanChecks(): void {
     assert.equal(retryDelayMs(0), 30 * 60_000);
     assert.equal(retryDelayMs(-5), 30 * 60_000);
   });
+
+  // 1.3.15：以前定时器每小时醒一次，且失败后 retryAt 永久存在、绕过 checkHours，
+  // 于是「设 15 天」实际变成每小时 / 每天撞 GitHub。下面三条直接回归这个现象。
+  check("自动检查按精确时间排期：15 天内一次都不该到点", () => {
+    const now = 1000 * DAY;
+    const checkAt = now - 1 * DAY;
+    const at = nextCheckAt({ autoUpdate: true, checkHours: 360, checkAt, now });
+    assert.equal(at, checkAt + 15 * DAY, "下次检查 = 上次检查 + 一个完整周期");
+    for (let i = 0; i < 24 * 14; i++) {
+      assert.ok(now + i * HOUR < Number(at), `第 ${i} 小时不该触发检查`);
+    }
+    assert.equal(nextCheckAt({ autoUpdate: false, checkHours: 360, checkAt, now }), null);
+    assert.equal(nextCheckAt({ autoUpdate: true, checkHours: 360, now }), now, "从没查过就立刻排");
+  });
+
+  check("失败重试有硬上限，不会把 15 天顶成每小时 / 每天", () => {
+    assert.equal(nextCheckDelayMs({ ok: true, failCount: 0, checkHours: 360 }), 15 * DAY);
+    assert.equal(nextCheckDelayMs({ ok: false, failCount: 1, checkHours: 360 }), 30 * 60_000);
+    assert.equal(nextCheckDelayMs({ ok: false, failCount: 2, checkHours: 360 }), 60 * 60_000);
+    assert.equal(
+      nextCheckDelayMs({ ok: false, failCount: MAX_AUTO_RETRIES + 1, checkHours: 360 }),
+      15 * DAY,
+      "第三次失败起等满周期",
+    );
+    assert.equal(nextCheckDelayMs({ ok: false, failCount: 99, checkHours: 360 }), 15 * DAY);
+    assert.equal(
+      nextCheckDelayMs({ ok: false, failCount: 1, checkHours: 360, rateLimited: true }),
+      15 * DAY,
+      "403 / 限流直接等满周期，不再撞墙",
+    );
+    assert.equal(
+      nextCheckDelayMs({ ok: false, failCount: 1, checkHours: 1 }),
+      30 * 60_000,
+      "周期设成 1 小时时，重试间隔仍不许超过它",
+    );
+    assert.equal(
+      nextCheckDelayMs({ ok: true, failCount: 0, checkHours: 0 }),
+      15 * DAY,
+      "非法周期兜底成默认 15 天",
+    );
+  });
+
+  check("显式排期与旧 retryAt 都受周期上限约束", () => {
+    const now = 1000 * DAY;
+    const checkAt = now - 1 * DAY;
+    const ceiling = checkAt + 15 * DAY;
+    assert.equal(nextCheckAt({ autoUpdate: true, checkHours: 360, checkAt, nextAt: now + 30 * DAY, now }), ceiling);
+    assert.equal(
+      nextCheckAt({ autoUpdate: true, checkHours: 360, checkAt, retryAt: now + 40 * DAY, now }),
+      ceiling,
+      "1.3.1 之前遗留的 retryAt 也不能把周期顶穿",
+    );
+    // 设置页把周期改大后忽略旧 nextAt，按新周期重排
+    assert.equal(nextCheckAt({ autoUpdate: true, checkHours: 720, checkAt, now }), checkAt + 30 * DAY);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -2396,6 +2463,70 @@ function m3u8ParseChecks(): void {
 
   check("线路切换提示文案与用户要求一致", () => {
     assert.equal(ROUTE_FALLBACK_NOTE, "因直连下载失败，使用代理进行下载");
+    assert.match(RERESOLVE_NOTE, /重新解析网页地址/);
+  });
+
+  check("Set-Cookie 拼成 Cookie 请求头：丢属性、同名覆盖", () => {
+    assert.equal(
+      cookieHeaderFromSetCookie([
+        "sid=abc; Path=/; HttpOnly",
+        "cf_clearance=xyz; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT",
+        "sid=new; Path=/",
+      ]),
+      "sid=new; cf_clearance=xyz",
+    );
+    assert.equal(cookieHeaderFromSetCookie([]), "");
+    assert.equal(cookieHeaderFromSetCookie(["bad"]), "");
+  });
+
+  check("合并重定向沿途与浏览器两处拿到的 Cookie", () => {
+    assert.equal(mergeCookieHeaders("sid=old; a=1", "sid=new; b=2"), "sid=new; a=1; b=2");
+    assert.equal(mergeCookieHeaders("", undefined, "cf_clearance=z"), "cf_clearance=z");
+  });
+
+  check("解析线路优先：带签名的地址不许先跨线路下载", () => {
+    assert.deepEqual(preferRoute(["direct", "proxy"], "proxy"), ["proxy", "direct"]);
+    assert.deepEqual(preferRoute(["direct", "proxy"], "direct"), ["direct", "proxy"]);
+    // 设置成「只直连」时不能凭空造出一条代理线路
+    assert.deepEqual(preferRoute(["direct"], "proxy"), ["direct"]);
+    assert.deepEqual(preferRoute(["direct", "proxy"], undefined), ["direct", "proxy"]);
+  });
+
+  check("403 说明：直链 / 网页 / 已自动重解析分开写，别再让人重复提交", () => {
+    const base = "源站拒绝下载（403）：播放地址 / 防盗链签名 / Cookie 已失效";
+    assert.match(
+      describeSignatureFailure(base, {
+        original: "https://cdn.x/a.m3u8?k=1",
+        refreshed: false,
+        hasCookies: false,
+      }),
+      /m3u8 直链/,
+    );
+    assert.match(
+      describeSignatureFailure(base, {
+        original: "https://site.x/v/1",
+        refreshed: true,
+        hasCookies: true,
+      }),
+      /已自动重解析网页地址并重试仍被拒绝.*已带上页面 Cookie/,
+    );
+    assert.match(
+      describeSignatureFailure(base, {
+        original: "https://site.x/v/1",
+        refreshed: false,
+        hasCookies: false,
+      }),
+      /可重新粘贴网页地址/,
+    );
+    // 404 不是签名/防盗链问题，不该套 403 的建议
+    assert.equal(
+      describeSignatureFailure("视频地址已失效（404）", {
+        original: "https://site.x/v/1",
+        refreshed: true,
+        hasCookies: false,
+      }),
+      "视频地址已失效（404）",
+    );
   });
 
   check("解析换线路判定：403 / 挑战页也算可重试", () => {
@@ -3306,7 +3437,7 @@ function overviewChecks(): void {
       [probe("warn", "yt-dlp", "旧版"), probe("error", "ffmpeg", "挂了"), probe("warn", "sharp", "降级")],
     ]);
     assert.equal(s.overall, "error");
-    assert.deepEqual(s.issues, ["ffmpeg：挂了", "yt-dlp：旧版", "sharp：降级"]);
+    assert.deepEqual(s.issues.map((i) => i.text), ["ffmpeg：挂了", "yt-dlp：旧版", "sharp：降级"]);
   });
 
   check("概览汇总：只有留意或全未启用时整体状态正确", () => {
@@ -3314,6 +3445,75 @@ function overviewChecks(): void {
     assert.equal(summarizeProbes([[probe("off", "Emby"), probe("off", "Bot")]]).overall, "off");
     assert.equal(summarizeProbes([]).overall, "off");
     assert.deepEqual(summarizeProbes([[probe("off", "Bot", "用户主动关的")]]).issues, []);
+  });
+
+  check("概览提醒：id 只认状态值，说明文字变了不该让忽略失效", () => {
+    const a: ProbeLike = {
+      id: "service:platform",
+      status: "warn",
+      label: "第三方平台",
+      value: "2/3 已配 Cookie",
+      note: "画质 best · 有平台缺 Cookie",
+    };
+    assert.ok(/^service:platform:/.test(issueId(a)));
+    assert.equal(issueId(a), issueId({ ...a, note: "画质 best · B站、小红书 需补 Cookie" }));
+    assert.notEqual(issueId(a), issueId({ ...a, value: "3/3 已配 Cookie" }), "状态变了必须重新提醒");
+    assert.notEqual(issueId(a), issueId({ ...a, id: "service:bot" }), "不同探针不能共用 id");
+  });
+
+  check("概览提醒：详情先列具体明细，再列状态 / 影响 / 建议", () => {
+    const issue = buildIssue({
+      id: "service:platform",
+      status: "warn",
+      label: "第三方平台",
+      value: "2/3 已配 Cookie",
+      note: "画质 best",
+      detail: ["B站：未配置 Cookie", "小红书：缺 web_session"],
+      hint: "设置页补 Cookie",
+      impact: "手动下载",
+      page: "settings",
+    });
+    assert.equal(issue.text, "第三方平台：画质 best");
+    assert.equal(issue.detail[0], "B站：未配置 Cookie");
+    assert.ok(issue.detail.includes("当前值：2/3 已配 Cookie"));
+    assert.ok(issue.detail.includes("影响：手动下载"));
+    assert.equal(issue.hint, "设置页补 Cookie");
+    assert.equal(issue.page, "settings");
+    assert.equal(issue.level, "warn");
+  });
+
+  check("概览提醒：忽略后不计入留意 / 异常，也不拖累整体状态", () => {
+    const a: ProbeLike = { id: "service:platform", status: "warn", label: "第三方平台", value: "2/3", note: "缺 Cookie" };
+    const b: ProbeLike = { status: "ok", label: "Node.js" };
+    const id = issueId(a);
+    const ignored: IgnoredIssue[] = [{ id, label: a.label, text: "第三方平台：缺 Cookie", ignoredAt: 1234 }];
+    const s = summarizeProbes([[a, b]], ignored);
+    assert.equal(s.warn, 0);
+    assert.equal(s.ok, 1);
+    assert.equal(s.overall, "ok");
+    assert.equal(s.ignoredCount, 1);
+    assert.equal(s.issues.length, 0);
+    assert.equal(s.ignored.length, 1);
+    assert.equal(s.ignored[0].id, id);
+    assert.equal(s.ignored[0].ignoredAt, 1234);
+    // 不传忽略记录时照常报
+    assert.equal(summarizeProbes([[a, b]]).overall, "warn");
+  });
+
+  check("概览提醒：error 也能忽略，问题消失后用库里快照仍可恢复", () => {
+    const bad: ProbeLike = { id: "tool:ffmpeg", status: "error", label: "ffmpeg", value: "未安装" };
+    const id = issueId(bad);
+    const ignored: IgnoredIssue[] = [{ id, label: "ffmpeg", text: "ffmpeg：未安装", ignoredAt: 1000 }];
+    const t = summarizeProbes([[bad, { status: "ok", label: "Node.js" }]], ignored);
+    assert.equal(t.error, 0);
+    assert.equal(t.overall, "ok");
+    assert.equal(t.ignored[0].text, "ffmpeg：未安装");
+    // 状态修好了（value 变了 → id 也变了），探针里不再有这条，但快照还在
+    const s = summarizeProbes([[{ ...bad, status: "ok", value: "ffmpeg 7.1" }]], ignored);
+    assert.equal(s.error, 0);
+    assert.equal(s.issues.length, 0);
+    assert.equal(s.ignored.length, 1);
+    assert.equal(s.ignored[0].ignoredAt, 1000);
   });
 
   check("磁盘占用率分档：80% 留意、92% 异常", () => {
@@ -3746,10 +3946,12 @@ async function mediaLibChecks(): Promise<void> {
       assert.equal(playModeOf("a.mkv", probe("h264"), { hw: true }), "remux");
     });
 
-    check("播放地址：转码带 mode=transcode，拖进度条带 start", () => {
+    check("播放地址：转码带 mode=transcode，直连带 mode=direct 跳过服务端探测", () => {
       assert.ok(streamUrl("a.mkv", "transcode").includes("mode=transcode"));
+      assert.ok(streamUrl("a.mkv", "remux").includes("mode=remux"));
+      // 列表已经算好是直连，回传 mode=direct 让 /stream 不再起 ffmpeg 探测，点播放秒开
       assert.ok(streamUrl("a.mp4", "direct").includes("path="));
-      assert.ok(!streamUrl("a.mp4", "direct").includes("mode="));
+      assert.ok(streamUrl("a.mp4", "direct").includes("mode=direct"));
       // 实时流拖动：从 125 秒重新起一路
       assert.ok(streamUrl("a.mkv", "transcode", 125.7).includes("start=125"));
       assert.ok(!streamUrl("a.mp4", "direct", 0).includes("start="));
@@ -4026,6 +4228,50 @@ function playerChecks(): void {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* 目录扫描的受控并发                                                  */
+/* ------------------------------------------------------------------ */
+
+async function asyncPoolChecks(): Promise<void> {
+  await checkAsync("受控并发：同时最多 N 个任务，结果顺序与输入一致", async () => {
+    let running = 0;
+    let peak = 0;
+    const out = await mapLimit(
+      Array.from({ length: 12 }, (_, i) => i),
+      3,
+      async (n) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, (n % 3) * 3 + 1));
+        running -= 1;
+        return n * 2;
+      },
+    );
+    assert.deepEqual(out, Array.from({ length: 12 }, (_, i) => i * 2));
+    assert.equal(peak, 3);
+  });
+
+  await checkAsync("受控并发：空数组与非法并发数都不炸", async () => {
+    assert.deepEqual(await mapLimit([], 4, async (n) => n), []);
+    assert.deepEqual(await mapLimit([1, 2], 0, async (n) => n), [1, 2]);
+    assert.deepEqual(await mapLimit([1, 2], -3, async (n) => n), [1, 2]);
+  });
+
+  await checkAsync("受控并发：并发数大于任务数时不起空 worker", async () => {
+    let running = 0;
+    let peak = 0;
+    const out = await mapLimit([1, 2], 100, async (n) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      running -= 1;
+      return n;
+    });
+    assert.deepEqual(out, [1, 2]);
+    assert.ok(peak <= 2);
+  });
+}
+
 async function main(): Promise<void> {
   const suites: Array<[string, () => unknown]> = [
     ["剧集目录用例", () => seriesDirChecks()],
@@ -4059,6 +4305,7 @@ async function main(): Promise<void> {
     ["NFO 生成追溯用例", () => nfoTraceChecks()],
     ["订阅命中通知用例", () => hitPlanChecks()],
     ["播放器控制条用例", () => playerChecks()],
+    ["目录扫描并发用例", () => asyncPoolChecks()],
   ];
   for (const [name, run] of suites) {
     try {

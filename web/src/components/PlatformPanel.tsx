@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { PlatformId, PlatformInfo, PlatformStatus } from "../types";
 import { Badge, Button, StatusDot, Toggle, useToast } from "../components/ui";
+import { formatDateTime } from "../utils";
 import { IconAlert, IconCheck, IconHelp, IconLink, IconRefresh } from "../components/icons";
 import CollapsibleCard from "./CollapsibleCard";
 
@@ -456,6 +457,14 @@ export default function PlatformPanel() {
             )}
           </span>
           {update?.updatedAt && <span>上次更新 {ageLabel(update.updatedAt)}</span>}
+          <span>
+            下次自动检查{" "}
+            {update?.autoUpdate ? (
+              <span className="font-mono text-slate-400">{formatDateTime(update.nextCheckAt)}</span>
+            ) : (
+              <span className="text-slate-500">已关闭</span>
+            )}
+          </span>
         </div>
 
         {update?.lastError && (

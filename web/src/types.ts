@@ -317,6 +317,8 @@ export interface EngineUpdateState {
   latest: string | null;
   updateAvailable: boolean;
   checkedAt: number | null;
+  /** 下次自动检查的绝对时间；关掉自动更新时为 null */
+  nextCheckAt: number | null;
   updatedAt: number | null;
   lastError: string | null;
   busy: boolean;
@@ -507,12 +509,6 @@ export interface SettingsResponse {
   bot?: BotState;
   /** Emby API Key 只回掩码 */
   emby?: { apiKeySet: boolean; apiKeyHint: string | null };
-  /** 第三方平台：Cookie 状态 + yt-dlp 版本 */
-  platform?: {
-    cookies: Record<string, PlatformCookieState>;
-    ytdlp: YtdlpInfo;
-    update: EngineUpdateState;
-  };
 }
 
 /* ------------------------------ 网络与代理 ------------------------------ */
@@ -1100,6 +1096,20 @@ export interface ServiceProbe {
   value: string;
   note: string | null;
   page: "settings" | "channels" | "downloads" | "logs" | "manual" | "metadata" | null;
+  detail?: string[];
+  hint?: string | null;
+}
+
+/** 概览顶部的一条「留意 / 异常」，带可忽略的稳定 id 与展开详情 */
+export interface OverviewIssue {
+  id: string;
+  level: "warn" | "error";
+  label: string;
+  text: string;
+  detail: string[];
+  hint: string | null;
+  page: "settings" | "channels" | "downloads" | "logs" | "manual" | "metadata" | null;
+  ignoredAt: number | null;
 }
 
 export interface StorageDirProbe {
@@ -1152,7 +1162,10 @@ export interface OverviewReport {
     warn: number;
     error: number;
     off: number;
-    issues: string[];
+    /** 计数只算未忽略的项，和顶部标题一致 */
+    issues: OverviewIssue[];
+    ignored: OverviewIssue[];
+    ignoredCount: number;
     overall: ProbeStatus;
   };
 }

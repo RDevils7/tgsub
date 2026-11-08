@@ -2,7 +2,6 @@ import { Router } from "express";
 import {
   db,
   getEmbyKeyHint,
-  getPlatformCookieHint,
   getSession,
   getSettings,
   setBotToken,
@@ -22,7 +21,7 @@ import { AppSettings, Download, PLATFORM_IDS } from "../types";
 import { asyncHandler, assert, clampInt } from "../lib/http";
 import { APP_VERSION } from "../version";
 import { clearYtdlpCache } from "../platform/ytdlp";
-import { engineState } from "../platform/updater";
+import { rescheduleYtdlpAutoUpdate } from "../platform/updater";
 import { DIR_KEYS, DIR_LABEL, parseDirSetting } from "../tg/mediadir";
 
 export const settingsRouter = Router();
@@ -30,14 +29,6 @@ export const settingsRouter = Router();
 const MASK = "••••••••";
 
 const PLATFORMS = PLATFORM_IDS;
-
-/** 设置页要的第三方平台状态：Cookie 只回「有没有配 + 摘要」，yt-dlp 回版本与更新状态 */
-async function platformSnapshot() {
-  const cookies: Record<string, ReturnType<typeof getPlatformCookieHint>> = {};
-  for (const id of PLATFORMS) cookies[id] = getPlatformCookieHint(id);
-  const { info, update } = await engineState();
-  return { cookies, ytdlp: info, update };
-}
 
 settingsRouter.get(
   "/",
@@ -61,7 +52,8 @@ settingsRouter.get(
       paths: { dataDir: env.dataDir, downloadDir: env.downloadDir, dbFile: env.dbFile },
       version: APP_VERSION,
       bot: getBotState(),
-      platform: await platformSnapshot(),
+      // 第三方平台状态由 PlatformPanel 自己走 /api/platform/status，
+      // 这里不再附一份 —— 以前每次进设置页都要顺带探测一次 yt-dlp，纯白等。
     });
   }),
 );
@@ -205,6 +197,14 @@ settingsRouter.put(
     // 换了 yt-dlp 路径要重新探测，否则界面还显示旧的「未安装」
     if (before.ytdlp_path !== next.ytdlp_path) clearYtdlpCache();
 
+    // 检查周期 / 开关改了：立刻按新周期重排定时器，不用等重启或下一次检查
+    if (
+      before.ytdlp_auto_update !== next.ytdlp_auto_update ||
+      before.ytdlp_check_hours !== next.ytdlp_check_hours
+    ) {
+      rescheduleYtdlpAutoUpdate({ fromSettingsChange: true });
+    }
+
     // Emby 地址 / Key 变了：媒体库页缓存的用户 ID 与海报都失效，清掉重新取
     if (
       before.emby_url !== next.emby_url ||
@@ -247,7 +247,6 @@ settingsRouter.put(
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
       emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
       bot: getBotState(),
-      platform: await platformSnapshot(),
     });
   }),
 );

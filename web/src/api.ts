@@ -133,6 +133,19 @@ export const api = {
   /** 概览页聚合状态：运行时 / 存储 / 工具链 / 服务，一次拿全 */
   overview: (refresh = false) =>
     request<OverviewReport>(`/overview${refresh ? "?refresh=1" : ""}`),
+  /** 忽略 / 恢复概览提醒；服务端会同时清掉 30 秒报告缓存 */
+  overviewIgnore: (id: string, label?: string, text?: string) =>
+    request<{ ok: boolean; id: string }>("/overview/issues/ignore", {
+      method: "POST",
+      body: JSON.stringify({ id, label, text }),
+    }),
+  overviewRestore: (id: string) =>
+    request<{ ok: boolean; id: string }>("/overview/issues/restore", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+  overviewRestoreAll: () =>
+    request<{ ok: boolean; count: number }>("/overview/issues/restore-all", { method: "POST" }),
 
   /* ------------------------------ 管理界面登录 ------------------------------ */
   /** 一次问清三种状态：未初始化 / 未登录 / 已登录 */

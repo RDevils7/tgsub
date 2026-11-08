@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, getBotToken, getSettings } from "../db";
+import { db, clearIgnoredIssues, getBotToken, getSettings, ignoreIssue, restoreIgnoredIssue } from "../db";
 import { getSchedulerState, isScanning, markScanTimestamp, scanAll, scanChannel } from "../tg/scanner";
 import { downloader } from "../tg/downloader";
 import { getAuthState, sdkLoaded } from "../tg/client";
@@ -17,7 +17,7 @@ import {
   telegramProxyUnsupported,
 } from "../lib/netprobe";
 import { APP_VERSION } from "../version";
-import { getOverview } from "../system/overview";
+import { findOverviewIssue, getOverview, invalidateOverview } from "../system/overview";
 import { logger } from "../logger";
 
 export const systemRouter = Router();
@@ -45,6 +45,50 @@ systemRouter.get(
   "/overview",
   asyncHandler(async (req, res) => {
     res.json(await getOverview(req.query.refresh === "1"));
+  }),
+);
+
+/**
+ * 忽略一条概览提醒。存的是「探针 id + 状态指纹」，不是整段文案：
+ * 状态变了（例如 Cookie 补齐）会生成新 id，提醒会自动回来。
+ * 文案快照一起落库，问题消失后仍能在「已忽略」里找到并恢复。
+ */
+systemRouter.post(
+  "/overview/issues/ignore",
+  asyncHandler(async (req, res) => {
+    const id = String(req.body?.id ?? "").trim();
+    assert(id && id.length <= 160, 400, "缺少提醒标识");
+    const found = await findOverviewIssue(id);
+    const fallbackLabel = String(req.body?.label ?? "").trim().slice(0, 120);
+    const fallbackText = String(req.body?.text ?? "").trim().slice(0, 400);
+    const label = found?.label || fallbackLabel || "已忽略的提醒";
+    const text = found?.text || fallbackText || label;
+    ignoreIssue(id, label, text);
+    invalidateOverview();
+    logger.info({ id, label }, "已忽略概览提醒");
+    res.json({ ok: true, id });
+  }),
+);
+
+/** 取消忽略：下次刷新这条提醒会重新出现在顶部 */
+systemRouter.post(
+  "/overview/issues/restore",
+  asyncHandler(async (req, res) => {
+    const id = String(req.body?.id ?? "").trim();
+    assert(id, 400, "缺少提醒标识");
+    const ok = restoreIgnoredIssue(id);
+    invalidateOverview();
+    res.json({ ok, id });
+  }),
+);
+
+/** 一键把「已忽略」全部恢复 */
+systemRouter.post(
+  "/overview/issues/restore-all",
+  asyncHandler(async (_req, res) => {
+    const count = clearIgnoredIssues();
+    invalidateOverview();
+    res.json({ ok: true, count });
   }),
 );
 

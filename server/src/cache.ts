@@ -267,6 +267,7 @@ export async function trimCache(opts: {
   lastTrimAt = Date.now();
   lastTrimFreed = actualFreed;
   lastTrimReason = opts.reason ?? "manual";
+  invalidateCacheStats();
 
   logger.info(
     {
@@ -330,6 +331,7 @@ export async function clearCache(): Promise<TrimResult> {
   lastTrimAt = Date.now();
   lastTrimFreed = freed;
   lastTrimReason = "clear";
+  invalidateCacheStats();
 
   logger.info(
     { freed: humanBytes(freed), files: removedFiles },
@@ -345,11 +347,24 @@ export async function clearCache(): Promise<TrimResult> {
   };
 }
 
-export async function cacheStats(): Promise<CacheStats> {
+/**
+ * 缓存占用统计会递归 readdir + stat 两个缓存目录里的每个文件，
+ * 目录一大就是几千次磁盘调用。设置页每次进入都全量扫一遍纯属浪费，
+ * 这里缓存 30 秒；清理 / 清空后主动失效，界面上看到的数字不会是旧的。
+ */
+let statsCache: { at: number; value: CacheStats } | null = null;
+const STATS_TTL_MS = 30_000;
+
+export function invalidateCacheStats(): void {
+  statsCache = null;
+}
+
+export async function cacheStats(force = false): Promise<CacheStats> {
+  if (!force && statsCache && Date.now() - statsCache.at < STATS_TTL_MS) return statsCache.value;
   const limitMb = Math.max(0, Math.round(Number(getSettings().cache_limit_mb) || 0));
   const { covers, frames } = await collectCache();
   const totalBytes = covers.bytes + frames.bytes;
-  return {
+  const value: CacheStats = {
     covers,
     frames,
     total: {
@@ -363,6 +378,8 @@ export async function cacheStats(): Promise<CacheStats> {
     lastTrimFreed,
     lastTrimReason,
   };
+  statsCache = { at: Date.now(), value };
+  return value;
 }
 
 /* ----------------------------- 自动触发 ----------------------------- */

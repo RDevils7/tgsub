@@ -16,6 +16,7 @@ import { requestCacheTrim } from "../cache";
 import { parsePlatformLink } from "../platform/detect";
 import { downloadPlatform, platformName } from "../platform/ytdlp";
 import {
+  describeSignatureFailure,
   downloadM3u8To,
   hostOf,
   isSignatureError,
@@ -24,10 +25,11 @@ import {
   pickProxy,
   plannedRoutes,
   resolveM3u8Input,
+  RERESOLVE_NOTE,
   ROUTE_FALLBACK_NOTE,
   shouldRetryRoute,
 } from "./m3u8";
-import { rememberRoute } from "./netroute";
+import { rememberRoute, type NetRoute } from "./netroute";
 import { sanitizeRelDir } from "./mediadir";
 import { pickNext, type JobRef } from "./queueplan";
 
@@ -1063,7 +1065,9 @@ class DownloadQueue {
     const meta = decodeMeta(row.emby_json);
     const label = meta?.series ?? row.save_name ?? row.file_name;
     const dir = path.join(env.downloadDir, row.save_dir ?? "");
-    let m3u8: { url: string; referer?: string; origin?: string; cookies?: string } | undefined;
+    let m3u8:
+      | { url: string; referer?: string; origin?: string; cookies?: string; route?: NetRoute }
+      | undefined;
     try {
       m3u8 = JSON.parse(row.emby_json || "{}").m3u8;
     } catch {
@@ -1074,25 +1078,44 @@ class DownloadQueue {
     const controller = new AbortController();
     this.platformAbort.set(id, controller);
 
+    // 最终失败时要写清楚「已经自动做过什么」，别让用户照旧文案反复粘同一条链接
+    const original = meta?.link ?? null;
+    let refreshed = false;
+    let lastRoute: NetRoute | undefined;
+    let hasCookies = false;
+    let fallbackNote = "";
+
     try {
       if (!m3u8?.url) throw new Error("找不到 m3u8 地址（解析结果丢失，请重新发链接）");
 
-      // 线路：默认直连优先（直连不通再回退代理）。解析阶段走通的线路会被记住，
-      // 这次直接沿用，省掉一次失败尝试。
+      // 线路：解析阶段走通的那条优先。带签名的 m3u8 常绑出口 IP，
+      // 直连解析出的地址拿去走代理（或反过来）会被 CDN 判 403。
       const proxy = pickProxy();
-      let target = {
+      const resolvedRoute: NetRoute | undefined =
+        m3u8.route === "direct" || m3u8.route === "proxy" ? m3u8.route : undefined;
+      let target: {
+        url: string;
+        referer?: string;
+        origin?: string;
+        cookies?: string;
+        route?: NetRoute;
+      } = {
         url: normalizeMediaUrl(m3u8.url),
         referer: m3u8.referer,
         origin: m3u8.origin,
         cookies: m3u8.cookies,
+        route: resolvedRoute,
       };
+      hasCookies = Boolean(target.cookies);
 
       const attemptDownload = async (): Promise<void> => {
-        const routes = plannedRoutes(target.url);
+        fallbackNote = "";
+        const routes = plannedRoutes(target.url, target.route);
         let lastError: Error | null = null;
 
         for (let i = 0; i < routes.length; i += 1) {
           const route = routes[i];
+          lastRoute = route;
           // 实时写回线路，界面上能立刻看到「这条在走直连还是代理」
           stmtRoute.run(route, id);
           try {
@@ -1127,7 +1150,11 @@ class DownloadQueue {
             // 直连失败、下一条线路正好是代理 —— 把原因写进任务，
             // 下载列表会立刻显示「因直连下载失败，使用代理进行下载」。
             if (route === "direct" && routes[i + 1] === "proxy") {
-              stmtRouteNote.run(ROUTE_FALLBACK_NOTE, id);
+              fallbackNote = ROUTE_FALLBACK_NOTE;
+              stmtRouteNote.run(
+                [fallbackNote, refreshed ? RERESOLVE_NOTE : ""].filter(Boolean).join("；"),
+                id,
+              );
             }
             logger.warn(
               { id, route, err: message },
@@ -1141,7 +1168,6 @@ class DownloadQueue {
       // m3u8 的 auth_key 与 cf_clearance 都有有效期。硬失败一次后，用原始网页链接
       // 重新解析一遍就能拿到新的签名与 Cookie —— 比让用户重新粘贴链接友好，
       // 也顺手修好「库里存的是过期地址」这种隔天重试的场景。
-      let refreshed = false;
       for (;;) {
         try {
           await attemptDownload();
@@ -1149,20 +1175,27 @@ class DownloadQueue {
         } catch (err) {
           if (controller.signal.aborted) throw err;
           const message = (err as Error)?.message ?? "";
-          const original = meta?.link;
           if (refreshed || !original || !isSignatureError(message)) throw err;
           // 用户直接粘 m3u8 直链时没有「原始网页」可重解析，别白跑一趟
           if (looksLikeM3u8(original)) throw err;
           refreshed = true;
-          logger.info({ id, link: original }, "签名或登录态可能已失效，用原始网页链接重新解析后再试一次");
-          const fresh = await resolveM3u8Input(original);
+          // 按刚才失败的那条线路重解析：签名绑出口 IP，跨线路拿到的新地址还是会被拒
+          const retryRoute = lastRoute ?? target.route;
+          logger.info(
+            { id, link: original, route: retryRoute ?? "auto" },
+            "签名或登录态可能已失效，按同一线路用原始网页链接重新解析后再试一次",
+          );
+          const fresh = await resolveM3u8Input(original, retryRoute);
           target = {
             url: normalizeMediaUrl(fresh.m3u8Url),
             referer: fresh.referer,
             origin: fresh.origin,
             cookies: fresh.cookies,
+            route: fresh.route,
           };
-          // 把新地址写回任务，后面「继续 / 重试」就不用再解析一次
+          hasCookies = Boolean(target.cookies);
+          stmtRouteNote.run([fallbackNote, RERESOLVE_NOTE].filter(Boolean).join("；"), id);
+          // 把新地址 / 线路 / Cookie 一起写回任务，后面「继续 / 重试」就不用再解析一次
           try {
             const emby = JSON.parse(row.emby_json || "{}") as Record<string, unknown>;
             emby.m3u8 = {
@@ -1170,8 +1203,10 @@ class DownloadQueue {
               referer: target.referer,
               origin: target.origin,
               cookies: target.cookies ?? null,
+              route: target.route,
             };
-            db.prepare("UPDATE downloads SET emby_json = ? WHERE id = ?").run(JSON.stringify(emby), id);
+            row.emby_json = JSON.stringify(emby);
+            db.prepare("UPDATE downloads SET emby_json = ? WHERE id = ?").run(row.emby_json, id);
           } catch {
             /* 元数据坏了就算了，不影响这次下载 */
           }
@@ -1226,8 +1261,12 @@ class DownloadQueue {
         return;
       }
 
-      stmtFail.run(message.slice(0, 500), Date.now(), id);
-      logger.error({ id, err: message }, `下载失败：${label}（${message}）`);
+      const userMessage = describeSignatureFailure(message, { original, refreshed, hasCookies });
+      stmtFail.run(userMessage.slice(0, 500), Date.now(), id);
+      logger.error(
+        { id, err: message, refreshed, route: lastRoute ?? "none", hasCookies },
+        `下载失败：${label}（${message}）`,
+      );
     } finally {
       this.platformAbort.delete(id);
     }

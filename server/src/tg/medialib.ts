@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { getSettings } from "../db";
+import { db, getSettings } from "../db";
 import { env } from "../env";
+import { logger } from "../logger";
+import { mapLimit } from "../lib/async";
 import { captureStill, probeVideo, type VideoProbe } from "./ffmpeg";
 import { DEFAULT_SOURCE_DIRS, DIR_KEYS, DIR_LABEL, parseDirSetting, type DirKey } from "./mediadir";
 import { isVideoFile } from "./mediapath";
@@ -138,7 +140,7 @@ export function playModeOf(file: string, probe: VideoProbe | null, opts: PlayOpt
 }
 
 /* ------------------------------------------------------------------ */
-/* 探测缓存                                                            */
+/* 探测缓存：内存 + SQLite 两级                                        */
 /* ------------------------------------------------------------------ */
 
 interface CacheEntry {
@@ -151,6 +153,8 @@ const PROBE_CACHE = new Map<string, CacheEntry>();
 const PROBE_CACHE_MAX = 800;
 /** 一次探测几十毫秒，但一季几十集并发会拖爆机器，限个道 */
 const PROBE_CONCURRENCY = 4;
+/** 目录级并行：NFO / stat / 探测一起跑，但不把 NAS 的磁盘打满 */
+const LIBRARY_CONCURRENCY = 6;
 let probeRunning = 0;
 const probeQueue: Array<() => void> = [];
 
@@ -165,18 +169,79 @@ async function withProbeSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** 按 路径 + 大小 + mtime 缓存探测结果：文件没变就不用再探一次 */
+interface ProbeRow {
+  size: number;
+  mtime_ms: number;
+  payload: string;
+}
+
+const stmtProbeGet = db.prepare<[string], ProbeRow>(
+  "SELECT size, mtime_ms, payload FROM media_probes WHERE path = ?",
+);
+const stmtProbeSet = db.prepare<[string, number, number, string, number]>(
+  "INSERT OR REPLACE INTO media_probes (path, size, mtime_ms, payload, probed_at) VALUES (?, ?, ?, ?, ?)",
+);
+const stmtProbeCount = db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM media_probes");
+const stmtProbePrune = db.prepare(
+  "DELETE FROM media_probes WHERE path IN (SELECT path FROM media_probes ORDER BY probed_at ASC LIMIT 2000)",
+);
+let probeWrites = 0;
+
+/** 读落盘的探测结果；`probe: null` 也是有效结果（损坏文件别反复探测） */
+function storedProbe(file: string, st: fs.Stats): { hit: boolean; probe: VideoProbe | null } {
+  try {
+    const row = stmtProbeGet.get(file);
+    if (!row || row.size !== st.size || Math.round(row.mtime_ms) !== Math.round(st.mtimeMs)) {
+      return { hit: false, probe: null };
+    }
+    const parsed = JSON.parse(row.payload) as VideoProbe | null;
+    return { hit: true, probe: parsed && typeof parsed === "object" ? parsed : null };
+  } catch {
+    return { hit: false, probe: null };
+  }
+}
+
+function rememberProbe(file: string, st: fs.Stats, probe: VideoProbe | null): void {
+  if (!PROBE_CACHE.has(file) && PROBE_CACHE.size >= PROBE_CACHE_MAX) {
+    const oldest = PROBE_CACHE.keys().next().value;
+    if (oldest) PROBE_CACHE.delete(oldest);
+  }
+  PROBE_CACHE.set(file, { size: st.size, mtimeMs: st.mtimeMs, probe });
+}
+
+function saveProbe(file: string, st: fs.Stats, probe: VideoProbe | null): void {
+  try {
+    stmtProbeSet.run(file, st.size, st.mtimeMs, JSON.stringify(probe), Date.now());
+    // 改名 / 搬走会留下旧路径，每写 200 行整理一次，别让表无限长
+    probeWrites += 1;
+    if (probeWrites % 200 === 0 && (stmtProbeCount.get()?.n ?? 0) > 10_000) stmtProbePrune.run();
+  } catch (err) {
+    logger.warn({ file, err: (err as Error).message }, "视频探测结果写库失败（不影响本次播放）");
+  }
+}
+
+/**
+ * 按 路径 + 大小 + mtime 缓存探测结果。
+ *
+ * 以前只有内存一份，容器重启就全空 —— 第一次打开媒体库要把每集都 `ffmpeg -i`
+ * 探一遍，几十集就是好几秒到几十秒。现在多一层 SQLite：重启后直接读库，
+ * 只有真正新增 / 被改过的文件才起 ffmpeg。
+ */
 export async function probeFile(file: string): Promise<VideoProbe | null> {
   const st = await fs.promises.stat(file).catch(() => null);
   if (!st) return null;
   const hit = PROBE_CACHE.get(file);
   if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.probe;
-  const probe = await withProbeSlot(() => probeVideo(file)).catch(() => null);
-  if (!hit && PROBE_CACHE.size >= PROBE_CACHE_MAX) {
-    const oldest = PROBE_CACHE.keys().next().value;
-    if (oldest) PROBE_CACHE.delete(oldest);
+
+  const disk = storedProbe(file, st);
+  if (disk.hit) {
+    rememberProbe(file, st, disk.probe);
+    return disk.probe;
   }
-  PROBE_CACHE.set(file, { size: st.size, mtimeMs: st.mtimeMs, probe });
+
+  const probe = await withProbeSlot(() => probeVideo(file)).catch(() => null);
+  rememberProbe(file, st, probe);
+  saveProbe(file, st, probe);
   return probe;
 }
 
@@ -304,9 +369,9 @@ function statOf(target: string): fs.Stats | null {
   }
 }
 
-function originOfDir(dir: string): string {
+function originOfDir(files: string[]): string {
   // 用第一集反查下载记录，能拿到是哪个平台来的；查不到就归到「外部」
-  const first = scanVideoFiles(dir)[0];
+  const first = files[0];
   if (!first) return "other";
   const row = findDownloadByPath(first);
   return row?.source ?? "manual";
@@ -350,7 +415,7 @@ async function buildSeries(dir: string): Promise<LibrarySeries> {
     totalSize,
     updatedAt,
     hasNfo,
-    origin: originOfDir(dir),
+    origin: originOfDir(files),
     firstVideo: first,
   };
 }
@@ -388,11 +453,11 @@ export async function listLibrary(dir: string, opts: PlayOptions = {}): Promise<
   const entries = collectSeriesDirs(abs);
   const selfFiles = entries.filter((item) => path.resolve(item.dir) === abs);
 
-  const series: LibrarySeries[] = [];
-  for (const item of entries) {
-    if (path.resolve(item.dir) === abs) continue;
-    series.push(await buildSeries(item.dir));
-  }
+  // 每部剧都要 readdir + 读 tvshow.nfo + 逐集 stat，串行时几十部就是几十次磁盘往返
+  const childDirs = entries
+    .filter((item) => path.resolve(item.dir) !== abs)
+    .map((item) => item.dir);
+  const series = await mapLimit(childDirs, LIBRARY_CONCURRENCY, (dir) => buildSeries(dir));
 
   /**
    * 目录自己算不算「一部剧」。
@@ -405,9 +470,9 @@ export async function listLibrary(dir: string, opts: PlayOptions = {}): Promise<
   const isSeries = selfFiles.length > 0 && series.length === 0;
 
   // 剧集模式下分集由 /media/series 提供，这里不用再算一遍（免得同一个目录扫两次）
-  const loose: LibraryEpisode[] = [];
+  let loose: LibraryEpisode[] = [];
   if (!isSeries && selfFiles.length > 0) {
-    for (const file of selfFiles[0].files) loose.push(await buildEpisode(file, opts));
+    loose = await mapLimit(selfFiles[0].files, LIBRARY_CONCURRENCY, (file) => buildEpisode(file, opts));
     loose.sort(compareEpisodes);
   }
 
@@ -459,10 +524,13 @@ export interface SeriesDetail {
 export async function seriesDetail(dir: string, opts: PlayOptions = {}): Promise<SeriesDetail> {
   const abs = path.resolve(dir);
   const files = scanVideoFiles(abs);
-  const episodes: LibraryEpisode[] = [];
-  for (const file of files) episodes.push(await buildEpisode(file, opts));
+  // 逐集 stat + 读单集 NFO + 视频探测：以前一个 await 接一个，30 集就排 30 次队
+  const [series, episodes] = await Promise.all([
+    buildSeries(abs),
+    mapLimit(files, LIBRARY_CONCURRENCY, (file) => buildEpisode(file, opts)),
+  ]);
   episodes.sort(compareEpisodes);
-  return { series: await buildSeries(abs), episodes };
+  return { series, episodes };
 }
 
 /* ------------------------------------------------------------------ */
@@ -489,7 +557,7 @@ export function resolveArtFile(dir: string, kind: "poster" | "landscape"): strin
 /** 播放地址：direct 走 Range 直出，remux 走 ffmpeg 换封装 */
 export function streamUrl(file: string, mode: PlayMode, startSec?: number): string {
   const params = new URLSearchParams({ path: file });
-  if (mode === "remux" || mode === "transcode") params.set("mode", mode);
+  if (mode === "remux" || mode === "transcode" || mode === "direct") params.set("mode", mode);
   // 实时换封装 / 转码没有总长度，拖进度条靠「用 start 重新起一路流」实现
   if (startSec && startSec > 0) params.set("start", String(Math.floor(startSec)));
   return `/api/media/stream?${params.toString()}`;

@@ -1006,6 +1006,23 @@ Chromium 也不支持 socks4、且 socks5 由浏览器本地解析域名。因�
 > 但校验**按出口 IP 绑定**：解析与下载必须走同一条线路，否则 `cf_clearance` 立刻失效。
 > 代理池轮换出口 IP 的部署，这类站会时好时坏，属预期。
 
+#### 403 一直修不好：Cookie 与出口 IP 都丢了（1.3.15）
+
+用户截图里同一条短剧地址连着提交两次，都是「解析成功 → 直连 403 → 换代理 403」；
+旧红色提示却写着「重新提交原始网页链接会自动换取新的地址与 Cookie」，让人以为再粘一次就能好 ——
+其实程序**已经自动重解析过了**。三处根因：
+
+| # | 根因 | 修复 |
+| --- | --- | --- |
+| 1 | 静态抓 HTML 只取 `body`，**响应头里的 `Set-Cookie` 全丢**。页面把 m3u8 写在 `<video src>` 里，但播放地址绑的是抓页面时才下发的会话 Cookie；ffmpeg 不带它必然 403。带 Cookie 的无头浏览器路径只在「静态解析不出地址」时才走，根本没机会 | `httpRequest()` 新增 `setCookies?: string[]`（`headers` 是 `Record<string,string>`，多个同名头会互相覆盖，必须单独收集）；`requestText()` 沿重定向累积并回带 Cookie；静态解析与浏览器解析的 Cookie 用 `mergeCookieHeaders()` 合并，一起写进 `emby_json.m3u8.cookies` |
+| 2 | `M3u8Target.route`（解析走通的线路）在 `enqueueM3u8()` 和 403 重解析时都被丢掉，下载仍从直连开始。带 `auth_key` / `cf_clearance` 的地址绑出口 IP，换线路就是 403 | `emby_json.m3u8` 存 `route`；`plannedRoutes(url, preferred)` 经 `preferRoute()` 把解析线路排首位（策略不允许时原样忽略）；403 重解析按**最后失败的那条线路** `resolveM3u8Input(original, retryRoute)`，新 route 一并写回库，下次「继续 / 重试」沿用 |
+| 3 | 失败文案误导，直链 / 网页不分 | `describeSignatureFailure()` 分三种说法：直链 → 回视频页重新复制；网页且已自动重解析 → 说明已带 Cookie 并重试过，多半要登录态或出口 IP 被拦；404 不套 403 的建议 |
+
+`route_note` 现在同时保留「因直连下载失败，使用代理进行下载」与「已自动重新解析网页地址」，
+截图里一眼能看出跑到哪一步。自检新增 4 项（Cookie 拼接 / 合并、线路优先、失败文案），
+另用本地 HTTP 服务实测：两条 `Set-Cookie` 能原样走到 `resolveM3u8Input()` 的返回值。
+纯 m3u8 直链没有网页可重解析，程序不会白跑一趟，但仍需**发版后**用户重新粘贴新鲜地址。
+
 ### 代码位置
 
 | 文件 | 职责 |
@@ -1803,14 +1820,113 @@ tgsub/
 
 ---
 
+## 响应速度（1.3.15 优化）
+
+针对「设置页、媒体库、点播放都慢」，按「**等什么 → 为什么慢 → 怎么改**」逐项处理，
+不要靠盲目加缓存掩盖串行 I/O。
+
+| 现象 | 根因 | 处理 |
+| --- | --- | --- |
+| 所有页面 / 接口都肉 | Express 从没开响应压缩，517 KB 主包与几百条 JSON 原样传 | `server/src/index.ts` 挂 `compression`（`threshold: 1024`），**`/api/media/stream`、`/art`、`/thumb` 必须排除**：压缩会把无 Content-Length 的 fMP4 实时流改写成 chunked 并缓冲首包，直接拖慢出画面 |
+| 进设置页白屏几秒 | `load()` 四个接口 `Promise.all`，最慢的 `auth/state` 要走代理做一次 MTProto 探测、`cache/status` 要递归 stat 上千个缓存文件，整页等它们 | 首屏只等 `/api/settings`（纯 DB 读），其余三项后台补；账号卡片用 `authLoading` 骨架，刷新时保留旧状态不闪 |
+| 进出设置页反复慢 | ① `/api/settings` 每次附带 `platformSnapshot()`（要探 yt-dlp），但前端**根本不读**这个字段，`PlatformPanel` 自己走 `/api/platform/status`；② `cacheStats()` 无缓存；③ `getAuthState()` 的探测缓存只有 8 秒 | 删掉两处 `platformSnapshot`；`cacheStats` 30 秒 TTL（trim/clear 后主动失效）；登录探测缓存 8s → 30s |
+| 第一次进媒体库特别慢（尤其刚重启） | 探测缓存 `PROBE_CACHE` 只在内存，重启全空 → 每集起一次 `ffmpeg -i` | 新增 `media_probes` 表（path 主键 + size/mtime + JSON payload），`probeFile` 变「内存 → 库 → ffmpeg」三级；探测失败的 `null` 也存，损坏文件不会反复重试；表超 1 万行按 `probed_at` 淘汰最旧 2000 行 |
+| 剧集列表 / 分集列表慢 | `listLibrary` / `seriesDetail` 是 `for (...) await buildXxx()`，几十集串行排队；`probeFile` 明明限了 4 并发，调用方却只给它 1 个槽 | 新增纯函数 `lib/async.ts` 的 `mapLimit(items, 6, fn)`，两条链全部并行；`buildSeries` 复用已扫到的 `files` 算来源，不再 `scanVideoFiles` 第二次 |
+| 海报墙滑过去整机卡、连播放都卡 | `/thumb` 只合并了「同一文件」的并发请求，不同文件一次起十几个 ffmpeg 抽帧 | 全局 `THUMB_CONCURRENCY = 2` 排队，同文件仍共用一个 job |
+| 点播放到出画面有延迟 | `/stream` 无条件 `await probeFile()` + `hwCapability()`，直出 MP4 根本不需要 | 列表算好的播放模式回传 `mode=direct`，服务端跳过探测与硬解判定直接 Range 直出；硬解能力在启动 500ms 后后台预热（真编一帧 1~3 秒），别压在用户点击那一刻 |
+
+**验收（本机隔离实例，13 个 mp4 / 400 MB 级）**：
+- 剧集详情首次（13 次探测）`0.79s`；重启后第一次 `0.26s`（读 `media_probes`，零 ffmpeg）；
+  之后稳定 `0.01s`。目录列表热态 `6~14ms`。
+- `/api/media/library` 未压缩 2701 B → gzip 1143 B；主包 517 KB → 148 KB。
+- `/api/media/stream?mode=direct` 仍是 `206 + Content-Range + Content-Length`；
+  `mode=remux` 仍是 `200 + video/mp4 + chunked`，**两者都没有 `Content-Encoding`**。
+
+> 改压缩中间件后必须回归这两条视频流响应头：只要出现 `Content-Encoding` 或
+> `Content-Length` 被吃掉，播放器首帧就会卡住。
+
+### yt-dlp 自动检查：「设了 15 天，怎么还是每小时一次」
+
+用户设 15 天却仍看到频繁检查，是**四个原因叠在一起**，改一处不够：
+
+1. `startYtdlpAutoUpdate()` 原来是 `setInterval(1 小时)` + `dueForCheck()` 轮询。
+   即使周期判断挡住了网络请求，「每小时醒一次」这个骨架本身一直在。
+2. `shouldRunCheck()` 里 `retryAt` 分支**完全绕开 `checkHours`**：只要失败过一次，
+   就永远走 30 分钟 → 1 小时 → … → 24 小时封顶的退避链，最多变成每天查一次，
+   再回不到 15 天。`retryAt` 只有检查成功才清，GitHub 不通时永远清不掉。
+3. `updateYtdlp()` 以前只在 `fetchLatest()` **成功之后**才写 `ytdlp_check_at`，
+   失败时它停在几周前，于是「周期已到」和「重试点已过」同时成立。
+4. `/api/platform/status`（设置页平台面板）与 `/api/overview` 都会走 `engineState()`
+   → `ytdlpInfo()` → spawn `yt-dlp --version`；缓存只有 30 秒且只在内存，
+   每次进设置页、每次概览缓存过期都可能重探一遍（最多 4 个候选 × 15 秒）。
+
+**现在的规则**：
+- 排期统一成一个绝对时间 `settings.ytdlp_next_at`，由 `platform/updateplan.ts` 的
+  `nextCheckAt()` 算（纯函数）。定时器 `setTimeout` 直接睡到那一刻，
+  **中间 15 天里一次唤醒、一次网络请求都没有**；`setInterval` 已彻底移除。
+- `nextCheckDelayMs()` 给周期加硬上限：成功 = 整周期；失败最多两次短重试
+  （30 分钟 / 1 小时），第三次起等满周期；**403 / 限流一次都不重试**，直接等满周期。
+- 每次检查（无论成败）一开始就写 `ytdlp_check_at`，作为本轮排期起点；
+  结束时在 `finally` 里写 `ytdlp_next_at`。旧的 `ytdlp_retry_at` **只写空、不再读**，
+  存量数据自然失效，不需要迁移；`shouldRunCheck()` 仅保留给自检做回归。
+- `PUT /api/settings` 改了开关 / 周期就调 `rescheduleYtdlpAutoUpdate({fromSettingsChange:true})`
+  立即重排（不用重启容器）；手动点「检查更新」结束后也会重排。
+- `ytdlpInfo()` 加**落盘缓存**（`ytdlp_probe_cache`，可用结果 6 小时 / 不可用 5 分钟），
+  `clearYtdlpCache()` 连库一起清；`force` 仍用于「重新检测」和更新完成后。
+  设置页 / 概览页不再 spawn。
+- `EngineUpdateState.nextCheckAt` 回给前端，平台面板直接显示「下次自动检查 2026/11/23 …」，
+  周期到底有没有生效一眼可见。
+
+**验收**（隔离实例）：`/api/settings` 与 `/api/platform/status` 稳定 `3~11ms`；
+改 3 天 → `ytdlp_next_at` 精确 72.00 小时，改回 15 天 → 15.00 天，关掉开关 → 空串；
+自检新增 3 项回归「15 天内每小时都不该到点 / 失败重试不顶穿周期 / 旧 retryAt 受上限约束」。
+
+---
+
+## 概览页提醒：详情与忽略（1.3.15）
+
+顶部健康条以前只有一串小胶囊（`label：note`），点不动、看不懂、也关不掉。现在每条
+「留意 / 异常」都是一张可展开的卡片：具体明细 + 当前值 / 影响 + 一句能照着做的建议 +
+「去处理」跳转 + **「忽略」**，被忽略的收进「已忽略 (N)」面板随时恢复。
+
+**顺手修掉一个真 bug**：`getPlatformCookieHint()` 的 `missing` 是 `string[]`（空数组也
+是 truthy），而 `serviceReport()` 写的是 `cookies.some((c) => c.missing)` —— 于是
+`第三方平台` **永远**是 warn、「有平台缺 Cookie」永远挂在概览页，哪怕三个平台 Cookie
+都填好了。改成 `!hint.set || (hint.missing?.length ?? 0) > 0`，并按平台逐个列出
+「未配置 / 已填 N 项但缺 SESSDATA / 已配置（N 项）」，提示语直接点名是哪几个平台。
+
+| 层 | 改动 |
+| --- | --- |
+| `system/overviewFormat.ts` | `issues` 从 `string[]` 升级为 `OverviewIssue[]`（`id / level / text / detail[] / hint / page / ignoredAt`）。纯函数 `issueId()` = 探针前缀 + `label\|value` 的 FNV 指纹；`summarizeProbes(groups, ignored)` 负责过滤、重算计数与 overall，并用库里快照给「问题已消失」的忽略项留恢复入口 |
+| `system/overview.ts` | `ISSUE_HINT` 给每条探针配处理建议；`toProbeLike()` 补 id / 影响 / 跳转；平台项生成逐平台 Cookie 明细；导出 `invalidateOverview()` 与 `findOverviewIssue()` |
+| `db.ts` | 新增 `overview_ignored(issue_id, label, text, ignored_at)`，四个读写函数；**文案一起落库**，问题修好后界面仍能列出并恢复 |
+| `routes/system.ts` | `POST /overview/issues/ignore`、`/restore`、`/restore-all`；每个接口都调 `invalidateOverview()` |
+| 前端 | `useOverview()` 加 ignore / restore / restoreAll（成功后立即重拉）；`HealthBanner` 渲染详情卡片、展开全部、已忽略面板；`Dashboard` 把 `onNavigate` 传进去给「去处理」用 |
+
+**三个必须记住的口径**：
+- 忽略的是「**这一条具体提醒**」，不是整个探针。指纹只取 `label + value`，不带 `note` / `detail`，
+  所以带时间戳的说明变了不会让忽略失效，而 `0/3 已配 Cookie` 变成 `1/3` 会换 id **自动重新提醒**。
+- 忽略后该条从 `issues` 移除、不再计入 `warn / error`、不拖累 `overall`，但
+  **服务状态卡片仍显示真实状态**（那是客观状态，不能被忽略抹掉）。
+- 忽略 / 恢复后**必须清概览的 30 秒缓存**，否则下一次 GET 还是旧报告，看起来像按钮没反应。
+  重新采集很便宜（工具版本与 yt-dlp 探测各有自己的落盘缓存），别用前端 `refresh=1` 硬探。
+
+**验收**（隔离实例）：开启第三方平台后得到 8 行明细 + 建议；忽略后普通 GET 立刻反映
+（`issues` 少一条、`ignoredCount=1`、标题从「有 1 项异常」变「有 4 项需要留意」）；
+恢复 / 一键全部恢复 / 进程重启后都符合预期；补齐三平台 Cookie 后该提醒彻底消失；
+忽略 `0/3` 再补一个平台 → 新 id、提醒自动回来，旧忽略项标「已不再出现」仍可恢复。
+无头浏览器实点按钮、展开面板均通过。
+
+---
+
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.14`（镜像 `rdevils7/tgsub:v1.3.14` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.15-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.15`（镜像 `rdevils7/tgsub:v1.3.15` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.16-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.15-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.15`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.15` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.16-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.16-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.16`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.16` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.17-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

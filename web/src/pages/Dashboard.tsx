@@ -95,7 +95,7 @@ export default function Dashboard({ stats, scanState, onScan, scanning, onNaviga
 
   return (
     <div className="space-y-5">
-      <HealthBanner state={overview} />
+      <HealthBanner state={overview} onNavigate={onNavigate} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map((card, i) => (

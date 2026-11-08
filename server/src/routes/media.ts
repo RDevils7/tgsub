@@ -71,9 +71,8 @@ function allowHevcOf(req: import("express").Request): boolean {
   return String(req.query.hevc ?? "") === "1";
 }
 
-/** 硬件解码能力（缓存 10 分钟），前端用它决定工具栏徽章与文案 */
-async function hwInfo() {
-  const cap = await hwCapability();
+/** 硬件解码能力（探测结果在 ffmpeg.ts 里缓存 10 分钟） */
+function hwInfo(cap: Awaited<ReturnType<typeof hwCapability>>) {
   return {
     available: cap.available,
     accel: cap.accel,
@@ -102,7 +101,7 @@ mediaRouter.get(
       home: listing.home,
       roots: listing.roots,
       isSeries: listing.isSeries,
-      hw: await hwInfo(),
+      hw: hwInfo(hw),
       series: listing.series.map(decorateSeries),
       loose: listing.loose.map(decorateEpisode),
     });
@@ -121,7 +120,7 @@ mediaRouter.get(
     res.json({
       ok: true,
       dir,
-      hw: await hwInfo(),
+      hw: hwInfo(hw),
       series: decorateSeries(detail.series),
       episodes: detail.episodes.map(decorateEpisode),
     });
@@ -158,6 +157,26 @@ mediaRouter.get(
 const thumbJobs = new Map<string, Promise<void>>();
 
 /**
+ * 抽帧是重活（每次起一个 ffmpeg 解码）。海报墙一屏十几个不同文件同时请求时，
+ * 不设上限会瞬间拉起十几个解码进程，NAS 上 CPU 占满，连正在播的视频都卡住。
+ * 这里全局只放行 2 个，其余排队；同文件仍然共用上面那一个 job。
+ */
+const THUMB_CONCURRENCY = 2;
+let thumbRunning = 0;
+const thumbQueue: Array<() => void> = [];
+
+async function withThumbSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (thumbRunning >= THUMB_CONCURRENCY) await new Promise<void>((resolve) => thumbQueue.push(resolve));
+  thumbRunning += 1;
+  try {
+    return await fn();
+  } finally {
+    thumbRunning -= 1;
+    thumbQueue.shift()?.();
+  }
+}
+
+/**
  * 单集缩略图。
  *
  * 优先级：下载时生成好的 `<base>-thumb.jpg` → 抽帧缓存 → 现场抽一帧（落缓存）。
@@ -189,7 +208,9 @@ mediaRouter.get(
       let job = thumbJobs.get(cacheFile);
       if (!job) {
         const probe = await probeFile(file).catch(() => null);
-        job = generateEpisodeThumb(file, cacheFile, probe?.duration ?? null).finally(() => thumbJobs.delete(cacheFile));
+        job = withThumbSlot(() => generateEpisodeThumb(file, cacheFile, probe?.duration ?? null)).finally(() =>
+          thumbJobs.delete(cacheFile),
+        );
         thumbJobs.set(cacheFile, job);
       }
       try {
@@ -272,30 +293,38 @@ mediaRouter.get(
     const stat = await fs.promises.stat(file).catch(() => null);
     assert(stat && stat.isFile(), 404, "文件不存在或已被删除");
 
-    const probe = await probeFile(file).catch(() => null);
-    const startSec = Math.max(0, Number(req.query.start ?? 0) || 0);
+    /**
+     * direct 是列表接口已经算好的结论，回传过来就别再探测一遍了：
+     * `probeFile` 冷缓存时要起一次 ffmpeg，硬解能力探测更可能真编一帧，
+     * 全压在「点播放」到「出画面」这段时间里。
+     */
     const modeParam = String(req.query.mode ?? "");
+    const probe = modeParam === "direct" ? null : await probeFile(file).catch(() => null);
+    const startSec = Math.max(0, Number(req.query.start ?? 0) || 0);
+    let hw: Awaited<ReturnType<typeof hwCapability>> | null = null;
     let wanted: PlayMode;
     if (modeParam === "remux" || modeParam === "transcode") {
       wanted = modeParam;
+    } else if (modeParam === "direct") {
+      wanted = "direct";
     } else {
-      const hw = await hwCapability();
+      hw = await hwCapability();
       wanted = playModeOf(file, probe, { allowHevc: allowHevcOf(req), hw: hw.available });
     }
     const mime = MIME_BY_EXT[path.extname(file).toLowerCase()] ?? "application/octet-stream";
 
     if (wanted === "transcode") {
-      const hw = await hwCapability();
-      if (!hw.available || !hw.accel) {
+      const cap = hw ?? (await hwCapability());
+      if (!cap.available || !cap.accel) {
         res.status(503).json({
           ok: false,
-          error: `这个文件的编码浏览器解不了，需要显卡转码，但服务端没有可用的硬件解码（${hw.reason ?? "未检测到显卡"}）。`,
+          error: `这个文件的编码浏览器解不了，需要显卡转码，但服务端没有可用的硬件解码（${cap.reason ?? "未检测到显卡"}）。`,
         });
         return;
       }
       await pipeTranscode(file, res, {
-        accel: hw.accel,
-        device: hw.device,
+        accel: cap.accel,
+        device: cap.device,
         sourceHeight: probe?.height ?? null,
         startSec,
       });

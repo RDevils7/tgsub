@@ -1,14 +1,17 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { OverviewReport, ProbeStatus, ServiceProbe, ToolProbe } from "../types";
+import type { OverviewIssue, OverviewReport, ProbeStatus, ServiceProbe, ToolProbe } from "../types";
 import { Badge, Button, ProgressBar, Spinner, StatusDot } from "./ui";
 import {
   IconActivity,
   IconAlert,
   IconCheck,
+  IconChevronDown,
   IconCopy,
   IconCpu,
   IconDatabase,
+  IconEye,
+  IconEyeOff,
   IconGlobe,
   IconHardDrive,
   IconPackage,
@@ -99,6 +102,13 @@ export interface OverviewState {
   refreshing: boolean;
   error: string | null;
   refresh: () => void;
+  /** 忽略 / 恢复后服务端缓存已失效，这里立刻重新拉一次 */
+  ignore: (id: string) => void;
+  restore: (id: string) => void;
+  restoreAll: () => void;
+  /** 正在操作的提醒 id；"all" 表示一键恢复 */
+  busy: string | null;
+  actionError: string | null;
 }
 
 export function useOverview(): OverviewState {
@@ -106,6 +116,8 @@ export function useOverview(): OverviewState {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async (force: boolean) => {
     if (force) setRefreshing(true);
@@ -127,7 +139,33 @@ export function useOverview(): OverviewState {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  return { report, loading, refreshing, error, refresh: () => void load(true) };
+  const runAction = useCallback(
+    async (key: string, fn: () => Promise<unknown>) => {
+      setBusy(key);
+      setActionError(null);
+      try {
+        await fn();
+        await load(false);
+      } catch (err) {
+        setActionError((err as Error).message || "操作失败，请重试");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [load],
+  );
+
+  const ignore = useCallback(
+    (id: string) => {
+      const issue = report?.summary.issues.find((item) => item.id === id);
+      void runAction(id, () => api.overviewIgnore(id, issue?.label, issue?.text));
+    },
+    [report, runAction],
+  );
+  const restore = useCallback((id: string) => void runAction(id, () => api.overviewRestore(id)), [runAction]);
+  const restoreAll = useCallback(() => void runAction("all", () => api.overviewRestoreAll()), [runAction]);
+
+  return { report, loading, refreshing, error, refresh: () => void load(true), ignore, restore, restoreAll, busy, actionError };
 }
 
 /** 排障时一键复制的纯文本快照：版本、工具、服务、目录全在里面 */
@@ -233,11 +271,83 @@ function CopyablePath({
 /* 顶部健康条                                                          */
 /* ------------------------------------------------------------------ */
 
-export function HealthBanner({ state }: { state: OverviewState }) {
-  const { report, loading, refreshing, error, refresh } = state;
+/** 一条待处理提醒：默认露出最有用的几行明细，可展开、可跳转、可忽略 */
+function IssueCard({
+  issue,
+  busy,
+  expanded,
+  onToggle,
+  onIgnore,
+  onNavigate,
+}: {
+  issue: OverviewIssue;
+  busy: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  onIgnore: () => void;
+  onNavigate?: (page: OverviewNavKey) => void;
+}) {
+  const isError = issue.level === "error";
+  const tone = isError ? "border-rose-500/20 bg-rose-500/[0.05]" : "border-amber-500/20 bg-amber-500/[0.05]";
+  const lines = expanded ? issue.detail : issue.detail.slice(0, 3);
+  const page = issue.page;
+  return (
+    <div className={`rounded-xl border px-3.5 py-3 ${tone}`}>
+      <div className="flex flex-wrap items-start gap-2">
+        <IconAlert className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${isError ? "text-err" : "text-warn"}`} />
+        <div className="min-w-0 flex-1">
+          <p className={`text-[12px] font-medium leading-relaxed ${isError ? "text-err" : "text-warn"}`}>{issue.text}</p>
+          {lines.length > 0 && (
+            <ul className="mt-1.5 space-y-1">
+              {lines.map((line, i) => (
+                <li key={`${i}-${line}`} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-400">
+                  <span className="shrink-0 text-slate-600">·</span>
+                  <span className="min-w-0 break-words">{line}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {issue.detail.length > 3 && (
+            <button type="button" onClick={onToggle} className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-brand-300 transition hover:underline">
+              {expanded ? "收起" : `展开全部 ${issue.detail.length} 条`}
+              <IconChevronDown className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`} />
+            </button>
+          )}
+          {issue.hint && <p className="mt-2 text-[11px] leading-relaxed text-slate-400">建议：{issue.hint}</p>}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {page && onNavigate && (
+            <Button size="sm" variant="ghost" onClick={() => onNavigate(page)}>
+              去处理 →
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={busy}
+            onClick={onIgnore}
+            title="不再提醒这一条；状态变化后会自动重新提醒"
+          >
+            {!busy && <IconEyeOff className="h-3.5 w-3.5" />}
+            忽略
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function HealthBanner({ state, onNavigate }: { state: OverviewState; onNavigate?: (page: OverviewNavKey) => void }) {
+  const { report, loading, refreshing, error, refresh, ignore, restore, restoreAll, busy, actionError } = state;
   const { copied, copy } = useCopy();
+  const [showIgnored, setShowIgnored] = useState(false);
+  const [showAllIssues, setShowAllIssues] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const overall = report?.summary.overall ?? "off";
   const meta = STATUS_META[overall];
+  const issues = report?.summary.issues ?? [];
+  const ignored = report?.summary.ignored ?? [];
+  const visible = showAllIssues ? issues : issues.slice(0, 4);
   const title =
     loading && !report
       ? "正在检查运行环境…"
@@ -278,6 +388,7 @@ export function HealthBanner({ state }: { state: OverviewState }) {
                 <span className={report.summary.warn ? "text-warn" : "text-slate-600"}>{report.summary.warn} 项留意</span>
                 <span className={report.summary.error ? "text-err" : "text-slate-600"}>{report.summary.error} 项异常</span>
                 <span className="text-slate-600">{report.summary.off} 项未启用</span>
+                {report.summary.ignoredCount > 0 && <span className="text-slate-500">{report.summary.ignoredCount} 项已忽略</span>}
               </p>
             )}
             {error && report && <p className="mt-1.5 text-[11.5px] text-warn">上次刷新失败：{error}（下面是上次成功的结果）</p>}
@@ -295,23 +406,82 @@ export function HealthBanner({ state }: { state: OverviewState }) {
         </div>
       </div>
 
-      {report && report.summary.issues.length > 0 && (
-        <div className="relative mt-4 flex flex-wrap gap-2">
-          {report.summary.issues.slice(0, 4).map((issue, i) => (
-            <span
-              key={`${i}-${issue}`}
-              title={issue}
-              className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-amber-500/15 bg-amber-500/[0.06] px-2.5 py-1 text-[11px] text-warn/90"
-            >
-              <IconAlert className="h-3 w-3 shrink-0" />
-              <span className="truncate">{issue}</span>
-            </span>
-          ))}
-          {report.summary.issues.length > 4 && (
-            <span className="rounded-lg border border-white/[0.06] px-2.5 py-1 text-[11px] text-slate-500">
-              还有 {report.summary.issues.length - 4} 项
-            </span>
+      {report && (
+        <div className="relative mt-4 space-y-2">
+          {visible.length > 0 && (
+            <div className="space-y-2">
+              {visible.map((issue) => (
+                <IssueCard
+                  key={issue.id}
+                  issue={issue}
+                  busy={busy === issue.id}
+                  expanded={Boolean(expanded[issue.id])}
+                  onToggle={() => setExpanded((cur) => ({ ...cur, [issue.id]: !cur[issue.id] }))}
+                  onIgnore={() => ignore(issue.id)}
+                  onNavigate={onNavigate}
+                />
+              ))}
+            </div>
           )}
+
+          {issues.length > 4 && (
+            <button
+              type="button"
+              onClick={() => setShowAllIssues((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11px] text-slate-400 transition hover:text-brand-300"
+            >
+              {showAllIssues ? "收起" : `还有 ${issues.length - 4} 项，全部展开`}
+              <IconChevronDown className={`h-3 w-3 transition-transform ${showAllIssues ? "rotate-180" : ""}`} />
+            </button>
+          )}
+
+          {ignored.length > 0 && (
+            <div className="pt-0.5">
+              <button
+                type="button"
+                onClick={() => setShowIgnored((v) => !v)}
+                title="查看并恢复被忽略的提醒"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11px] text-slate-400 transition hover:text-brand-300"
+              >
+                <IconEyeOff className="h-3 w-3" />
+                已忽略 ({ignored.length})
+                <IconChevronDown className={`h-3 w-3 transition-transform ${showIgnored ? "rotate-180" : ""}`} />
+              </button>
+              {showIgnored && (
+                <div className="mt-2 divide-y divide-white/[0.05] overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02]">
+                  {ignored.map((item) => {
+                    const stale = item.detail.some((line) => line.includes("当前已不再出现"));
+                    return (
+                      <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5">
+                        <div className="min-w-0">
+                          <p className="truncate text-[11.5px] text-slate-300" title={item.text}>
+                            {item.text}
+                            {stale && <span className="ml-2 rounded border border-white/[0.08] px-1.5 py-0.5 text-[10px] text-slate-500">已不再出现</span>}
+                          </p>
+                          <p className="mt-0.5 text-[10.5px] text-slate-600">
+                            忽略于 {formatDateTime(item.ignoredAt)}
+                            {stale && " · 问题已修复或状态变了，可以直接取消忽略"}
+                          </p>
+                        </div>
+                        <Button size="sm" variant="ghost" loading={busy === item.id} onClick={() => restore(item.id)}>
+                          {busy !== item.id && <IconEye className="h-3.5 w-3.5" />}
+                          恢复提醒
+                        </Button>
+                      </div>
+                    );
+                  })}
+                  {ignored.length > 1 && (
+                    <div className="flex justify-end px-3.5 py-2">
+                      <Button size="sm" variant="ghost" loading={busy === "all"} onClick={restoreAll}>
+                        全部恢复
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {actionError && <p className="text-[11px] text-err">{actionError}</p>}
         </div>
       )}
     </div>
