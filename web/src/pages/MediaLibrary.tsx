@@ -286,6 +286,11 @@ export default function MediaLibrary() {
    */
   const hevcRef = useRef(hevc);
   const searchRef = useRef<HTMLInputElement>(null);
+  // 这两个放进 ref：列表加载的 useEffect 不该因为 toast 对象变化而重跑
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  /** 媒体目录不可写时只提醒一次，别每切一次目录都弹 */
+  const nfoFailedNotified = useRef(false);
   const [playing, setPlaying] = useState<{ episode: MediaEpisode; list: MediaEpisode[]; index: number } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
@@ -335,6 +340,21 @@ export default function MediaLibrary() {
           setDir(res.dir);
           localStorage.setItem(DIR_STORAGE_KEY, res.dir);
         }
+        // 选中目录后自动给所有缺 NFO 的 strm 补单集 NFO。
+        // 纯本地写盘（不解析直链、不抽帧、不回源），后台跑完再轻提示，不阻塞首屏。
+        void api
+          .mediaEnsureStrmNfo(res.dir)
+          .then((summary) => {
+            if (!alive) return;
+            if (summary.created > 0) {
+              toastRef.current.push(`已为 ${summary.created} 个 strm 生成单集 NFO`, "success");
+            }
+            if (summary.failed > 0 && !nfoFailedNotified.current) {
+              nfoFailedNotified.current = true;
+              toastRef.current.push(`${summary.failed} 个 strm 的 NFO 写入失败：检查媒体目录的写权限`, "error");
+            }
+          })
+          .catch(() => undefined);
         if (res.isSeries) {
           // 直接落在剧集目录（比如启动时记着上次的位置）→ 返回键回到它的父目录
           setReturnDir(normalizePath(res.dir).split("/").slice(0, -1).join("/"));
@@ -678,6 +698,19 @@ export default function MediaLibrary() {
           onPrev={() => playEpisode(playing.list, playing.index - 1)}
           onNext={() => playEpisode(playing.list, playing.index + 1)}
           onClose={() => setPlaying(null)}
+          onPosterSaved={(thumbUrl) => {
+            // 弹窗里立刻换海报，同时刷一次列表，卡片上的封面也跟着更新
+            setPlaying((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    episode: { ...prev.episode, thumbUrl },
+                    list: prev.list.map((ep) => (ep.path === prev.episode.path ? { ...ep, thumbUrl } : ep)),
+                  }
+                : prev,
+            );
+            setReloadToken((n) => n + 1);
+          }}
         />
       )}
 
@@ -1270,6 +1303,7 @@ function PlayerDialog({
   onPrev,
   onNext,
   onClose,
+  onPosterSaved,
 }: {
   episode: MediaEpisode;
   hasPrev: boolean;
@@ -1277,14 +1311,43 @@ function PlayerDialog({
   onPrev: () => void;
   onNext: () => void;
   onClose: () => void;
+  onPosterSaved: (thumbUrl: string) => void;
 }) {
+  const toast = useToast();
   const [failed, setFailed] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [poster, setPoster] = useState(episode.thumbUrl);
 
   useEffect(() => {
     setFailed(null);
     setRetryKey(0);
+    setPoster(episode.thumbUrl);
   }, [episode.path]);
+
+  /**
+   * 封面来自播放器里已经解码的那一帧，保存时顺带补一份单集 NFO。
+   * 自动截用 overwrite=false（已有封面就不动），手动挑画面用 true。
+   */
+  const savePoster = useCallback(
+    async (dataUrl: string, overwrite: boolean): Promise<boolean> => {
+      try {
+        const result = await api.mediaSavePoster(episode.path, dataUrl, overwrite);
+        setPoster(result.thumbUrl);
+        onPosterSaved(result.thumbUrl);
+        if (overwrite) {
+          toast.push(result.nfoCreated ? "封面已更新，并生成了单集 NFO" : "封面已更新", "success");
+        } else if (result.posterCreated) {
+          toast.push(result.nfoCreated ? "已自动截取封面并生成单集 NFO" : "已自动截取封面", "success");
+        }
+        return true;
+      } catch (err) {
+        // 自动截取失败别打扰播放；手动覆盖必须给反馈
+        if (overwrite) toast.push(`封面保存失败：${(err as Error).message}`, "error");
+        return false;
+      }
+    },
+    [episode.path, onPosterSaved, toast],
+  );
 
   /** `[` / `]` 切集：不用左右方向键，那是 <video> 自己拖进度用的 */
   useEffect(() => {
@@ -1311,6 +1374,11 @@ function PlayerDialog({
 
   const errorCopy = () => {
     const codec = episode.videoCodec?.toUpperCase() ?? "";
+    if (episode.isStrm) {
+      return "播放源连不上，或 strm 里的直链已失效：这类地址由播放代理临时签发，通常有有效期，" +
+        "也可能触发了限流（上游 403/429 时服务端会暂停 10 分钟再放行）。" +
+        "请回视频页重新生成一条直链，或稍后再试。";
+    }
     if (transcode) {
       return `显卡转码失败${codec ? `（源编码 ${codec}）` : ""}：服务端没能把这一集转成 H.264。` +
         "常见原因是显卡设备没映射进容器（docker-compose 里的 devices: /dev/dri）、驱动缺失，或这一路转码被中断。" +
@@ -1385,13 +1453,24 @@ function PlayerDialog({
             src={episode.streamUrl}
             seekable={seekable}
             durationSec={episode.durationSec}
-            poster={episode.thumbUrl}
+            poster={poster}
             badge={[
-              transcode ? "显卡转码" : remux ? "实时换封装" : episode.trial ? "HEVC 直连" : "原文件直出",
+              episode.isStrm
+                ? "链接播放"
+                : transcode
+                  ? "显卡转码"
+                  : remux
+                    ? "实时换封装"
+                    : episode.trial
+                      ? "HEVC 直连"
+                      : "原文件直出",
               episode.videoCodec?.toUpperCase() ?? null,
             ]
               .filter(Boolean)
               .join(" · ")}
+            preload={episode.isStrm ? "metadata" : "auto"}
+            autoPoster={Boolean(episode.isStrm && !poster)}
+            onSavePoster={episode.isStrm ? savePoster : undefined}
             hasPrev={hasPrev}
             hasNext={hasNext}
             onPrev={onPrev}

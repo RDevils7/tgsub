@@ -3,7 +3,7 @@ import path from "node:path";
 import { db, getSettings } from "../db";
 import { env } from "../env";
 import { Download } from "../types";
-import { isVideoFile, VIDEO_EXT_RE } from "./mediapath";
+import { isStrmFile, isVideoFile, STRM_EXT_RE, VIDEO_EXT_RE } from "./mediapath";
 import { dirMapOf, mergeOrigins, originOf, originRank, type MediaOrigin } from "./origin";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders, type MediaSortKey, type SortOrder } from "./mediasort";
 
@@ -212,7 +212,7 @@ export function deriveEpisodeInfo(fileName: string, dirName: string): {
   season: number | null;
   episode: number | null;
 } {
-  const base = fileName.replace(VIDEO_EXT_RE, "");
+  const base = fileName.replace(VIDEO_EXT_RE, "").replace(STRM_EXT_RE, "");
   /** 去掉集号标记后，把尾巴上的序号一并去掉 */
   const cleanSeries = (raw: string): string => {
     const trimmed = raw.replace(TRAILING_SEQ_RE, "").replace(/[\s._-]+$/, "").trim();
@@ -249,8 +249,13 @@ export function deriveEpisodeInfo(fileName: string, dirName: string): {
 /* 目录扫描                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 递归列出目录下的视频文件（最多 MAX_SCAN_DEPTH 层） */
-export function scanVideoFiles(dir: string, depth = 0): string[] {
+/**
+ * 递归列出目录下的可播放文件（最多 MAX_SCAN_DEPTH 层）。
+ *
+ * includeStrm 默认 false：元数据页的改名 / 删除 / 搬运 / 抽帧仍只认真视频，
+ * 只有媒体库的只读链路会传 true 把 .strm 一起列出来。
+ */
+export function scanVideoFiles(dir: string, depth = 0, includeStrm = false): string[] {
   if (depth > MAX_SCAN_DEPTH) return [];
   let entries: fs.Dirent[];
   try {
@@ -263,11 +268,11 @@ export function scanVideoFiles(dir: string, depth = 0): string[] {
     if (entry.name.startsWith(".")) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      out.push(...scanVideoFiles(full, depth + 1));
+      out.push(...scanVideoFiles(full, depth + 1, includeStrm));
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!isVideoFile(entry.name)) continue;
+    if (!isVideoFile(entry.name) && !(includeStrm && isStrmFile(entry.name))) continue;
     out.push(full);
   }
   return out;
@@ -286,7 +291,7 @@ export function scanVideoFiles(dir: string, depth = 0): string[] {
  *
  * 返回值按层级从浅到深排序。
  */
-export function collectSeriesDirs(root: string, depth = 0): Array<{ dir: string; files: string[] }> {
+export function collectSeriesDirs(root: string, depth = 0, includeStrm = false): Array<{ dir: string; files: string[] }> {
   if (depth > MAX_SCAN_DEPTH) return [];
   let entries: fs.Dirent[];
   try {
@@ -303,11 +308,13 @@ export function collectSeriesDirs(root: string, depth = 0): Array<{ dir: string;
       subDirs.push(path.join(root, entry.name));
       continue;
     }
-    if (entry.isFile() && isVideoFile(entry.name)) directVideos.push(path.join(root, entry.name));
+    if (entry.isFile() && (isVideoFile(entry.name) || (includeStrm && isStrmFile(entry.name)))) {
+      directVideos.push(path.join(root, entry.name));
+    }
   }
 
   // 子目录里还有视频的，先看看是不是「季目录」
-  const subResults = subDirs.map((sub) => ({ sub, result: collectSeriesDirs(sub, depth + 1) }));
+  const subResults = subDirs.map((sub) => ({ sub, result: collectSeriesDirs(sub, depth + 1, includeStrm) }));
   const seasonSubs = subResults.filter((r) => r.result.length > 0 && isSeasonDir(path.basename(r.sub)));
 
   // 自己就装着视频 → 自己是一个剧集文件夹

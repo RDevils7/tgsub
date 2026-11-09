@@ -638,11 +638,40 @@ export interface MediaEpisode {
   streamUrl: string;
   /** 缩略图地址（下载时生成的图或服务端抽帧，取不到图时为 null） */
   thumbUrl: string | null;
+  /** .strm 链接文件：播放走服务端转发，封面由播放器在播放时截取并落在同级目录 */
+  isStrm?: boolean;
   /**
    * 这一集本来会被判成「浏览器不支持」，是因为打开了
    * 「我的浏览器能放 HEVC，强制尝试」才变成可播的 —— 界面上标「试播」。
    */
   trial?: boolean;
+}
+
+/** 选中目录后批量补齐 strm 单集 NFO 的结果（纯本地写盘） */
+export interface MediaStrmNfoResult {
+  ok: boolean;
+  dir: string;
+  /** 扫到的 strm 总数 */
+  scanned: number;
+  /** 本次新建的 NFO */
+  created: number;
+  /** 本来就有 NFO */
+  existing: number;
+  /** 写失败（多数是媒体目录不可写） */
+  failed: number;
+  /** 撞到扫描上限，还有没扫到的 */
+  truncated: boolean;
+}
+
+/** 保存 strm 封面的结果 */
+export interface MediaPosterResult {
+  ok: boolean;
+  /** 已有封面且这次没有覆盖 */
+  existed: boolean;
+  posterCreated: boolean;
+  nfoCreated: boolean;
+  /** 带新版本号的缩略图地址，可直接替换卡片上的图 */
+  thumbUrl: string;
 }
 
 export interface MediaSeries {

@@ -7,7 +7,7 @@ import { logger } from "../logger";
 import { mapLimit } from "../lib/async";
 import { captureStill, probeVideo, type VideoProbe } from "./ffmpeg";
 import { DEFAULT_SOURCE_DIRS, DIR_KEYS, DIR_LABEL, parseDirSetting, type DirKey } from "./mediadir";
-import { isVideoFile } from "./mediapath";
+import { isStrmFile, isVideoFile } from "./mediapath";
 import {
   collectSeriesDirs,
   deriveEpisodeInfo,
@@ -340,6 +340,8 @@ export interface LibraryEpisode {
   /** 编码名（h264 / hevc …），界面用来解释「为什么播不了」 */
   videoCodec: string | null;
   playMode: PlayMode;
+  /** 这是一个 .strm 链接文件：播放走服务端转发，探测/抽帧一律跳过 */
+  isStrm: boolean;
 }
 
 /** 剧集目录的 NFO 信息（标题 / 简介 / 年份 …） */
@@ -389,7 +391,8 @@ function hasDirectVideos(dir: string): boolean {
 }
 
 async function buildSeries(dir: string): Promise<LibrarySeries> {
-  const files = scanVideoFiles(dir);
+  // 媒体库是只读链路，.strm 和真实视频一样算一集
+  const files = scanVideoFiles(dir, 0, true);
   const { hasNfo, fields } = await readShowFields(dir);
   let totalSize = 0;
   let updatedAt = Math.round(statOf(dir)?.mtimeMs ?? 0);
@@ -450,7 +453,7 @@ export interface LibraryListing {
 export async function listLibrary(dir: string, opts: PlayOptions = {}): Promise<LibraryListing> {
   const abs = path.resolve(dir);
   const roots = libraryRoots();
-  const entries = collectSeriesDirs(abs);
+  const entries = collectSeriesDirs(abs, 0, true);
   const selfFiles = entries.filter((item) => path.resolve(item.dir) === abs);
 
   // 每部剧都要 readdir + 读 tvshow.nfo + 逐集 stat，串行时几十部就是几十次磁盘往返
@@ -492,9 +495,15 @@ export async function listLibrary(dir: string, opts: PlayOptions = {}): Promise<
 
 async function buildEpisode(file: string, opts: PlayOptions = {}): Promise<LibraryEpisode> {
   const dir = path.dirname(file);
+  const strm = isStrmFile(file);
   const info = deriveEpisodeInfo(path.basename(file), path.basename(dir));
   const st = statOf(file);
-  const probe = await probeFile(file).catch(() => null);
+  /**
+   * strm 是几十字节的文本：绝不能起 ffmpeg 去「探测时长」，那会真的回源拉视频，
+   * 几百个文件就是一次全量刮削。列表 / 详情对远程保持零请求，
+   * 时长与编码交给浏览器从 <video> 自己读。
+   */
+  const probe = strm ? null : await probeFile(file).catch(() => null);
   const meta = await readEpisodeMeta(file);
   const ep = info.episode;
   const fallback = ep !== null ? `第 ${ep} 集` : path.basename(file, path.extname(file));
@@ -505,13 +514,15 @@ async function buildEpisode(file: string, opts: PlayOptions = {}): Promise<Libra
     plot: meta.plot,
     season: info.season,
     episode: ep,
-    size: st?.size ?? 0,
+    size: strm ? 0 : st?.size ?? 0,
     updatedAt: Math.round(st?.mtimeMs ?? 0),
     durationSec: probe?.duration ?? null,
     width: probe?.width ?? null,
     height: probe?.height ?? null,
     videoCodec: probe?.videoCodec ?? null,
-    playMode: playModeOf(file, probe, opts),
+    // 复用 direct：浏览器的 Range 请求由服务端透传，拖动进度条与跳秒都原生可用
+    playMode: strm ? "direct" : playModeOf(file, probe, opts),
+    isStrm: strm,
   };
 }
 
@@ -523,7 +534,7 @@ export interface SeriesDetail {
 /** 一部剧的详情 + 全部分集 */
 export async function seriesDetail(dir: string, opts: PlayOptions = {}): Promise<SeriesDetail> {
   const abs = path.resolve(dir);
-  const files = scanVideoFiles(abs);
+  const files = scanVideoFiles(abs, 0, true);
   // 逐集 stat + 读单集 NFO + 视频探测：以前一个 await 接一个，30 集就排 30 次队
   const [series, episodes] = await Promise.all([
     buildSeries(abs),
@@ -539,7 +550,7 @@ export async function seriesDetail(dir: string, opts: PlayOptions = {}): Promise
 
 /** 封面地址：带上 mtime 当版本号，换海报后浏览器不用手动清缓存 */
 export function artUrl(dir: string, kind: "poster" | "landscape", firstVideo?: string | null): string | null {
-  const first = firstVideo ?? scanVideoFiles(dir)[0] ?? null;
+  const first = firstVideo ?? scanVideoFiles(dir, 0, true)[0] ?? null;
   const art = findSeriesArt(dir, first);
   const file = kind === "poster" ? art.poster : art.landscape;
   if (!file) return null;
@@ -549,7 +560,7 @@ export function artUrl(dir: string, kind: "poster" | "landscape", firstVideo?: s
 
 /** 找封面文件本身（art 路由用，避免前端传任意文件路径） */
 export function resolveArtFile(dir: string, kind: "poster" | "landscape"): string | null {
-  const first = scanVideoFiles(dir)[0] ?? null;
+  const first = scanVideoFiles(dir, 0, true)[0] ?? null;
   const art = findSeriesArt(dir, first);
   return kind === "poster" ? art.poster : art.landscape;
 }

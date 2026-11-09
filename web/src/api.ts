@@ -12,7 +12,9 @@ import type {
   EmbyProbeResult,
   EmbyStatus,
   MediaLibraryResponse,
+  MediaPosterResult,
   MediaSeriesResponse,
+  MediaStrmNfoResult,
   CacheActionResult,
   CacheStats,
   BotTestResult,
@@ -358,6 +360,24 @@ export const api = {
   /** 一部剧的详情 + 全部分集 */
   mediaSeries: (dir: string, hevc = false) =>
     request<MediaSeriesResponse>(`/media/series?dir=${encodeURIComponent(dir)}${hevc ? "&hevc=1" : ""}`),
+  /**
+   * 选中媒体目录后自动调用：给目录下所有缺单集 NFO 的 strm 补一份。
+   * 纯本地写盘，不解析直链、不抽帧、不回源，所以不阻塞界面也没风控风险。
+   */
+  mediaEnsureStrmNfo: (dir: string) =>
+    request<MediaStrmNfoResult>("/media/strm/nfo", {
+      method: "POST",
+      body: JSON.stringify({ dir }),
+    }),
+  /**
+   * 保存 strm 封面（播放器 canvas 截的 JPEG）。overwrite=false 是播放时自动截，
+   * 已有封面就不动；true 是用户挑好画面后手动覆盖。服务端同步补一份单集 NFO。
+   */
+  mediaSavePoster: (path: string, image: string, overwrite: boolean) =>
+    request<MediaPosterResult>("/media/poster", {
+      method: "POST",
+      body: JSON.stringify({ path, image, overwrite }),
+    }),
 
   /* ------------------------------ 缓存 ------------------------------ */
   cacheStatus: () => request<CacheStats>("/cache/status"),

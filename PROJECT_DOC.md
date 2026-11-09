@@ -1919,14 +1919,118 @@ tgsub/
 
 ---
 
+## strm 链接播放与本地封面（1.3.16）
+
+媒体库现在能直接播 `.strm`。典型来源是播放代理签出来的局域网直链，例如
+`http://192.168.5.2:12366/play115/.../xxx.mp4`：文件本体只有一行 URL，视频并不在本地。
+
+### 三条硬约束
+
+1. **不改 `VIDEO_EXT_RE`。** 那个正则同时被改名、删除、搬运、NFO、抽帧共用，
+   一旦把 `.strm` 合并进去，几十字节的文本会被当成视频删掉、生成 NFO、起 ffmpeg 抽帧。
+   现在只有媒体库的只读链路通过 `scanVideoFiles(dir, 0, true)` /
+   `collectSeriesDirs(root, 0, true)` 认它，默认参数仍是 `false`。
+2. **列表 / 详情零主动回源。** `buildEpisode()` 对 strm 直接跳过 `probeFile()`：
+   连 ffprobe、HEAD 都不发。时长与编码交给浏览器从 `<video>` 读。
+   `/thumb` 对 strm 只发本地已有的 `<基名>-thumb.jpg`，**绝不抽帧**。
+3. **必须服务端转发，不能前端直达。** 局域网 http 地址在 https 页面下是混合内容；
+   播放器的截图 / 设封面要 `canvas.drawImage`，跨域会污染画布。转发后同源，两个问题一起解决。
+
+### 播放链路
+
+`/api/media/stream` 识别到 `.strm` 后进入 `tg/strmstream.ts`：读第一行 URL →
+原生 `http/https.request` 流式转发 → 透传 `Range` / `206` / `Content-Range` /
+`Content-Length` / `Content-Type` → 跟随 302（最多 5 跳，每跳都带原 Range）。
+
+- 复用 `direct` 播放模式，所以 `VideoPlayer` 的 `currentTime` 拖动、跳秒、时长显示原生可用，
+  播放器和 `streamUrl()` 一行都不用改。
+- 一律直连，不挂 `m3u8_proxy`：内网播放代理本来就在局域网，塞进公网代理反而连不上。
+  `isPrivateHost()` 只用于标注线路与自检。
+- URL **原样转发**，只做协议 / 主机校验，不 `decodeURIComponent`：
+  签名地址里的 `%40`、`%20`、中文都是路径的一部分，解一次再拼回去上游会 404。
+- 上游 `403` / `429` 按主机熔断 10 分钟，期间直接返回提示，不做自动重试。
+  这类直链由播放代理临时签发，过期后只能回视频页重新生成 strm。
+
+### 封面与 NFO
+
+封面**不是服务端 ffmpeg 抽帧**，而是播放器从已经解码的 `<video>` 上用 canvas 截一帧，
+因此播放之外不产生任何额外的网盘请求，也避开了「批量刮削」这个最容易触发风控的行为。
+
+- 自动：没有封面时（`thumbUrl` 为 `null`），播放到片头之后（时长 12%，夹在 3~30 秒；
+  拿不到时长就 8 秒）截一次，`POST /api/media/poster` 带 `overwrite=false`，已有封面就不动。
+- 手动：播放器控制条的图片按钮把**当前画面**设为封面，`overwrite=true` 覆盖自动封面。
+  用户可以用「跳到 00:00」精确定位后再截。
+- 图片固定落在 strm 同级的 `<基名>-thumb.jpg`（`strmPosterPath()`），
+  这个名字与 `existingEpisodeThumb()` / 下载时生成的截帧封面完全一致，Emby 与海报墙直接认。
+  写盘走临时文件 + rename，避免读到半张图。
+- 同步补一份 `<基名>.nfo`（`strmNfoPath()` + `buildEpisodeNfo()`），**仅当不存在**，
+  不覆盖用户手工编辑过的内容。内容来自 `deriveEpisodeInfo()` 推的剧名 / 季 / 集。
+- 只接受 JPEG dataURL（`decodePosterDataUrl()` 校验魔数与大小），
+  路径必须过 `isStrmFile` + `isAllowedPath`，前端传不了文件名，不会变成写任意文件。
+
+### 选中目录后自动批量补 NFO
+
+用户选定媒体目录（右上角「选择目录」、刷新、或直接落在剧集目录）后，前端在
+`/api/media/library` 返回之后**后台**调一次 `POST /api/media/strm/nfo`，不阻塞首屏。
+
+- `tg/strmnfo.ts::collectStrmFiles()` 递归找 `.strm`（深度 6、上限 5000、跳过隐藏目录、
+  不跟随符号链接），`ensureStrmNfos()` 以并发 6 逐个 `ensureStrmNfo()`。
+- `ensureStrmNfo()` 用 `writeFile(..., { flag: "wx" })` **排他创建**：已有 NFO 一律不动，
+  并发时别人先写好会拿到 `EEXIST` 算「已有」。写失败（多数是媒体目录只读）只记日志 + 计数，
+  不让整个请求失败。
+- NFO 内容由 `buildStrmNfoText()` 生成，与播放自动截封面时补的那份共用一套逻辑：
+  只从文件名推剧名 / 季 / 集，加上 strm 的 mtime，**不读 strm 正文、不解析直链**。
+- 接口返回 `scanned / created / existing / failed / truncated`；前端只在 `created > 0`
+  时轻提示一次，写失败只提醒一次（只读目录不会每次切目录都弹）。
+- 同目录的并发调用在 `running` Map 里合并成一次，界面重复触发不会重复写盘。
+- 目录先过 `isAllowedPath`（越界返回 403），写出去的 NFO 一定在允许范围内；
+  子目录也可以单独传，扫描范围就是那棵子树。
+
+**这条批量链路是纯本地写盘、0 次网络请求**：不抽帧、不探测、不碰播放源，也不直连 115 API，
+所以文件再多也不会产生「批量刮削」特征。它和播放时自动截封面是两件事——
+批量补 NFO **不会**顺手生成封面，封面仍然只在真正播放时才截。
+
+### 风控基线
+
+- 打开媒体库：0 字节外网流量；只有用户真正点播放才发起一次上游请求。
+- 选中目录后的批量补 NFO 只在本地磁盘写 XML，不读直链、不回源，不产生任何网络请求。
+- strm 的 `preload` 是 `metadata`，避免点开弹窗就预拉一大段流。
+- 不做批量抽帧、不做候选帧扫描、不做自动重试；429/403 熔断。
+- **不直连 115 API**：账号与风控面留在播放代理那一层，tgsub 不存 115 Cookie。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `tg/mediapath.ts` | `isStrmFile` / `parseStrmTarget` / `isPrivateHost` / 封面与 NFO 路径 / dataURL 校验（纯函数） |
+| `tg/mediatree.ts` | 扫描与剧集目录的 `includeStrm` 开关；`deriveEpisodeInfo` 去掉 `.strm` 后缀 |
+| `tg/medialib.ts` | 只读链路识别 strm、跳过探测、`playMode: "direct"` |
+| `tg/strmstream.ts` | 流式转发、302、Range 透传、限流熔断 |
+| `tg/strmnfo.ts` | 单集 NFO 内容、排他创建、递归批量补齐与统计（纯本地） |
+| `routes/media.ts` | `/stream` 分流、`/thumb` 只发本地封面、`POST /poster` 落封面 + NFO、`POST /strm/nfo` 批量补 NFO |
+| `web/src/components/VideoPlayer.tsx` | canvas 截帧、自动一次、手动设封面、`preload` |
+| `web/src/pages/MediaLibrary.tsx` | 选中目录后触发批量补 NFO、保存回调、封面刷新、链接播放的错误文案 |
+
+### 排错
+
+- **点了播放一直转 / 报「连不上播放源」**：先在容器里 `curl -I` 那个 `192.168.5.2:12366` 地址，
+  确认容器网络能到；再看是不是直链过期（重新生成 strm）。
+- **海报墙一直没封面**：播放一次才会生成；批量补 NFO 不会顺手生成封面。
+  另外确认媒体目录对容器内的 node(1000) 可写，写失败会在日志里留「strm 封面写入失败」。
+- **批量补 NFO 后还是没有 `.nfo`**：接口返回的 `failed` 计数与日志里的
+  「strm 单集 NFO 写入失败」说明是目录只读；已经存在的 NFO（含手工编辑过的）不会被覆盖。
+- **拖进度条没反应**：上游要支持 Range；不支持时浏览器只能从头顺序播，属播放源限制。
+
+---
+
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.15`（镜像 `rdevils7/tgsub:v1.3.15` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.16-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.16`（镜像 `rdevils7/tgsub:v1.3.16` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.17-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.16-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.16`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.16` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.17-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.17-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.17`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.17` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.18-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

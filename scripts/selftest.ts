@@ -135,6 +135,21 @@ import {
 import { nfoTraceOf } from "../server/src/tg/nfotrace";
 import { formatClock, parseSeekText } from "../web/src/utils";
 import { mapLimit } from "../server/src/lib/async";
+import {
+  decodePosterDataUrl,
+  isPrivateHost,
+  isStrmFile,
+  parseStrmTarget,
+  strmNfoPath,
+  strmPosterPath,
+  VIDEO_EXT_RE,
+} from "../server/src/tg/mediapath";
+import {
+  buildStrmNfoText,
+  collectStrmFiles,
+  ensureStrmNfo,
+  ensureStrmNfos,
+} from "../server/src/tg/strmnfo";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -4306,6 +4321,8 @@ async function main(): Promise<void> {
     ["订阅命中通知用例", () => hitPlanChecks()],
     ["播放器控制条用例", () => playerChecks()],
     ["目录扫描并发用例", () => asyncPoolChecks()],
+    ["strm 链接播放用例", () => strmChecks()],
+    ["strm NFO 批量补齐用例", () => strmNfoChecks()],
   ];
   for (const [name, run] of suites) {
     try {
@@ -4316,6 +4333,160 @@ async function main(): Promise<void> {
     }
   }
   console.log(`\n通过 ${passed} 项自检${process.exitCode ? "（存在失败）" : "，全部正常"}\n`);
+}
+
+/* ------------------------------------------------------------------ */
+/* strm 链接播放                                                       */
+/* ------------------------------------------------------------------ */
+
+function strmChecks(): void {
+  const sample =
+    "http://192.168.5.2:12366/play115/cs1ag81vzq9zld4g9/3540753644062246715/HASH/805753114/" +
+    "www.98t.la%40%E7%88%B1%E8%B1%86%E8%A7%81%E9%9D%A2%E4%BC%9A%20%E7%AC%AC%E4%BA%8C%E9%9B%86.mp4";
+
+  check("strm 识别：只认 .strm，绝不混进视频后缀正则", () => {
+    assert.equal(isStrmFile("美人局S01E01.strm"), true);
+    assert.equal(isStrmFile("美人局S01E01.STRM"), true);
+    assert.equal(isStrmFile("美人局S01E01.mp4"), false);
+    assert.equal(isStrmFile("美人局S01E01.strm.bak"), false);
+    // 改名 / 删除 / 搬运 / NFO / 抽帧都靠这个正则，必须保持只认真视频
+    assert.equal(VIDEO_EXT_RE.test("美人局S01E01.strm"), false);
+  });
+
+  check("strm 解析：原样保留签名、%40 与编码，不解码重拼", () => {
+    assert.equal(parseStrmTarget(sample), sample);
+  });
+
+  check("strm 解析：BOM、空行与注释行都会跳过", () => {
+    const text = `\uFEFF# 由播放代理生成\n\n  ${sample}  \n  # 第二行不该被读`;
+    assert.equal(parseStrmTarget(text), sample);
+  });
+
+  check("strm 解析：非 http(s) / 回环 / 元数据地址 / 带账号密码全部拒绝", () => {
+    assert.equal(parseStrmTarget(""), null);
+    assert.equal(parseStrmTarget("# 只有注释\n"), null);
+    assert.equal(parseStrmTarget("file:///etc/passwd"), null);
+    assert.equal(parseStrmTarget("//cdn.example.com/a.mp4"), null);
+    assert.equal(parseStrmTarget("http://127.0.0.1:8080/a.mp4"), null);
+    assert.equal(parseStrmTarget("http://localhost/a.mp4"), null);
+    assert.equal(parseStrmTarget("http://[::1]/a.mp4"), null);
+    assert.equal(parseStrmTarget("http://169.254.169.254/latest/meta-data/"), null);
+    assert.equal(parseStrmTarget("https://user:pwd@cdn.example.com/a.mp4"), null);
+  });
+
+  check("私有网段判定：内网目标一律直连，公网不算", () => {
+    assert.equal(isPrivateHost(sample), true);
+    assert.equal(isPrivateHost("http://10.1.2.3/x.mp4"), true);
+    assert.equal(isPrivateHost("http://172.16.0.1/x.mp4"), true);
+    assert.equal(isPrivateHost("http://172.31.255.1/x.mp4"), true);
+    assert.equal(isPrivateHost("http://172.32.0.1/x.mp4"), false);
+    assert.equal(isPrivateHost("https://cdn.example.com/x.mp4"), false);
+    assert.equal(isPrivateHost("http://nas.local/x.mp4"), true);
+  });
+
+  check("封面与 NFO 落在 strm 同级、用同一个基名", () => {
+    const file = path.join("media", "美人局", "美人局S01E01.strm");
+    assert.equal(strmPosterPath(file), path.join("media", "美人局", "美人局S01E01-thumb.jpg"));
+    assert.equal(strmNfoPath(file), path.join("media", "美人局", "美人局S01E01.nfo"));
+  });
+
+  check("封面上传：只认 JPEG dataURL，校验魔数与大小", () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
+    const ok = decodePosterDataUrl(`data:image/jpeg;base64,${jpeg}`);
+    assert.ok(ok && ok.length === 4);
+    assert.equal(decodePosterDataUrl(`data:image/png;base64,${jpeg}`), null);
+    assert.equal(decodePosterDataUrl(`data:image/jpeg;base64,${Buffer.from("not-a-jpeg").toString("base64")}`), null);
+    assert.equal(decodePosterDataUrl(""), null);
+    assert.equal(decodePosterDataUrl(`data:image/jpeg;base64,${jpeg}`, 2), null);
+  });
+}
+
+/** 选中媒体目录后批量补 strm 单集 NFO：纯本地写盘，不能用真实媒体目录 */
+async function strmNfoChecks(): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "tgsub-strmnfo-"));
+  const exists = async (p: string): Promise<boolean> => Boolean(await fs.stat(p).catch(() => null));
+  const touch = async (rel: string, text = "http://192.168.5.2:12366/play115/a.mp4\n"): Promise<string> => {
+    const full = path.join(root, rel);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.writeFile(full, text, "utf8");
+    return full;
+  };
+
+  try {
+    await checkAsync("strm NFO 内容：只按文件名推剧名 / 季 / 集，绝不读直链", async () => {
+      const text = buildStrmNfoText(path.join(root, "美人局", "美人局S01E02.strm"), Date.UTC(2024, 0, 2));
+      assert.match(text, /<showtitle>美人局<\/showtitle>/);
+      assert.match(text, /<season>1<\/season>/);
+      assert.match(text, /<episode>2<\/episode>/);
+      assert.match(text, /<year>2024<\/year>/);
+      assert.doesNotMatch(text, /192\.168\.5\.2|play115/);
+    });
+
+    await checkAsync("strm 扫描：递归到深层、跳过隐藏目录与超深目录，不认视频和 .bak", async () => {
+      const a = await touch("剧A/剧A S01E01.strm");
+      const b = await touch("剧A/Season 02/剧A S02E01.strm");
+      await touch(".隐藏/不该扫.strm");
+      await touch("剧A/剧A S01E01.mp4", "video");
+      await touch("剧A/备份.strm.bak", "http://x/a.mp4");
+      await touch("太深/1/2/3/4/5/6/7/deep.strm");
+      assert.deepEqual(collectStrmFiles(root).sort(), [a, b].sort());
+    });
+
+    await checkAsync("strm NFO：只补不存在的，已有内容一字不改，非 strm / 不存在都拒绝", async () => {
+      const dir = path.join(root, "单体");
+      const file = await touch("单体/单体S01E03.strm");
+      const nfo = strmNfoPath(file);
+      assert.equal(await ensureStrmNfo(file), "created");
+      assert.match(await fs.readFile(nfo, "utf8"), /<episode>3<\/episode>/);
+      await fs.writeFile(nfo, "<!-- 我手工改过 -->", "utf8");
+      assert.equal(await ensureStrmNfo(file), "existing");
+      assert.equal(await fs.readFile(nfo, "utf8"), "<!-- 我手工改过 -->");
+      assert.equal(await ensureStrmNfo(path.join(dir, "不是strm.mp4")), "failed");
+      assert.equal(await ensureStrmNfo(path.join(dir, "不存在.strm")), "failed");
+    });
+
+    await checkAsync("strm NFO 批量：统计准确、幂等、不生成封面也不给视频写 NFO", async () => {
+      const batch = path.join(root, "批量");
+      const e1 = await touch("批量/剧B S01E01.strm");
+      const e2 = await touch("批量/剧B S01E02.strm");
+      const e3 = await touch("批量/Season 02/剧B S02E01.strm");
+      const kept = await touch("批量/剧B S01E03.strm");
+      const mp4 = await touch("批量/剧B S01E04.mp4", "video");
+      const keptNfo = strmNfoPath(kept);
+      await fs.writeFile(keptNfo, "<!-- 保留 -->", "utf8");
+
+      const first = await ensureStrmNfos(batch);
+      assert.deepEqual(
+        { scanned: first.scanned, created: first.created, existing: first.existing, failed: first.failed, truncated: first.truncated },
+        { scanned: 4, created: 3, existing: 1, failed: 0, truncated: false },
+      );
+      for (const file of [e1, e2, e3]) assert.equal(await exists(strmNfoPath(file)), true);
+      assert.equal(await fs.readFile(keptNfo, "utf8"), "<!-- 保留 -->");
+      assert.equal(await exists(strmNfoPath(mp4)), false);
+      assert.equal(await exists(strmPosterPath(e1)), false);
+      assert.equal(await fs.readFile(e1, "utf8"), "http://192.168.5.2:12366/play115/a.mp4\n", "strm 正文不能被改写");
+
+      const second = await ensureStrmNfos(batch);
+      assert.deepEqual(
+        { created: second.created, existing: second.existing, failed: second.failed },
+        { created: 0, existing: 4, failed: 0 },
+      );
+    });
+
+    await checkAsync("strm NFO 批量：同目录并发调用合并成一次", async () => {
+      await touch("并发/剧C S01E01.strm");
+      const fresh = path.join(root, "并发");
+      const p1 = ensureStrmNfos(fresh);
+      const p2 = ensureStrmNfos(fresh);
+      assert.equal(p1, p2);
+      assert.equal((await p1).created, 1);
+      assert.equal((await p2).created, 1, "两次拿到的是同一个结果，不是两次写入");
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 80 }).catch(() => undefined);
+  }
 }
 
 void main();

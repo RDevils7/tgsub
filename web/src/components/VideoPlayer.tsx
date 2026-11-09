@@ -5,6 +5,7 @@ import {
   IconChevronRight,
   IconFullscreen,
   IconFullscreenExit,
+  IconImage,
   IconPause,
   IconPip,
   IconPlay,
@@ -75,6 +76,16 @@ export interface VideoPlayerProps {
   hasNext: boolean;
   onPrev: () => void;
   onNext: () => void;
+  /**
+   * strm：播放到片头之后自动截一帧当封面。
+   * 只截一次；调用方只在「还没有封面」时传 true。
+   * 截的是浏览器里已经解码的那一帧，不产生任何额外的网盘请求。
+   */
+  autoPoster?: boolean;
+  /** 保存封面；自动与手动共用，overwrite=true 表示用户手动覆盖 */
+  onSavePoster?: (dataUrl: string, overwrite: boolean) => Promise<boolean>;
+  /** strm 用 metadata：避免点开播放弹窗就预拉一大段流 */
+  preload?: "auto" | "metadata";
 }
 
 export function VideoPlayer({
@@ -88,6 +99,9 @@ export function VideoPlayer({
   hasNext,
   onPrev,
   onNext,
+  autoPoster = false,
+  onSavePoster,
+  preload = "auto",
 }: VideoPlayerProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -114,6 +128,10 @@ export function VideoPlayer({
   const [autonext, setAutonext] = useState(readAutoNext);
   const [fullscreen, setFullscreen] = useState(false);
   const [jumpText, setJumpText] = useState("");
+  const [savingPoster, setSavingPoster] = useState(false);
+
+  /** 自动封面只试一次；切集时组件按 episode.path 重新挂载，自然重置 */
+  const posterTried = useRef(false);
 
   /** 用户想不想在播 —— 重挂载视频元素后据此决定要不要自动播 */
   const playIntent = useRef(true);
@@ -144,6 +162,20 @@ export function VideoPlayer({
       el.playbackRate = rate;
     },
     [volume, muted, rate],
+  );
+
+  /** 自动 / 手动设封面共用一次保存；失败由调用方决定要不要提示 */
+  const submitPoster = useCallback(
+    async (dataUrl: string, overwrite: boolean) => {
+      if (!onSavePoster) return;
+      setSavingPoster(true);
+      try {
+        await onSavePoster(dataUrl, overwrite);
+      } finally {
+        setSavingPoster(false);
+      }
+    },
+    [onSavePoster],
   );
 
   useEffect(() => {
@@ -406,7 +438,7 @@ export function VideoPlayer({
         poster={poster ?? undefined}
         autoPlay={playIntent.current}
         playsInline
-        preload="auto"
+        preload={preload}
         className="aspect-video w-full bg-black"
         onClick={() => {
           // 单击播放/暂停，双击全屏：延迟 220ms 判断，避免双击被判成两次单击
@@ -443,7 +475,26 @@ export function VideoPlayer({
         onCanPlay={() => setBuffering(false)}
         onTimeUpdate={(e) => {
           if (holdPos.current) return;
-          setPos((seekable ? appliedStart : 0) + e.currentTarget.currentTime);
+          const el = e.currentTarget;
+          setPos((seekable ? appliedStart : 0) + el.currentTime);
+          /**
+           * strm 的自动封面：等画面真的解码出来、播放过了片头再截。
+           * 截的是 <video> 里已有的那一帧（canvas），零额外请求；
+           * 抓不到画面就不置位，下次 timeupdate 再试。
+           */
+          if (autoPoster && !posterTried.current && !savingPoster) {
+            const total = el.duration;
+            const at = Number.isFinite(total) && total > 1
+              ? Math.min(Math.max(total * 0.12, 3), 30)
+              : 8;
+            if (el.currentTime >= at) {
+              const dataUrl = captureJpeg(el);
+              if (dataUrl) {
+                posterTried.current = true;
+                void submitPoster(dataUrl, false);
+              }
+            }
+          }
         }}
         onProgress={(e) => {
           const el = e.currentTarget;
@@ -661,6 +712,19 @@ export function VideoPlayer({
               <IconCamera className="h-4 w-4" />
             </CtrlButton>
 
+            {onSavePoster && (
+              <CtrlButton
+                label="把当前画面设为封面（覆盖自动截取的）"
+                disabled={savingPoster}
+                onClick={() => {
+                  const dataUrl = captureJpeg(videoRef.current);
+                  if (dataUrl) void submitPoster(dataUrl, true);
+                }}
+              >
+                <IconImage className="h-4 w-4" />
+              </CtrlButton>
+            )}
+
             {"pictureInPictureEnabled" in document && document.pictureInPictureEnabled && (
               <CtrlButton
                 label="画中画"
@@ -722,6 +786,28 @@ function CtrlButton({
       {children}
     </button>
   );
+}
+
+/**
+ * 把当前帧转成 JPEG dataURL，用于「设为封面」。
+ * 缩到 480 宽：海报墙用不了原尺寸，请求体也不会撑爆 express.json 的 1MB 限制。
+ * strm 走服务端转发后是同源，canvas 不会被跨域污染；
+ * 万一浏览器仍不让读画面，静默返回 null 即可，不影响播放。
+ */
+function captureJpeg(video: HTMLVideoElement | null, maxWidth = 480): string | null {
+  if (!video || !video.videoWidth || video.readyState < 2) return null;
+  try {
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.78);
+  } catch {
+    return null;
+  }
 }
 
 /** 截当前帧存成 PNG；跨域视频会被 canvas 拒绝，静默失败即可 */

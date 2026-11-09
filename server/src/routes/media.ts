@@ -6,7 +6,9 @@ import { env } from "../env";
 import { logger } from "../logger";
 import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
 import { buildTranscodeArgs } from "../tg/hwdecode";
-import { isVideoFile } from "../tg/mediapath";
+import { decodePosterDataUrl, isStrmFile, isVideoFile, strmPosterPath } from "../tg/mediapath";
+import { pipeStrm } from "../tg/strmstream";
+import { ensureStrmNfo, ensureStrmNfos } from "../tg/strmnfo";
 import {
   artUrl,
   existingEpisodeThumb,
@@ -54,10 +56,13 @@ function decorateSeries(series: LibrarySeries) {
 }
 
 function decorateEpisode(episode: LibraryEpisode) {
+  // strm 的封面是播放时用浏览器 canvas 截下来、落在 strm 同级的本地图片。
+  // 没有封面时不下发 thumbUrl：前端据此判断「这集需要播放时自动截一张」。
+  const localPoster = episode.isStrm ? existingEpisodeThumb(episode.path) : null;
   return {
     ...episode,
     streamUrl: streamUrl(episode.path, episode.playMode),
-    thumbUrl: thumbUrl(episode.path, episode.updatedAt || undefined),
+    thumbUrl: episode.isStrm && !localPoster ? null : thumbUrl(episode.path, episode.updatedAt || undefined),
     /**
      * 「试播」= 这一集是 HEVC，本来浏览器解不了，靠用户打开「直连」才变成直出/换封装。
      * 转码（transcode）不算试播：那条路是显卡兜住的，和解不了的情况区分开。
@@ -188,7 +193,7 @@ mediaRouter.get(
     const raw = String(req.query.path ?? "").trim();
     assert(raw, 400, "缺少文件路径");
     const file = path.resolve(raw);
-    assert(isVideoFile(file), 400, "只能取视频的缩略图");
+    assert(isVideoFile(file) || isStrmFile(file), 400, "只能取视频或 strm 的缩略图");
     assert(isAllowedPath(file), 403, "文件不在允许访问的范围内");
 
     const stat = await fs.promises.stat(file).catch(() => null);
@@ -200,6 +205,15 @@ mediaRouter.get(
     const ready = existingEpisodeThumb(file);
     if (ready) {
       res.sendFile(ready);
+      return;
+    }
+
+    /**
+     * strm 绝不做服务端抽帧：那会真的回源拉视频，几百个文件批量跑一次
+     * 就是一次全量刮削。封面只由播放器在播放时用 canvas 截、落本地。
+     */
+    if (isStrmFile(file)) {
+      res.status(404).json({ ok: false, error: "strm 的封面会在播放时自动截取，这里不做服务端抽帧" });
       return;
     }
 
@@ -287,11 +301,21 @@ mediaRouter.get(
     const raw = String(req.query.path ?? "").trim();
     assert(raw, 400, "缺少文件路径");
     const file = path.resolve(raw);
-    assert(isVideoFile(file), 400, "只能播放视频文件");
+    assert(isVideoFile(file) || isStrmFile(file), 400, "只能播放视频文件或 strm 链接");
     assert(isAllowedPath(file), 403, "文件不在允许访问的范围内");
 
     const stat = await fs.promises.stat(file).catch(() => null);
     assert(stat && stat.isFile(), 404, "文件不存在或已被删除");
+
+    /**
+     * strm 走服务端流式转发，必须放在探测之前：
+     * 这里的 probeFile / hwCapability 会起 ffmpeg，对一个文本文件既没用，
+     * 更会把「点播放」变成额外的上游请求。
+     */
+    if (isStrmFile(file)) {
+      await pipeStrm(file, req, res);
+      return;
+    }
 
     /**
      * direct 是列表接口已经算好的结论，回传过来就别再探测一遍了：
@@ -369,6 +393,86 @@ mediaRouter.get(
     res.on("close", () => stream.destroy());
     stream.on("error", () => res.destroy());
     stream.pipe(res);
+  }),
+);
+
+/* ------------------------------------------------------------------ */
+/* strm 封面与 NFO                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 选中媒体目录后，给这个目录下**所有还没有单集 NFO 的 .strm** 补一份。
+ *
+ * 纯本地写盘：只按文件名推剧名 / 季 / 集，不解析 strm 正文里的直链，
+ * 不抽帧、不探测、不请求播放源，哪怕几千个文件也不会碰到网盘风控。
+ * 目录先过 isAllowedPath，写出去的 NFO 一定在允许范围内。
+ */
+mediaRouter.post(
+  "/strm/nfo",
+  asyncHandler(async (req, res) => {
+    const dir = resolveDir(req.body?.dir);
+    assert(fs.existsSync(dir), 404, "目录不存在");
+    const summary = await ensureStrmNfos(dir);
+    res.json({ ok: true, dir, ...summary });
+  }),
+);
+
+/**
+ * 保存 strm 的封面。
+ *
+ * 图片来自**播放器里已经解码的那一帧**（canvas），不是服务端 ffmpeg 抽帧：
+ * 播放本来就要拉流，截一帧不产生任何额外请求，也不会有批量刮削特征。
+ * 落盘位置固定在 strm 同级的 `<基名>-thumb.jpg`，前端传不了文件名，
+ * 配合 isStrmFile + isAllowedPath 不会变成「写任意文件」。
+ *
+ * overwrite=false 用于播放时的自动截取（已有封面就不动），
+ * overwrite=true 是用户手动挑好画面后覆盖自动封面。
+ * NFO 只在不存在时补一次，不覆盖用户手工编辑过的内容。
+ */
+mediaRouter.post(
+  "/poster",
+  asyncHandler(async (req, res) => {
+    const raw = String(req.body?.path ?? "").trim();
+    assert(raw, 400, "缺少 strm 文件路径");
+    const file = path.resolve(raw);
+    assert(isStrmFile(file), 400, "只能给 strm 文件设置封面");
+    assert(isAllowedPath(file), 403, "文件不在允许访问的范围内");
+
+    const stat = await fs.promises.stat(file).catch(() => null);
+    assert(stat?.isFile(), 404, "strm 文件不存在或已被删除");
+
+    const image = decodePosterDataUrl(String(req.body?.image ?? ""));
+    assert(image, 400, "封面图片格式不对（只接受 JPEG，且不能超过 1MB 请求体）");
+    const overwrite = req.body?.overwrite === true;
+
+    const poster = strmPosterPath(file);
+    const existed = fs.existsSync(poster);
+    let posterCreated = false;
+    if (!existed || overwrite) {
+      // 原子写：临时文件 + rename，别让海报墙读到半张图
+      const tmp = `${poster}.tgsub-${process.pid}-${Date.now()}.tmp`;
+      try {
+        await fs.promises.writeFile(tmp, image);
+        await fs.promises.rename(tmp, poster);
+        posterCreated = true;
+        logger.info({ file, bytes: image.length, overwrite }, "strm 封面已保存");
+      } catch (err) {
+        await fs.promises.unlink(tmp).catch(() => undefined);
+        throw new Error(`封面写入失败（检查媒体目录的写权限）：${(err as Error).message}`);
+      }
+    }
+
+    // 与「选中目录后批量补齐」共用一套生成逻辑：只补不存在的，失败不影响封面与播放
+    const nfoCreated = (await ensureStrmNfo(file)) === "created";
+
+    res.json({
+      ok: true,
+      existed: existed && !overwrite,
+      posterCreated,
+      nfoCreated,
+      // 带上新版本号，浏览器不会因为长缓存还显示旧封面
+      thumbUrl: thumbUrl(file, Date.now()),
+    });
   }),
 );
 
