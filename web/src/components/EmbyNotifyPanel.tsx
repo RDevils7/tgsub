@@ -15,12 +15,21 @@ import CollapsibleCard from "./CollapsibleCard";
  * 这块自己管自己的草稿与保存：它只碰 emby_notify / emby_url / emby_path_map
  * 三个字段，和设置页其它卡片的保存互不影响。
  */
-export interface EmbyNotifyPanelProps {
-  /** 不要自己的卡片外壳，交给外层的框兜住（设置页里三块合成一个框） */
-  flat?: boolean;
+/** 给外层卡片汇总状态用（设置页里三块共用一张卡、只留一个状态徽章） */
+export interface EmbyNotifyState {
+  enabled: boolean;
+  configured: boolean;
+  label: string;
 }
 
-export default function EmbyNotifyPanel({ flat = false }: EmbyNotifyPanelProps = {}) {
+export interface EmbyNotifyPanelProps {
+  /** 不画自己的标题栏与折叠箭头，只输出内容，由外层那张卡统一兜住 */
+  embedded?: boolean;
+  /** 入库通知开关 / 配置状态变化时回吐给外层 */
+  onState?: (state: EmbyNotifyState) => void;
+}
+
+export default function EmbyNotifyPanel({ embedded = false, onState }: EmbyNotifyPanelProps = {}) {
   const [data, setData] = useState<SettingsResponse | null>(null);
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [status, setStatus] = useState<EmbyStatus | null>(null);
@@ -151,13 +160,22 @@ export default function EmbyNotifyPanel({ flat = false }: EmbyNotifyPanelProps =
     return `${dir}=/volume1/media/tgsub`;
   }, [status?.downloadDir]);
 
+  // 外层只有一个状态徽章，这里把入库通知的状态回吐出去汇总。
+  // 数据没到之前别回吐「未启用」，否则卡片收起时外层的兜底状态会被误覆盖。
+  useEffect(() => {
+    if (!data || !draft) return;
+    onState?.({
+      enabled: !!draft.emby_notify,
+      configured: !!status?.configured,
+      label: !draft.emby_notify ? "未启用" : status?.configured ? "已启用" : "配置不完整",
+    });
+  }, [data, draft, status?.configured, onState]);
+
   if (!data || !draft) {
     return (
-      <section
-        className={`flex h-40 items-center justify-center p-5 text-slate-500 ${flat ? "" : "card"}`}
-      >
+      <div className="flex h-32 items-center justify-center text-slate-500">
         <Spinner className="h-5 w-5" />
-      </section>
+      </div>
     );
   }
 
@@ -169,22 +187,8 @@ export default function EmbyNotifyPanel({ flat = false }: EmbyNotifyPanelProps =
 
   const successCount = status?.history.filter((h) => h.ok).length ?? 0;
 
-  return (
-    <CollapsibleCard
-      id="emby-notify"
-      tint="emerald"
-      icon={<IconTv className="h-4 w-4" />}
-      title="入库通知"
-      desc="每集下载完成后把路径提交给 Emby 的 /Library/Media/Updated 接口，Emby 立刻增量扫描，不用等定时任务也不用手动点扫描"
-      defaultOpen
-      flat={flat}
-      extra={
-        <Badge className={badge.tone}>
-          <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
-          {badge.label}
-        </Badge>
-      }
-    >
+  const body = (
+    <>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
           <p className="text-[11px] uppercase tracking-wider text-slate-500">服务地址</p>
@@ -379,6 +383,29 @@ export default function EmbyNotifyPanel({ flat = false }: EmbyNotifyPanelProps =
           </div>
         </div>
       </details>
+    </>
+  );
+
+  // 嵌入模式：只输出内容，标题栏 / 折叠箭头 / 状态徽章都由外层那张卡统一负责
+  if (embedded) return body;
+
+  // 单独使用时仍是一张完整卡片（保留旧行为，方便别处复用）
+  return (
+    <CollapsibleCard
+      id="emby-notify"
+      tint="emerald"
+      icon={<IconTv className="h-4 w-4" />}
+      title="入库通知"
+      desc="每集下载完成后把路径提交给 Emby 的 /Library/Media/Updated 接口，Emby 立刻增量扫描，不用等定时任务也不用手动点扫描"
+      defaultOpen
+      extra={
+        <Badge className={badge.tone}>
+          <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
+          {badge.label}
+        </Badge>
+      }
+    >
+      {body}
     </CollapsibleCard>
   );
 }

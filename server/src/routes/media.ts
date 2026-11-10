@@ -6,7 +6,13 @@ import { env } from "../env";
 import { logger } from "../logger";
 import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
 import { buildTranscodeArgs } from "../tg/hwdecode";
-import { decodePosterDataUrl, isStrmFile, isVideoFile, strmPosterPath } from "../tg/mediapath";
+import {
+  decodePosterDataUrl,
+  isStrmFile,
+  isUnsafeLibraryRoot,
+  isVideoFile,
+  strmPosterPath,
+} from "../tg/mediapath";
 import { pipeStrm } from "../tg/strmstream";
 import { ensureStrmNfo, ensureStrmNfos } from "../tg/strmnfo";
 import {
@@ -27,7 +33,7 @@ import {
   type LibrarySeries,
   type PlayMode,
 } from "../tg/medialib";
-import { isAllowedPath } from "../tg/mediatree";
+import { addSource, isAllowedPath } from "../tg/mediatree";
 import { spawn } from "node:child_process";
 
 /**
@@ -43,7 +49,17 @@ export const mediaRouter = Router();
 function resolveDir(raw: unknown): string {
   const text = String(raw ?? "").trim();
   const dir = text ? path.resolve(text) : path.resolve(env.downloadDir);
-  assert(isAllowedPath(dir), 403, "目录不在允许访问的范围内");
+  if (!isAllowedPath(dir)) {
+    const home = path.resolve(env.downloadDir);
+    const roots = libraryRoots().map((root) => root.path);
+    // 「为什么被拒」必须留痕：NAS 上路径前缀、大小写、挂载点差一个字就看不出来
+    logger.warn({ dir, home, roots }, "媒体库目录被拒绝：不在允许访问的范围内");
+    assert(
+      false,
+      403,
+      `目录不在允许访问的范围内：${dir}。请在「选择目录」里重新选择一次（会自动登记），或回到下载目录。`,
+    );
+  }
   return dir;
 }
 
@@ -629,5 +645,37 @@ mediaRouter.get(
   "/roots",
   asyncHandler(async (_req, res) => {
     res.json({ ok: true, roots: libraryRoots(), home: path.resolve(env.downloadDir) });
+  }),
+);
+
+/**
+ * 把「选择目录」里挑中的目录登记成媒体来源。
+ *
+ * 目录浏览接口（/metadata/browse）本来就允许翻到下载根之外（元数据页靠它添加外部视频），
+ * 但媒体库的读接口只认下载根 + media_sources。以前两边没打通：用户挑了别的盘，
+ * 列表接口立刻 403「目录不在允许访问的范围内」。现在选中即登记，之后就一直可访问。
+ *
+ * 只在**当前不允许**时才写库：下载根内的子目录不产生垃圾来源记录。
+ */
+mediaRouter.post(
+  "/roots",
+  asyncHandler(async (req, res) => {
+    const raw = String(req.body?.dir ?? "").trim();
+    assert(raw, 400, "请提供目录路径");
+    const dir = path.resolve(raw);
+    const stat = await fs.promises.stat(dir).catch(() => null);
+    assert(stat?.isDirectory(), 404, "目录不存在，或选中的不是文件夹");
+    if (isAllowedPath(dir)) {
+      res.json({ ok: true, dir, created: false });
+      return;
+    }
+    assert(
+      !isUnsafeLibraryRoot(dir, [env.dataDir]),
+      403,
+      "不能把系统目录或数据目录设为媒体库目录",
+    );
+    const source = addSource(dir, "dir", path.basename(dir) || dir);
+    logger.info({ dir, sourceId: source.id }, "媒体库已登记新的来源目录");
+    res.json({ ok: true, dir, created: true });
   }),
 );

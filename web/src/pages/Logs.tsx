@@ -42,6 +42,13 @@ const KEY_FIELDS = [
   "strikes",
   "delayMs",
   "messageId",
+  "chatId",
+  "from",
+  "media",
+  "route",
+  "text",
+  "links",
+  "data",
   "file",
   "series",
   "episode",
@@ -60,7 +67,10 @@ function summarize(entry: LogEntry): string {
       continue;
     }
     if (typeof value === "string") {
-      parts.push(`${key}=${value}`);
+      // bot 收到的原文可能上千字、带换行；列表里只放一行预览，
+      // 完整内容仍在「详情」里，并且关键词搜索走的是全字段 JSON。
+      const flat = value.replace(/\s+/g, " ").trim();
+      parts.push(`${key}=${flat.length > 240 ? `${flat.slice(0, 240)}…` : flat}`);
     } else if (typeof value === "number" || typeof value === "boolean") {
       parts.push(`${key}=${String(value)}`);
     }
@@ -259,8 +269,10 @@ export default function Logs() {
             const style = LEVEL_STYLE[entry.level] ?? LEVEL_STYLE.info;
             const summary = summarize(entry);
             const hint = typeof entry.fields.hint === "string" ? entry.fields.hint : null;
+            // text 虽在摘要里显示，仍要放进「详情」：列表只给一行预览，
+            // 完整原文（含换行、未截断的部分）要能展开看到，方便复盘解析失败的消息。
             const extra = Object.entries(entry.fields).filter(
-              ([k]) => !KEY_FIELDS.includes(k) && k !== "hint",
+              ([k]) => (!KEY_FIELDS.includes(k) || k === "text") && k !== "hint",
             );
             const open = expanded === index;
             return (
@@ -291,7 +303,9 @@ export default function Logs() {
                     )}
                     {open && extra.length > 0 && (
                       <pre className="mt-2 overflow-x-auto rounded-lg border border-white/[0.06] bg-black/20 p-2.5 text-[11px] leading-relaxed text-slate-400">
-                        {extra.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join("\n")}
+                        {extra
+                          .map(([k, v]) => (k === "text" && typeof v === "string" ? `text:\n${v}` : `${k}: ${JSON.stringify(v)}`))
+                          .join("\n")}
                       </pre>
                     )}
                   </div>

@@ -139,11 +139,13 @@ import {
   decodePosterDataUrl,
   isPrivateHost,
   isStrmFile,
+  isUnsafeLibraryRoot,
   parseStrmTarget,
   strmNfoPath,
   strmPosterPath,
   VIDEO_EXT_RE,
 } from "../server/src/tg/mediapath";
+import { BOT_LOG_TEXT_LIMIT, botIdText, summarizeInbound } from "../server/src/tg/botlog";
 import {
   buildStrmNfoText,
   collectStrmFiles,
@@ -4323,6 +4325,8 @@ async function main(): Promise<void> {
     ["目录扫描并发用例", () => asyncPoolChecks()],
     ["strm 链接播放用例", () => strmChecks()],
     ["strm NFO 批量补齐用例", () => strmNfoChecks()],
+    ["媒体来源目录用例", () => libraryRootChecks()],
+    ["机器人入站日志用例", () => botLogChecks()],
   ];
   for (const [name, run] of suites) {
     try {
@@ -4487,6 +4491,148 @@ async function strmNfoChecks(): Promise<void> {
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 80 }).catch(() => undefined);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 媒体来源目录（选择目录自动登记）                                      */
+/* ------------------------------------------------------------------ */
+
+function libraryRootChecks(): void {
+  const root = path.parse(path.resolve(path.sep)).root;
+
+  check("媒体来源：文件系统根与系统目录一律拒绝", () => {
+    assert.equal(isUnsafeLibraryRoot(root), true);
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "etc")), true);
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "proc", "1")), true);
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "Windows", "System32")), true);
+  });
+
+  check("媒体来源：普通媒体目录允许登记", () => {
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "media", "剧集")), false);
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "volume1", "strm")), false);
+  });
+
+  check("媒体来源：数据目录及其上级不允许登记", () => {
+    const dataDir = path.join(root, "app", "data");
+    assert.equal(isUnsafeLibraryRoot(dataDir, [dataDir]), true);
+    assert.equal(isUnsafeLibraryRoot(path.join(root, "app"), [dataDir]), true, "数据目录的上级会把凭据一起开放");
+    assert.equal(isUnsafeLibraryRoot(path.join(dataDir, "downloads", "剧A"), [dataDir]), false);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* 机器人入站日志                                                       */
+/* ------------------------------------------------------------------ */
+
+function botLogChecks(): void {
+  check("bot 日志：gramjs long（BigInteger）ID 能还原成十进制", () => {
+    assert.equal(botIdText(bigInt("123456789012345")), "123456789012345");
+    assert.equal(botIdText({ className: "PeerChannel", channelId: bigInt("-10098765") }), "-10098765");
+    assert.equal(botIdText(42), "42");
+    assert.equal(botIdText(42n), "42");
+    assert.equal(botIdText("7788"), "7788");
+    assert.equal(botIdText({ foo: 1 }), null);
+    assert.equal(botIdText(undefined), null);
+  });
+
+  check("bot 日志：分享口令原文、实体与发送者全部留痕", () => {
+    const text = "举手大喊：姐姐看我！ <https://xhslink.cn/o/8c7hpV57rvQ> 复制文本后进入【小红书】";
+    const log = summarizeInbound({
+      id: bigInt(12345),
+      chatId: bigInt("-1001234567890"),
+      senderId: bigInt(777),
+      sender: { username: "alice", firstName: "Alice", lastName: "L" },
+      isPrivate: true,
+      date: 1700000000,
+      message: text,
+      entities: [
+        { className: "MessageEntityTextUrl", offset: 12, length: 30, url: "https://xhslink.cn/o/8c7hpV57rvQ" },
+        { className: "MessageEntityBold", offset: 0, length: 4 },
+      ],
+    });
+    assert.equal(log.botEvent, "bot-in");
+    assert.equal(log.messageId, "12345");
+    assert.equal(log.chatId, "-1001234567890");
+    assert.equal(log.senderId, "777");
+    assert.equal(log.from, "@alice");
+    assert.equal(log.text, text);
+    assert.equal(log.textLength, text.length);
+    assert.equal(log.textTruncated, false);
+    assert.equal(log.isPrivate, true);
+    assert.equal(log.date, new Date(1700000000 * 1000).toISOString());
+    assert.equal(log.entities.length, 2);
+    assert.equal(log.entities[0].type, "TextUrl");
+    assert.equal(log.entities[0].url, "https://xhslink.cn/o/8c7hpV57rvQ");
+    assert.equal(log.entities[1].type, "Bold");
+  });
+
+  check("bot 日志：纯媒体消息没有文字也要留下媒体信息", () => {
+    const log = summarizeInbound({
+      id: 9,
+      chatId: 100,
+      message: "",
+      media: {
+        className: "MessageMediaDocument",
+        document: {
+          mimeType: "video/mp4",
+          size: 123456,
+          attributes: [{ className: "DocumentAttributeFilename", fileName: "剧集S01E01.mp4" }],
+        },
+      },
+    });
+    assert.equal(log.text, "");
+    assert.equal(log.textLength, 0);
+    assert.equal(log.media, "MessageMediaDocument");
+    assert.equal(log.fileName, "剧集S01E01.mp4");
+    assert.equal(log.mimeType, "video/mp4");
+    assert.equal(log.fileSize, 123456);
+  });
+
+  check("bot 日志：转发来源 / 相册 / 回复 / 网页预览都记下来", () => {
+    const log = summarizeInbound({
+      id: bigInt(88),
+      peerId: { className: "PeerChannel", channelId: bigInt("555") },
+      message: "看看这个 https://example.com/a",
+      fwdFrom: {
+        fromId: { className: "PeerChannel", channelId: bigInt("999") },
+        channelPost: bigInt("12"),
+        fromName: "某某频道",
+        date: 1700000001,
+      },
+      groupedId: bigInt("445566"),
+      replyTo: { replyToMsgId: bigInt("77") },
+      media: { className: "MessageMediaWebPage", webpage: { url: "https://example.com/a" } },
+    });
+    assert.equal(log.chatId, "555");
+    assert.deepEqual(log.fwdFrom, {
+      channelId: "999",
+      channelPost: "12",
+      fromName: "某某频道",
+      date: new Date(1700000001 * 1000).toISOString(),
+    });
+    assert.equal(log.groupedId, "445566");
+    assert.equal(log.replyToId, "77");
+    assert.equal(log.webPageUrl, "https://example.com/a");
+  });
+
+  check("bot 日志：超长原文截断并标出原始长度", () => {
+    const text = "口令".repeat(1500);
+    const log = summarizeInbound({ id: 1, message: text }, 100);
+    assert.equal(log.text.length, 100);
+    assert.equal(log.textLength, text.length);
+    assert.equal(log.textTruncated, true);
+    assert.equal(summarizeInbound({ id: 1, message: text }).textLength, text.length);
+    assert.ok(BOT_LOG_TEXT_LIMIT >= 1000, "默认上限要足够装下常见分享口令");
+  });
+
+  check("bot 日志：空对象 / 脏字段不抛异常", () => {
+    const empty = summarizeInbound(null);
+    assert.equal(empty.text, "");
+    assert.equal(empty.messageId, null);
+    assert.equal(empty.chatId, null);
+    assert.equal(empty.entities.length, 0);
+    assert.equal(summarizeInbound({ id: {}, message: 42, entities: "oops" }).text, "");
+  });
 }
 
 void main();

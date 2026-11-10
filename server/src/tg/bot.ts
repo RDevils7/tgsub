@@ -16,6 +16,7 @@ import { hitLines } from "./hitplan";
 import { downloadFromLink, downloadFromForward, extractTelegramLinks, type DirectResult } from "./direct";
 import { downloader } from "./downloader";
 import { setNotifyCard, setNotifySender } from "./notify";
+import { summarizeInbound } from "./botlog";
 import { invalidateMatcherCache } from "../match";
 import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
 import { enqueueFromChoice, enqueuePlatformLinks, type PlatformChoiceInfo, type PlatformQueued } from "../platform/jobs";
@@ -1051,18 +1052,40 @@ function denyText(userId: string): string {
 
 async function handleMessage(event: NewMessageEvent): Promise<void> {
   const msg = event.message;
+  /**
+   * 无论后面能不能解析、走哪条分支，先把「用户到底发了什么」完整留一条。
+   * 日志页按关键词搜索时能直接搜到原文，以后补解析规则不用再问用户重发。
+   */
+  const inbound = summarizeInbound(msg);
+  const routeLog = (route: string, extra: Record<string, unknown> = {}): void => {
+    logger.info(
+      { botEvent: "bot-route", messageId: inbound.messageId, senderId: inbound.senderId, route, ...extra },
+      `机器人消息路由：${route}`,
+    );
+  };
   try {
-    if (msg.isPrivate === false) return; // 只接受私聊，避免被拉群乱操作
+    if (msg.isPrivate === false) {
+      logger.debug({ ...inbound, skipped: "group" }, "机器人收到群消息（已忽略）");
+      return; // 只接受私聊，避免被拉群乱操作
+    }
+    logger.info({ ...inbound }, "机器人收到私聊消息");
     const peer = msg.inputChat ?? msg.chatId;
-    if (!peer) return;
+    if (!peer) {
+      routeLog("no-peer");
+      return;
+    }
     const userId = String(msg.senderId ?? "");
 
     const currentBot = bot;
-    if (!currentBot) return;
+    if (!currentBot) {
+      routeLog("bot-offline");
+      return;
+    }
     await rememberPeer(msg);
 
     // 权限：未授权用户只允许 /id、/start（拿 ID），其余一律拒绝
     if (!isAllowed(userId)) {
+      routeLog("denied", { reason: "user-not-allowed", text: inbound.text });
       const probe = /^\/([A-Za-z0-9_]+)/.exec((msg.message ?? "").trim());
       const c = (probe?.[1] ?? "").toLowerCase();
       if (c === "id" || c === "start") {
@@ -1087,6 +1110,7 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
         : null;
     const fwdMessageId = fwd?.channelPost ?? null;
     if (fwdChannelId && fwdMessageId) {
+      routeLog("forward", { fwdChannelId, fwdMessageId, groupedId: inbound.groupedId });
       const includeImages = imageModeOn(userId);
       // 相册（grouped）转发会被 gramjs 拆成多条消息、每条都带同一个 groupedId：
       // 只认第一条，避免整组被重复解析 / 下载 N 次（N = 相册内媒体数）。
@@ -1094,7 +1118,10 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       if (gid != null) {
         const now = Date.now();
         for (const [k, t] of seenForwardAlbums) if (now - t > FORWARD_ALBUM_TTL) seenForwardAlbums.delete(k);
-        if (seenForwardAlbums.has(`${fwdChannelId}:${String(gid)}`)) return;
+        if (seenForwardAlbums.has(`${fwdChannelId}:${String(gid)}`)) {
+          routeLog("forward-album-duplicate", { fwdChannelId, groupedId: String(gid) });
+          return;
+        }
         seenForwardAlbums.set(`${fwdChannelId}:${String(gid)}`, now);
       }
       await sendText(currentBot, peer, "📨 收到转发的频道消息，正在解析…");
@@ -1108,13 +1135,30 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
           mainButtons(userId),
         );
       } catch (err) {
+        logger.warn(
+          {
+            botEvent: "bot-parse-fail",
+            route: "forward",
+            messageId: inbound.messageId,
+            senderId: inbound.senderId,
+            fwdChannelId,
+            fwdMessageId,
+            text: inbound.text,
+            err: errorText(err),
+          },
+          "机器人解析转发的频道消息失败（原文已留存）",
+        );
         await sendText(currentBot, peer, `❌ ${esc(errorText(err))}`);
       }
       return;
     }
 
     const text = (msg.message ?? "").trim();
-    if (!text) return;
+    if (!text) {
+      // 纯图片 / 贴纸 / 表情：没有文字可解析，但收到的东西仍要留痕
+      routeLog("empty-text", { media: inbound.media, fileName: inbound.fileName, textLength: inbound.textLength });
+      return;
+    }
 
     const matched = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?\s*([\s\S]*)$/.exec(text);
     const cmd = (matched?.[1] ?? "").toLowerCase();
@@ -1125,12 +1169,17 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       // 直接发链接就下载：不用记命令，把 t.me 消息链接丢过来即可
       const links = extractTelegramLinks(text);
       if (links.length) {
+        routeLog("telegram-link", { count: links.length, links: links.slice(0, 5).join(" | ") });
         const includeImages = imageModeOn(userId);
         await sendText(currentBot, peer, `🔗 收到 ${links.length} 个链接，正在解析…`);
         for (const link of links.slice(0, 5)) {
           try {
             await sendText(currentBot, peer, directText(await downloadFromLink(link, { includeImages })));
           } catch (err) {
+            logger.warn(
+              { botEvent: "bot-parse-fail", route: "telegram-link", messageId: inbound.messageId, link, text: inbound.text, err: errorText(err) },
+              "机器人解析 Telegram 链接失败（原文已留存）",
+            );
             await sendText(currentBot, peer, `❌ ${esc(link)}\n${esc(errorText(err))}`);
           }
         }
@@ -1141,9 +1190,29 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       // 小红书 xhslink.cn、「复制打开…」那一长串都算）
       const platformLinks = splitPlatformLinks(text);
       if (platformLinks.length) {
+        const chosen = platformLinks.slice(0, 5);
+        routeLog("platform-link", {
+          count: platformLinks.length,
+          platforms: [...new Set(chosen.map((l) => l.platform))].join(","),
+          links: chosen.map((l) => l.url).join(" | "),
+        });
         await sendText(currentBot, peer, `🔗 识别到 ${platformLinks.length} 个平台链接，正在解析…`);
-        const results = await enqueuePlatformLinks(platformLinks.slice(0, 5));
+        const results = await enqueuePlatformLinks(chosen);
         const failures = results.filter((r) => !r.ok);
+        if (failures.length) {
+          logger.warn(
+            {
+              botEvent: "bot-parse-fail",
+              route: "platform-link",
+              messageId: inbound.messageId,
+              senderId: inbound.senderId,
+              text: inbound.text,
+              links: chosen.map((l) => l.url).join(" | "),
+              errors: failures.map((f) => f.error ?? "未知错误").join(" | ").slice(0, 600),
+            },
+            "机器人平台链接解析失败（原文已留存）",
+          );
+        }
         // 整批同一个原因（比如平台没开、yt-dlp 不可用）只回一条
         if (failures.length === results.length && new Set(failures.map((f) => f.error ?? "")).size === 1) {
           await sendText(currentBot, peer, `❌ ${esc(failures[0].error ?? "解析失败")}`);
@@ -1168,18 +1237,28 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
         ),
       ];
       if (webLinks.length) {
+        routeLog("web-link", { count: webLinks.length, links: webLinks.slice(0, 5).join(" | ") });
         const includeImages = imageModeOn(userId);
         await sendText(currentBot, peer, `🔗 收到 ${webLinks.length} 个网页/视频链接，正在解析…`);
         for (const link of webLinks.slice(0, 5)) {
           try {
             await sendText(currentBot, peer, directText(await downloadFromLink(link, { includeImages })));
           } catch (err) {
+            logger.warn(
+              { botEvent: "bot-parse-fail", route: "web-link", messageId: inbound.messageId, link, text: inbound.text, err: errorText(err) },
+              "机器人解析网页/视频链接失败（原文已留存）",
+            );
             await sendText(currentBot, peer, `❌ ${esc(link)}\n${esc(errorText(err))}`);
           }
         }
         return;
       }
 
+      // 什么都没认出来：这是最需要留原文的一类，用 warn 让日志页一眼看到
+      logger.warn(
+        { ...inbound, botEvent: "bot-unparsed", userId },
+        "机器人收到无法解析的消息（原文已留存，可按关键词搜索）",
+      );
       await sendText(
         currentBot,
         peer,
@@ -1191,11 +1270,15 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
       return;
     }
 
+    routeLog("command", { cmd, args: args.join(" ").slice(0, 300) });
     const ctx: BotCtx = { userId, send: (t, b) => sendText(currentBot, peer, t, b) };
     const reply = await execute(cmd, args, ctx);
     await sendText(currentBot, peer, reply.text, reply.buttons);
   } catch (err) {
-    logger.warn({ err: errorText(err) }, "机器人处理消息失败");
+    logger.warn(
+      { ...inbound, botEvent: "bot-error", err: errorText(err) },
+      "机器人处理消息失败（收到的原文已留存）",
+    );
     const currentBot = bot;
     const peer = msg.inputChat ?? msg.chatId;
     if (currentBot && peer) {
@@ -1206,12 +1289,20 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
 
 async function handleCallback(event: CallbackQueryEvent): Promise<void> {
   const data = event.data?.toString() ?? "";
+  const userId = String(event.query.userId ?? "");
+  const callbackLog = {
+    botEvent: "bot-callback",
+    userId,
+    data: data.slice(0, 300),
+    messageId: String(event.query.msgId ?? ""),
+  };
+  logger.info(callbackLog, "机器人收到按钮回调");
   if (!data.startsWith("cmd:")) {
     await event.answer().catch(() => undefined);
     return;
   }
-  const userId = String(event.query.userId ?? "");
   if (!isAllowed(userId)) {
+    logger.warn({ ...callbackLog, reason: "user-not-allowed" }, "机器人拒绝未授权用户的按钮操作");
     await event.answer({ message: "没有操作权限", alert: true }).catch(() => undefined);
     return;
   }
@@ -1232,7 +1323,7 @@ async function handleCallback(event: CallbackQueryEvent): Promise<void> {
       buttons: reply.buttons,
     });
   } catch (err) {
-    logger.warn({ err: errorText(err), cmd }, "机器人按钮操作失败");
+    logger.warn({ ...callbackLog, err: errorText(err), cmd }, "机器人按钮操作失败");
     await event.respond({ message: `❌ 执行失败：${esc(errorText(err))}`, parseMode: "html" }).catch(() => undefined);
   }
 }

@@ -291,6 +291,8 @@ export default function MediaLibrary() {
   toastRef.current = toast;
   /** 媒体目录不可写时只提醒一次，别每切一次目录都弹 */
   const nfoFailedNotified = useRef(false);
+  /** localStorage 里记着的目录失效时，只自动回落下载根一次 */
+  const rootFallbackTried = useRef(false);
   const [playing, setPlaying] = useState<{ episode: MediaEpisode; list: MediaEpisode[]; index: number } | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
@@ -373,6 +375,16 @@ export default function MediaLibrary() {
       .catch((err) => {
         if (!alive) return;
         setListing(null);
+        const status = (err as { status?: number }).status;
+        // 浏览器里记着上次的位置；换了机器/容器、或目录被删之后会一直 403/404。
+        // 只自动回落一次，别把真正的网络故障也悄悄吞掉。
+        if (dir && (status === 403 || status === 404) && !rootFallbackTried.current) {
+          rootFallbackTried.current = true;
+          localStorage.removeItem(DIR_STORAGE_KEY);
+          toastRef.current.push("上次记住的目录已不可用，已回到下载目录", "info");
+          setDir("");
+          return;
+        }
         setError((err as Error).message);
       })
       .finally(() => {
@@ -720,7 +732,19 @@ export default function MediaLibrary() {
           onClose={() => setBrowseOpen(false)}
           onPick={(picked) => {
             setBrowseOpen(false);
-            goDir(picked);
+            // 挑中的目录可能在下载根之外：先登记成媒体来源，再拉列表。
+            // 已经在范围内的目录服务端会直接返回 created=false，不会写垃圾记录。
+            void api
+              .mediaAddRoot(picked)
+              .then((res) => {
+                if (res.created) {
+                  toastRef.current.push(`已把 ${picked} 登记为媒体目录`, "success");
+                }
+                goDir(picked);
+              })
+              .catch((err) => {
+                toastRef.current.push(`无法打开这个目录：${(err as Error).message}`, "error");
+              });
           }}
         />
       )}
@@ -1550,7 +1574,7 @@ function BrowseDialog({
       open
       onClose={onClose}
       title="选择媒体目录"
-      description="挑一个装有剧集的目录，媒体库会把它下面每个剧集文件夹当成一部剧"
+      description="挑一个装有剧集的目录，媒体库会把它下面每个剧集文件夹当成一部剧；下载根目录之外的位置会自动登记为媒体来源"
       width="max-w-2xl"
       footer={
         <>
@@ -1605,7 +1629,7 @@ function BrowseDialog({
         </div>
 
         <p className="text-[11px] leading-relaxed text-slate-500">
-          只能选下载目录内或已登记的来源目录 —— 其它位置服务端没有权限读。
+          选中后会自动登记为媒体来源，之后可以直接打开；系统目录和数据目录不允许设为媒体库目录。
         </p>
       </div>
     </Modal>

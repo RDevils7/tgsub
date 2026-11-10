@@ -43,6 +43,39 @@ export function isUnderPath(child: string, parent: string): boolean {
   return a === b || a.startsWith(b + path.sep);
 }
 
+/**
+ * 「选择目录」可以把下载根之外的目录登记成媒体来源，但不能把整台机器开放出去。
+ *
+ * 拦两类：
+ *  1. 文件系统根 / 系统目录（/etc、/proc、C:\Windows…）；
+ *  2. `protectedRoots` 的**上级**目录 —— 数据目录里放着数据库和 Telegram session，
+ *     把它登记成媒体库等于把凭据目录树挂到列表接口上。
+ *
+ * 只做纯路径判断，不碰数据库、不读磁盘，方便自检。
+ */
+const UNSAFE_FIRST_SEGMENT = new Set([
+  "proc", "sys", "dev", "etc", "boot", "root", "bin", "sbin", "usr", "lib", "lib64",
+  "windows", "program files", "program files (x86)", "programdata", "system32",
+]);
+
+export function isUnsafeLibraryRoot(target: string, protectedRoots: string[] = []): boolean {
+  const abs = path.resolve(target);
+  const parsed = path.parse(abs);
+  if (abs === parsed.root) return true;
+  const first = abs
+    .slice(parsed.root.length)
+    .split(/[\\/]/)
+    .filter(Boolean)[0]
+    ?.toLowerCase();
+  if (first && UNSAFE_FIRST_SEGMENT.has(first)) return true;
+  for (const root of protectedRoots) {
+    const safe = path.resolve(root);
+    // safe 在 abs 之下（或相等）→ 登记 abs 会把受保护目录一起开放
+    if (isUnderPath(safe, abs)) return true;
+  }
+  return false;
+}
+
 /** 递归收集目录下的视频文件 */
 export function collectVideos(dir: string, depth = 0, acc: string[] = []): string[] {
   if (depth > MAX_VIDEO_DEPTH) return acc;

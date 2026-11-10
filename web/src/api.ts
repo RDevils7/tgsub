@@ -361,6 +361,15 @@ export const api = {
   mediaSeries: (dir: string, hevc = false) =>
     request<MediaSeriesResponse>(`/media/series?dir=${encodeURIComponent(dir)}${hevc ? "&hevc=1" : ""}`),
   /**
+   * 「选择目录」挑中一个下载根之外的目录时，先把它登记成媒体来源。
+   * 下载根内（已允许）服务端直接返回 created=false，不会产生多余记录。
+   */
+  mediaAddRoot: (dir: string) =>
+    request<{ ok: boolean; dir: string; created: boolean }>("/media/roots", {
+      method: "POST",
+      body: JSON.stringify({ dir }),
+    }),
+  /**
    * 选中媒体目录后自动调用：给目录下所有缺单集 NFO 的 strm 补一份。
    * 纯本地写盘，不解析直链、不抽帧、不回源，所以不阻塞界面也没风控风险。
    */

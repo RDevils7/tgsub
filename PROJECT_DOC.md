@@ -172,7 +172,7 @@
 下载完成的最后一件事是通知 Emby：把文件路径 POST 给 `/Library/Media/Updated`，Emby 只对这条路径做增量扫描，
 新集几十秒内出现在媒体库里 —— 不必等它的定时任务，也不用去后台手点「扫描媒体库」。
 
-- **配置位置**：设置页「Emby 媒体信息」卡片（1.3.5 起从独立页面收回设置页）。地址 / API Key / 路径映射与 Emby 自身的看板配置互不影响，关掉开关即完全停止。
+- **配置位置**：设置页「Emby 媒体信息与入库通知」卡片，展开后第 2 节「入库通知」（1.3.5 起从独立页面收回设置页，1.3.17 起三节合成一张卡）。地址 / API Key / 路径映射与 Emby 自身的看板配置互不影响，关掉开关即完全停止。
 - **路径映射必须有**：容器里是 `/downloads`，Emby 看到的是宿主目录（群晖 `/volume1/...`）。
   不映射时 Emby 照样返回 204，只是静默忽略 —— 媒体库里始终不出新集，这是最容易误判成「通知没生效」的情况。
 - **合批**：相邻几集通常连着下完，攒 2.5 秒合并成一次请求（单次最多 50 条路径），只触发一次增量扫描。
@@ -184,9 +184,13 @@
 
 侧边栏第二位「**媒体库**」展示**你自己选的目录**（默认下载目录）里的剧集，点剧集看分集、点某一集直接播。
 这一页**不依赖 Emby**：NFO、封面、视频全在本地磁盘上，Emby 没配也照样能看。
-配置类的东西（媒体信息生成、入库通知、ffmpeg 路径）统一放在设置页「Emby 媒体信息」——
-这三块（媒体信息 / 入库通知 / Emby 端还要做三件事）装在**同一个卡片框**里，块之间用分隔线，
-不再各占一张卡（`CollapsibleCard` 与 `EmbyNotifyPanel` 的 `flat` 属性，外层由 `section.card divide-y` 兜住）。
+配置类的东西（媒体信息生成、入库通知、ffmpeg 路径）统一放在设置页「Emby 媒体信息与入库通知」——
+1.3.17 起三块（媒体信息 / 入库通知 / Emby 端还要做三件事）合成**一张可折叠卡片**：
+只有一个标题栏、一个展开箭头、一个汇总状态徽章（两项都开且入库配置齐全 = 已启用，只开一项 = 部分启用），
+展开后三节用分隔线排开（`EmbySettingsPanel.tsx` 用一张 `CollapsibleCard` 兜住，
+`EmbyNotifyPanel` 的 `embedded` 模式只输出内容、不再画自己的标题栏）。
+徽章在卡片收起时也要准：`EmbySettingsPanel` 自己拉一次 `/api/settings` + `/api/emby/status` 兜底，
+展开后再由 `EmbyNotifyPanel.onState` 回吐最新状态；收起时入库面板不挂载，也不会继续 8 秒轮询。
 
 - **界面结构（1.3.7 重做，仿 SenPlayer / Hills / Infuse 那类现代播放器）**：
   - 目录页 = **沉浸式 Hero + 自适应海报墙 + 横向片架**。Hero 取「最近更新」的那部剧，
@@ -1702,6 +1706,7 @@ gramjs 偶发「连接还在但一个字节都不来」，`downloadMedia()` 的 
 | GET | `/api/media/thumb` | 单集缩略图（`path` = 视频路径，必须过 `isVideoFile` + 允许路径）：有现成 `-thumb` 图直接发，没有就抽帧并缓存；抽不出来回 404 + 原因 |
 | GET | `/api/media/stream` | 播放本地视频：直出透传 `Range` / `206`；`mode=remux` 换封装成 fMP4（HEVC 自动加 `-tag:v hvc1`）；`mode=transcode` 用显卡硬解 + 硬编 H.264 实时转码；`start=秒` 从指定位置重开一路流（拖进度条用） |
 | GET | `/api/media/roots` | 可切换的库位置（下载根 + 各平台目录 + 已登记来源） |
+| POST | `/api/media/roots` | 「选择目录」选中下载根之外的目录时，先登记成媒体来源（`body: { dir }`，返回 `created`）；已在允许范围内则直接返回 `created=false`，不写垃圾记录。系统目录 / 数据目录及其上级一律拒绝 |
 | GET | `/api/emby/library` | 媒体库分区列表；没配置时返回 `ok:false` + `error`（不抛 4xx） |
 | GET | `/api/emby/items` | 条目列表：`libraryId` / `parentId`（剧集分集）/ `search` / `types` / `start` / `limit` |
 | GET | `/api/emby/items/:id` | 单条详情（含最新已看进度） |
@@ -2020,17 +2025,79 @@ tgsub/
 - **批量补 NFO 后还是没有 `.nfo`**：接口返回的 `failed` 计数与日志里的
   「strm 单集 NFO 写入失败」说明是目录只读；已经存在的 NFO（含手工编辑过的）不会被覆盖。
 - **拖进度条没反应**：上游要支持 Range；不支持时浏览器只能从头顺序播，属播放源限制。
+- **「目录不在允许访问的范围内」**：见下一节。
+
+---
+
+## 媒体库目录选择与机器人入站日志（1.3.17）
+
+### 为什么选了「其他目录」会被拒
+
+目录选择弹窗复用的是 `GET /api/metadata/browse` —— 它本来就是给元数据页「手动添加外部视频」用的，
+**不限制白名单**，可以一路翻到挂载点、其它盘。但媒体库所有读接口都走 `routes/media.ts::resolveDir()`，
+只认「下载根内」或 `media_sources` 表里登记过的来源。两边没打通，于是弹窗里能点、点完立刻 403。
+
+现在：
+
+1. 前端 `BrowseDialog` 点「用这个目录」时先 `POST /api/media/roots`，
+   服务端在**当前不允许**时才 `addSource(dir, "dir", …)` 写库，再拉列表；下载根内的子目录直接放行，
+   不会产生多余的来源记录。登记后 `/api/media/roots`、`GET /api/media/library`、元数据页的来源列表同步可见。
+2. 安全边界在 `tg/mediapath.ts::isUnsafeLibraryRoot()`（纯函数）：文件系统根、`/etc`、`/proc`、
+   `C:\Windows` 一类系统目录，以及**数据目录本身和它的上级**都不许登记 —— 数据目录里有
+   `tgsub.db` 和 Telegram session，不能把凭据目录树挂到列表接口上。
+3. `resolveDir()` 被拒时 `logger.warn({ dir, home, roots })` 留痕，错误消息带上请求的完整路径；
+   页面提示改为「在『选择目录』里重新选择一次（会自动登记）」。
+4. `localStorage['tgsub.media.dir']` 记着上次位置时，换机器/换容器/目录被删会一直 403/404：
+   现在自动清掉并回落下载根**一次**（`rootFallbackTried` ref 防循环），其它网络错误不吞。
+
+> 容器里要能访问那个目录：先在 compose 里把宿主路径挂进容器，再在弹窗里选**容器内路径**。
+
+### 机器人收到的每一条消息都留原文
+
+以前只有解析成功才会产生日志，认不出的分享口令、纯图片、无权限用户、群消息全静默返回；
+出问题翻日志只能看到「什么都没发生」。现在 `tg/botlog.ts::summarizeInbound()` 把入站消息整理成
+结构化摘要，**任何分支之前**先落一条 `info` 日志（`botEvent: "bot-in"`）：
+
+| 字段 | 内容 |
+| --- | --- |
+| `text` / `textLength` / `textTruncated` | 原文或媒体 caption，默认上限 2000 字；超长标出原始长度 |
+| `messageId` / `chatId` / `senderId` / `from` / `isPrivate` / `date` | 谁在哪个会话发的；ID 用 `botIdText()` 处理 gramjs `long`（**big-integer 对象**，不是原生 bigint），保留 `-100` 前缀 |
+| `media` / `fileName` / `mimeType` / `fileSize` | 无文字的纯图片 / 文件消息也能看出收到了什么 |
+| `entities` | 富文本实体类型、offset、length、`text_url` 的 URL（分享口令常靠这里带链接） |
+| `fwdFrom` / `groupedId` / `replyToId` / `webPageUrl` / `viaBotId` | 转发频道与帖子号、相册、回复、网页预览 |
+
+`tg/bot.ts` 里每条消息再补一条路由日志（`botEvent: "bot-route"`，`route` =
+`forward` / `telegram-link` / `platform-link` / `web-link` / `command` / `empty-text` /
+`denied` / `no-peer` / `forward-album-duplicate` …，附命中的链接与命令参数）。
+**什么都没认出来**用 `warn` + `botEvent: "bot-unparsed"` 单独落一条，原文照样在里面；
+解析抛错（`bot-parse-fail`）、处理异常（`bot-error`）、按钮回调（`bot-callback`）也都带原文 / 回调数据。
+群消息只记 `debug`（默认日志级别不落盘），避免刷屏。
+
+日志页 `web/src/pages/Logs.tsx` 的摘要字段补了 `text` / `media` / `from` / `route` / `links` /
+`data` / `chatId`：列表里给一行预览，「详情」里能看到完整原文；关键词搜索本来就是全字段 JSON，
+所以贴一段当时的口令就能直接搜到那条日志。`lib/logstore.ts` 无需改动。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `tg/botlog.ts` | 入站消息摘要、`botIdText()`（纯函数，不 import telegram / db / logger） |
+| `tg/bot.ts` | 入站 info、路由、无法解析 warn、异常与回调日志 |
+| `tg/mediapath.ts` | `isUnsafeLibraryRoot()` 系统目录 / 数据目录拦截 |
+| `routes/media.ts` | `POST /media/roots` 自动登记、`resolveDir()` 被拒时留痕 |
+| `web/src/pages/MediaLibrary.tsx` | 选中目录先登记再跳转、失效目录自动回落 |
+| `web/src/pages/Logs.tsx` | 摘要字段、列表预览截断、详情保留完整原文 |
 
 ---
 
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.16`（镜像 `rdevils7/tgsub:v1.3.16` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.17-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.17`（镜像 `rdevils7/tgsub:v1.3.17` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.18-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.17-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.17`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.17` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.18-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.18-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.18`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.18` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.19-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。
