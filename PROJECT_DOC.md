@@ -2090,14 +2090,75 @@ tgsub/
 
 ---
 
+## 机器人直接收文件与文件夹分享卡片（1.3.18）
+
+### 现象与根因
+
+用户把「文件夹分享机器人」（`t.me/epan?start=…` 那类）的内容转发给 tgsub 机器人，日志里是三条：
+
+| # | 内容 | 以前的结果 |
+| --- | --- | --- |
+| 502 | `📁 蓝衣戴眼镜的妹子` + 内容统计 + 分享链接 + 「开始发送内容」 | `bot-unparsed` warn |
+| 503 | **没有文字、自带 `MessageMediaDocument`** 的 1001MB 视频 | `empty-text` 直接 return，**文件根本没下载** |
+| 504 | `✅ 文件夹内容发送完成 / 共发送 1 条消息` | `bot-unparsed` warn |
+
+三条都带 `fwdFrom.channelId`，但 **`channelPost` 是 null**（不是频道帖子，而是机器人以频道身份发的私聊消息），
+所以 `downloadFromForward()` 那条「按原频道 + 消息 ID 取回」的路径根本走不到；
+`if (!text) return` 又把中间那条唯一的实体文件丢了。首尾两张状态卡片则被当成解析失败刷 warn、还各回一串 /help。
+
+### 现在的行为
+
+| 消息 | 路由 | 处理 |
+| --- | --- | --- |
+| 标题卡片 | `share-header` | 记住标题（15 分钟），回一条说明：「`t.me?start=` 是机器人深链不是频道消息链接，接下来的文件我会自动下载」，**不报 warn** |
+| 自带媒体的消息（有无文字都算） | `direct-media` | 直接入队下载；caption 优先用消息文字，没有就用刚记住的分享标题 |
+| 完成通知 | `share-footer` | 静默清掉标题缓存，不回消息、不报 warn |
+| 纯图片 | `direct-photo-skipped` | 仍受「🖼 图片下载」开关控制，默认跳过 |
+| 命令 / 链接 | 原逻辑 | 命令优先；`fwdFrom` 带 `channelPost` 的转发仍走原频道取整组 |
+
+### 下载链路（`source='bot'`）
+
+1. `tg/botmedia.ts` 是纯逻辑层，不 import telegram / db / downloader（避免 `bot.ts ↔ downloader.ts` 循环）：
+   消息定位串 `tgbot:<chatId>:<messageId>`、内存消息缓存（30 分钟 / 200 条）、
+   bot client 与回源取消息的注册器、分享卡片识别、标题缓存、命名规划。
+2. `direct.ts::enqueueBotMedia()` 落一条 `source='bot'`、`channel_id=-1`（虚拟「机器人私聊」，与真实频道 ≥1、
+   m3u8/平台 =0 互不冲突）的 downloads 行，复用 `planFileNames()` / `encodeMeta()` 生成目录与 NFO 元信息；
+   同一个分享文件夹连推多个文件时，撞名的目标文件自动加 `-<messageId>` 后缀。
+   没有分享标题时**不要把裸文件名喂给 `planFileNames`**（会把 `美人局S01E04.mp4` 解析成 `美人局 .mp4` 这种假剧名），
+   直接按原文件名归档。
+3. `downloader.ts::run()` 增加 `source==='bot'` 分支：用 **bot 自己的客户端** `downloadMedia(message)`。
+   用户账号读不到机器人私聊，不能复用 `fetchMessageForDownload()`；其余进度、暂停/停止、自动重试、
+   `finalizeMedia()`（NFO / 截帧封面）、Emby 入库通知与频道任务完全一致，完成卡片的来源显示「机器人私聊」。
+   gramjs 走 MTProto 而非 Bot HTTP API，**没有 20MB 文件大小上限**，日志里那条 1GB 视频照常可下。
+4. 进程重启后内存缓存没了：`bot.ts::installBotMediaHooks()` 用 `rememberPeer()` 存下的 `access_hash`
+   拼 `Api.InputPeerUser`，再 `getMessages(entity, { ids: [messageId] })` 按 id 回源补取。
+   bot 离线 / 文件失效时明确报错「请重新把文件发给机器人」，不会悄悄退化成用户账号去取。
+
+新增日志：`bot-route` 的 `direct-media` / `direct-photo-skipped` / `share-header` / `share-footer`
+（带 fileName / kind / size / shareTitle / 原文），`bot-media-enqueue` / `bot-media-requeue`（带 saveDir / saveName），
+`bot-media-refetch-fail`。warn 只在真失败时出现，日志页不再被状态卡片刷屏。
+
+### 代码位置
+
+| 文件 | 职责 |
+| --- | --- |
+| `tg/botmedia.ts` | 定位串、消息缓存、注册器、分享卡片识别、标题缓存、`planBotSaveName()`（纯函数） |
+| `tg/direct.ts` | `enqueueBotMedia()` 落库、重名消解、查重与失败重排 |
+| `tg/downloader.ts` | `source='bot'` 分支：用 bot 客户端取媒体；通用收尾共用 |
+| `tg/bot.ts` | 三条消息的路由、回执、`installBotMediaHooks()`（client + 回源）、HELP_TEXT |
+| `scripts/selftest.ts` | 卡片识别 / 命名 / 定位串 / 缓存 / 注册器用例 |
+| 隔离实例 E2E | 用临时 `DATA_DIR` / `DB_FILE` / `DOWNLOAD_DIR` + 假 bot 客户端跑：入队 → 下载落盘 → 重复入队 → 重启回源 → 重名消解（6 项全过） |
+
+---
+
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.17`（镜像 `rdevils7/tgsub:v1.3.17` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.18-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.18`（镜像 `rdevils7/tgsub:v1.3.18` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.19-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.18-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.18`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.18` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.19-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.19-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.19`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.19` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.20-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

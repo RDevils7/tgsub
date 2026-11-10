@@ -32,6 +32,7 @@ import {
 import { rememberRoute, type NetRoute } from "./netroute";
 import { sanitizeRelDir } from "./mediadir";
 import { pickNext, type JobRef } from "./queueplan";
+import { parseBotSource, resolveBotMedia } from "./botmedia";
 
 const MAX_AUTO_RETRY = 1;
 
@@ -407,7 +408,12 @@ class DownloadQueue {
    * 订阅扫描命中的消息同样会通知（1.3.3 起）：用户要的是「每条消息下完都有回音」，
    * 扫描器那条「新入队 N 个文件」只说明入队，不说明结果。
    */
-  private notifyMessageDone(channelId: number, messageId: number, groupKey: string | null): void {
+  private notifyMessageDone(
+    channelId: number,
+    messageId: number,
+    groupKey: string | null,
+    fallbackTitle?: string,
+  ): void {
     if (!canNotifyCard()) return;
     void (async () => {
       const key = groupKey ?? String(messageId);
@@ -443,7 +449,7 @@ class DownloadQueue {
       }
 
       const lines = ["✅ <b>下载完成</b>"];
-      lines.push(`📡 ${esc(channel?.title ?? "频道")}`);
+      lines.push(`📡 ${esc(channel?.title ?? fallbackTitle ?? "频道")}`);
       if (hit?.subscription_name) {
         const keyword = hit.matched_keyword ? `（关键词 ${esc(hit.matched_keyword)}）` : "";
         lines.push(`🏷 订阅：${esc(hit.subscription_name)}${keyword}`);
@@ -740,17 +746,36 @@ class DownloadQueue {
 
     try {
       const settings = getSettings();
-      const channel = stmtChannel.get(row.channel_id);
-      if (!channel) throw new Error("频道已被删除");
+      type TgClient = Awaited<ReturnType<typeof getClient>>;
+      let client: TgClient;
+      let message: unknown;
+      let channelTitle = row.channel_title || "频道";
 
-      const client = await getClient();
-      // 私有频道没有 username，必须用 -100 标记形式的 ID：裸号会被当成用户 ID
-      // 评论区（讨论组）大多没有 username，只有 access_hash 才能按消息 ID 取到评论；
-      // 这条路不需要加入群组。有 username 的频道照旧走 getEntity。
-      this.checkCancel(id);
-      const messages = await fetchMessageForDownload(client, channel, row.message_id);
-      const message = messages?.[0];
-      if (!message || !(message as { media?: unknown }).media) throw new Error("消息不存在或媒体已失效");
+      if (row.source === "bot") {
+        // 机器人私聊里直接收到的文件：用户账号读不到这个会话，改由 bot 客户端
+        // 按 (chatId, messageId) 从自己的收件箱取回（内存缓存命中时连请求都不发）。
+        // 后面 downloadMedia / 落盘 / 进度 / 收尾与频道任务完全共用。
+        const ref = parseBotSource(row.source_url);
+        if (!ref) throw new Error("机器人媒体定位信息缺失，请把文件重新发给机器人");
+        const resolved = await resolveBotMedia(ref);
+        if (!resolved) throw new Error("机器人当前离线或这条文件已过期，请重新把文件发给机器人");
+        client = resolved.client as TgClient;
+        message = resolved.message;
+        if (!(message as { media?: unknown }).media) throw new Error("机器人收到的文件已失效，请重新发送");
+      } else {
+        const channel = stmtChannel.get(row.channel_id);
+        if (!channel) throw new Error("频道已被删除");
+        channelTitle = channel.title;
+
+        client = await getClient();
+        // 私有频道没有 username，必须用 -100 标记形式的 ID：裸号会被当成用户 ID
+        // 评论区（讨论组）大多没有 username，只有 access_hash 才能按消息 ID 取到评论；
+        // 这条路不需要加入群组。有 username 的频道照旧走 getEntity。
+        this.checkCancel(id);
+        const messages = await fetchMessageForDownload(client, channel, row.message_id);
+        message = messages?.[0];
+        if (!message || !(message as { media?: unknown }).media) throw new Error("消息不存在或媒体已失效");
+      }
       // 准备阶段（连 DC、取消息）也可能被打断，早点退回队列，别白等
       this.checkCancel(id);
 
@@ -773,7 +798,7 @@ class DownloadQueue {
         // 没走剧集命名的文件（图片、文档）也归到 Telegram 来源目录下
         const templated = targetRelativePath(settings.file_template, {
           date: formatDateFolder(row.created_at),
-          channel: sanitizeSegment(channel.title, 60),
+          channel: sanitizeSegment(channelTitle, 60),
           name: sanitizeSegment(fileName, 150),
           messageId: row.message_id,
         });
@@ -788,7 +813,7 @@ class DownloadQueue {
         const existing = await fs.promises.stat(candidate).catch(() => null);
         if (existing && existing.size === row.file_size) {
           stmtDone.run(existing.size, candidate, existing.size, Date.now(), id);
-          this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id);
+          this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id, row.channel_title);
           logger.info(
             { ...logContext, file: relPathOf(candidate), size: existing.size },
             `跳过重复下载：${label} → ${relPathOf(candidate)}（本地已有 ${humanSize(existing.size)}）`,
@@ -867,7 +892,7 @@ class DownloadQueue {
       // 校验落地文件：0 字节说明写入被中断，不能标记成功，否则会静默留下坏文件
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
       stmtDone.run(stat.size, targetPath, stat.size, Date.now(), id);
-      this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id);
+      this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id, row.channel_title);
       this.attempts.delete(id);
       logger.info(
         { ...logContext, file: relPathOf(targetPath), size: stat.size },

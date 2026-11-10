@@ -1,3 +1,4 @@
+import path from "node:path";
 import { db, getSettings } from "../db";
 import { logger } from "../logger";
 import { Channel } from "../types";
@@ -11,6 +12,10 @@ import { joinRel } from "./mediadir";
 import { isCommentLink, parseTelegramLink, type ParsedLink } from "./link";
 import { resolveDiscussionGroup } from "./discussion";
 import { hashString } from "./discussionplan";
+import { extractMedia } from "./media";
+import { parseCaptionMeta } from "./naming";
+import { encodeMeta } from "./emby";
+import { botSourceUrl, planBotSaveName, type BotMediaRef } from "./botmedia";
 
 // 机器人与旧代码从 direct 导入这两个纯函数，保持导出位置不变
 export { parseTelegramLink, extractTelegramLinks, commentIdOf, isCommentLink } from "./link";
@@ -413,6 +418,132 @@ export async function enqueueM3u8(input: string): Promise<M3u8Result> {
 
   logger.info({ id, title: safeTitle, url: target.m3u8Url }, "已入队 m3u8 下载任务");
   return { ok: true, title: safeTitle, saveDir, link: input, queued: 1, id };
+}
+
+/* ------------------------------------------------------------------ */
+/* 机器人直接收到的文件（不含频道消息链接）                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `channel_id = -1` 是「机器人私聊」的虚拟来源：真实频道 id 从 1 开始，
+ * m3u8 / platform 用 0，三者互不冲突；下载器看到 source='bot' 会跳过频道解析。
+ */
+const BOT_CHANNEL_ID = -1;
+const BOT_CHANNEL_TITLE = "机器人私聊";
+
+export interface BotMediaResult {
+  id: number;
+  /** 之前已经入队/下载过，这次没有新建任务 */
+  existing: boolean;
+  fileName: string;
+  saveDir: string | null;
+  saveName: string | null;
+  /** 归档用的剧名 / 文件夹名，回执里给用户看 */
+  title: string;
+}
+
+const stmtFindBotDownload = db.prepare<[number, number, string], { id: number; status: string }>(
+  "SELECT id, status FROM downloads WHERE channel_id = ? AND message_id = ? AND file_name = ?",
+);
+const stmtRequeueBot = db.prepare(
+  "UPDATE downloads SET status = 'queued', progress = 0, downloaded_bytes = 0, error = NULL, started_at = NULL, finished_at = NULL WHERE id = ?",
+);
+/** 同一个分享文件夹里连推多个文件时，标题命名会撞车：后面的加消息 id 后缀 */
+const stmtFindBotSaveName = db.prepare<[string, string, number], { id: number }>(
+  "SELECT id FROM downloads WHERE channel_id = -1 AND save_dir = ? AND save_name = ? AND message_id <> ? LIMIT 1",
+);
+const stmtInsertBot = db.prepare(`
+  INSERT OR IGNORE INTO downloads
+    (channel_id, channel_title, message_id, file_name, file_size, mime_type, media_kind,
+     status, progress, downloaded_bytes, source, source_url, save_dir, save_name,
+     emby_json, created_at, net_route)
+  VALUES (@channel_id, @channel_title, @message_id, @file_name, @file_size, @mime_type, @media_kind,
+     'queued', 0, 0, 'bot', @source_url, @save_dir, @save_name,
+     @emby_json, @created_at, @net_route)
+`);
+
+/**
+ * 把机器人私聊里**自带媒体**的消息落成一条下载任务。
+ *
+ * 与频道下载的区别只有「媒体在哪」：频道任务在下载阶段重新用用户账号按
+ * (channel, messageId) 取消息；这里的用户账号读不到机器人私聊，改由 bot 客户端
+ * 用它自己的会话取（见 downloader.ts 的 source='bot' 分支）。队列、进度、重试、
+ * NFO / 封面 / Emby 入库全部复用同一套。
+ *
+ * 返回 null 表示这条消息没有可下载媒体，或图片被「图片下载」开关挡掉。
+ */
+export function enqueueBotMedia(
+  ref: BotMediaRef,
+  message: unknown,
+  opts: { caption?: string; includeImages?: boolean } = {},
+): BotMediaResult | null {
+  const info = extractMedia(message);
+  if (!info) return null;
+  if (info.kind === "photo" && opts.includeImages === false) return null;
+
+  const settings = getSettings();
+  const caption = String(opts.caption ?? "").trim();
+  const plan = planBotSaveName(caption, info, {
+    sourceDir: settings.dir_telegram,
+    looseFolder: settings.fallback_folder,
+  });
+  let saveName = plan.saveName;
+  if (stmtFindBotSaveName.get(plan.saveDir, saveName, ref.messageId)) {
+    const ext = path.extname(saveName);
+    const stem = saveName.slice(0, saveName.length - ext.length);
+    saveName = `${stem}-${ref.messageId}${ext}`;
+  }
+  const isVideo = info.kind === "video" || info.kind === "gif";
+  const captionMeta = parseCaptionMeta(caption);
+  const airedAt = Number((message as { date?: unknown }).date ?? 0) * 1000 || Date.now();
+  const embyJson =
+    settings.emby_meta && plan.series
+      ? encodeMeta({
+          series: plan.series,
+          season: plan.season,
+          episode: plan.episode,
+          firstLine: captionMeta.firstLine,
+          plot: captionMeta.plot,
+          tags: captionMeta.tags,
+          studio: BOT_CHANNEL_TITLE,
+          link: null,
+          airedAt,
+          messageId: ref.messageId,
+          kind: isVideo ? "video" : "art",
+        })
+      : null;
+
+  const previous = stmtFindBotDownload.get(BOT_CHANNEL_ID, ref.messageId, info.fileName);
+  if (previous) {
+    if (previous.status === "failed" || previous.status === "skipped") {
+      stmtRequeueBot.run(previous.id);
+      logger.info({ id: previous.id, botEvent: "bot-media-requeue", file: info.fileName }, "机器人收到的文件重新入队");
+      return { id: previous.id, existing: false, fileName: info.fileName, saveDir: plan.saveDir, saveName, title: plan.series };
+    }
+    return { id: previous.id, existing: true, fileName: info.fileName, saveDir: plan.saveDir, saveName, title: plan.series };
+  }
+
+  const inserted = stmtInsertBot.run({
+    channel_id: BOT_CHANNEL_ID,
+    channel_title: BOT_CHANNEL_TITLE,
+    message_id: ref.messageId,
+    file_name: info.fileName,
+    file_size: info.size,
+    mime_type: info.mimeType,
+    media_kind: info.kind,
+    source_url: botSourceUrl(ref),
+    save_dir: plan.saveDir,
+    save_name: saveName,
+    emby_json: embyJson,
+    created_at: Date.now(),
+    net_route: String(settings.proxy_url ?? "").trim() ? "proxy" : "direct",
+  });
+  const id = Number(inserted.lastInsertRowid);
+  logger.info(
+    { id, botEvent: "bot-media-enqueue", messageId: ref.messageId, chatId: ref.chatId, file: info.fileName, saveDir: plan.saveDir, saveName },
+    "机器人收到的文件已入队（无需频道链接）",
+  );
+  return { id, existing: false, fileName: info.fileName, saveDir: plan.saveDir, saveName, title: plan.series };
 }
 
 /** 把 m3u8 入队结果包装成 DirectResult，复用机器人回执渲染（directText） */

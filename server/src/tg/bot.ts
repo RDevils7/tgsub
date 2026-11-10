@@ -13,10 +13,21 @@ import { deriveName } from "../utils";
 import { currentProxy, getAppCredentials, getAuthState, resolveChannel } from "./client";
 import { getSchedulerState, isScanning, scanAll, scanChannel, type ScanResult } from "./scanner";
 import { hitLines } from "./hitplan";
-import { downloadFromLink, downloadFromForward, extractTelegramLinks, type DirectResult } from "./direct";
+import { downloadFromLink, downloadFromForward, enqueueBotMedia, extractTelegramLinks, type DirectResult } from "./direct";
 import { downloader } from "./downloader";
 import { setNotifyCard, setNotifySender } from "./notify";
 import { summarizeInbound } from "./botlog";
+import { extractMedia } from "./media";
+import {
+  classifyShareNotice,
+  clearShareTitle,
+  rememberBotMessage,
+  rememberShareTitle,
+  setBotMediaClientProvider,
+  setBotMessageResolver,
+  takeShareTitle,
+  type BotMediaRef,
+} from "./botmedia";
 import { invalidateMatcherCache } from "../match";
 import { parsePlatformLink, splitPlatformLinks } from "../platform/detect";
 import { enqueueFromChoice, enqueuePlatformLinks, type PlatformChoiceInfo, type PlatformQueued } from "../platform/jobs";
@@ -264,6 +275,7 @@ export async function startBot(): Promise<void> {
       if (dcId && DC_IP[dcId]) setSetting("bot_dc", String(dcId));
 
       bot = client;
+      installBotMediaHooks();
       identity = { username: user.username ?? null, userId: String(user.id) };
       startedAt = Date.now();
 
@@ -330,6 +342,8 @@ export async function startBot(): Promise<void> {
 export async function stopBot(): Promise<void> {
   const current = bot;
   bot = null;
+  setBotMediaClientProvider(null);
+  setBotMessageResolver(null);
   setNotifySender(null);
   setNotifyCard(null);
   identity = { username: null, userId: null };
@@ -431,6 +445,48 @@ function peerOf(): EntityLike | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 机器人私聊里收到的文件：下载器要用 **bot 自己的客户端** 才能取到 media。
+ *
+ * 正常情况下直接命中 botmedia 里的内存消息缓存（连请求都不用发）；进程重启后
+ * 缓存没了，就用 rememberPeer 记下的 access_hash 拼 InputPeerUser 按消息 id 回源。
+ * 这里用注册器把 client / 取消息能力注入纯逻辑模块，避免 bot.ts ↔ downloader.ts 循环依赖。
+ */
+function botChatEntity(chatId: string): EntityLike | string {
+  try {
+    const raw = getSetting("bot_peer");
+    const peer = raw ? (JSON.parse(raw) as { id?: string; hash?: string }) : null;
+    if (peer?.id === chatId && peer.hash && peer.hash !== "0") {
+      return new Api.InputPeerUser({
+        userId: bigInt(peer.id),
+        accessHash: bigInt(peer.hash),
+      }) as unknown as EntityLike;
+    }
+  } catch {
+    /* 没有 hash 就退回裸 id，让 gramjs 用进程内的实体缓存解析 */
+  }
+  return chatId;
+}
+
+function installBotMediaHooks(): void {
+  setBotMediaClientProvider(() => (bot && bot.connected ? bot : null));
+  setBotMessageResolver(async (ref: BotMediaRef) => {
+    const client = bot;
+    if (!client) return null;
+    try {
+      const found = await client.getMessages(botChatEntity(ref.chatId) as never, { ids: [ref.messageId] });
+      const one = Array.isArray(found) ? found[0] : found;
+      return one && (one as { media?: unknown }).media ? one : null;
+    } catch (err) {
+      logger.warn(
+        { botEvent: "bot-media-refetch-fail", chatId: ref.chatId, messageId: ref.messageId, err: errorText(err) },
+        "机器人媒体按消息 id 回源失败",
+      );
+      return null;
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -552,6 +608,8 @@ const HELP_TEXT = `🤖 <b>tgsub 控制台</b>
 <b>直接发链接 / 转发就能下载</b>
 · Telegram 消息链接：https://t.me/频道名/123
 · 把频道消息<b>转发</b>给机器人：自动识别并下载原消息（视频 / 文件照常）
+· <b>直接把视频 / 文件发给机器人</b>（包括文件夹分享机器人推送的那一条）：
+  没有文字、没有链接也会自动下载，按分享标题归档
 · B站 / 小红书 / YouTube：App 里「复制链接」的整段分享口令
   原样粘贴即可（带一串说明文字也没关系），最多一次处理 5 条
 · <b>网页 / m3u8 视频</b>：直接把网页链接或 .m3u8 直链发给机器人，
@@ -1154,18 +1212,100 @@ async function handleMessage(event: NewMessageEvent): Promise<void> {
     }
 
     const text = (msg.message ?? "").trim();
-    if (!text) {
-      // 纯图片 / 贴纸 / 表情：没有文字可解析，但收到的东西仍要留痕
-      routeLog("empty-text", { media: inbound.media, fileName: inbound.fileName, textLength: inbound.textLength });
-      return;
-    }
-
     const matched = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?\s*([\s\S]*)$/.exec(text);
     const cmd = (matched?.[1] ?? "").toLowerCase();
     const rest = (matched?.[2] ?? "").trim();
     const args = rest ? rest.split(/\s+/) : [];
 
     if (!cmd) {
+      // ① 机器人自己收到的文件（没有文字也可以）：不需要频道链接，直接入队。
+      //    文件夹分享机器人常常是「标题卡片 → 一条无文字的视频 → 完成通知」三条一起推，
+      //    原来的 empty-text 会把中间那条丢掉，这里改成按 bot 会话定位并下载它自带的 media。
+      const info = extractMedia(msg);
+      if (info) {
+        const includeImages = imageModeOn(userId);
+        if (info.kind === "photo" && !includeImages) {
+          routeLog("direct-photo-skipped", { fileName: info.fileName });
+          return;
+        }
+        const chatId = inbound.chatId ?? userId;
+        const messageId = Number(inbound.messageId ?? 0);
+        if (!chatId || !Number.isSafeInteger(messageId) || messageId <= 0) {
+          routeLog("direct-media-no-ref", { media: inbound.media, fileName: info.fileName });
+          return;
+        }
+        const ref: BotMediaRef = { chatId, messageId };
+        // 下载阶段要用 bot 客户端取回这条消息：先把原始对象缓存住；
+        // 进程重启后由 installBotMediaHooks 注册的回源逻辑按 (chatId, messageId) 补取。
+        rememberBotMessage(ref, msg);
+        const shareTitle = takeShareTitle(chatId);
+        const caption = text || shareTitle || "";
+        routeLog("direct-media", {
+          fileName: info.fileName,
+          kind: info.kind,
+          size: info.size,
+          shareTitle,
+          textLength: inbound.textLength,
+        });
+        await sendText(currentBot, peer, "📥 收到文件，正在加入下载队列…");
+        try {
+          const result = enqueueBotMedia(ref, msg, { caption, includeImages });
+          if (!result) {
+            await sendText(currentBot, peer, "⚠️ 这条消息里的媒体已失效，无法下载，请重新发送一次。");
+            return;
+          }
+          if (!result.existing) downloader.enqueue([result.id]);
+          const lines = result.existing
+            ? [`⏭ 这个文件之前已经下过：<code>${esc(result.title)}</code>`]
+            : [`✅ <b>${esc(result.title)}</b>`, "⬇️ 已加入下载队列，可用 /tasks 看进度"];
+          if (shareTitle) lines.push(`📁 按分享标题「${esc(shareTitle)}」归档`);
+          if (result.saveDir) lines.push(`📂 <code>${esc(result.saveDir)}/</code>`);
+          await sendText(currentBot, peer, lines.join("\n"), mainButtons(userId));
+        } catch (err) {
+          logger.warn(
+            {
+              botEvent: "bot-parse-fail",
+              route: "direct-media",
+              messageId: inbound.messageId,
+              senderId: inbound.senderId,
+              text: inbound.text,
+              fileName: info.fileName,
+              err: errorText(err),
+            },
+            "机器人收到的文件入队失败（原文已留存）",
+          );
+          await sendText(currentBot, peer, `❌ 文件入队失败：${esc(errorText(err))}`);
+        }
+        return;
+      }
+
+      if (!text) {
+        // 纯贴纸 / 表情 / 没有可下载媒体的空消息：原文已经在 bot-in 里留痕
+        routeLog("empty-text", { media: inbound.media, textLength: inbound.textLength });
+        return;
+      }
+
+      // ② 分享机器人的状态卡片（📁 标题 / ✅ 发送完成）：只是流程提示，不是要下载的内容。
+      //    别再报「无法解析」，也别回一串 /help 打扰用户；顺手把标题留给随后的文件命名。
+      const notice = classifyShareNotice(text);
+      if (notice) {
+        const titleKey = inbound.chatId ?? userId;
+        routeLog(notice.kind, { title: notice.title, text: inbound.text });
+        if (notice.kind === "share-header") {
+          if (notice.title) rememberShareTitle(titleKey, notice.title);
+          await sendText(
+            currentBot,
+            peer,
+            `📁 收到文件夹「${esc(notice.title ?? "未命名")}」的分享卡片。\n` +
+              "里面的 t.me?start= 是机器人深链，不是频道消息链接；\n" +
+              "接下来它发来的文件我会自动下载，并按这个标题归档。",
+          );
+        } else {
+          clearShareTitle(titleKey);
+        }
+        return;
+      }
+
       // 直接发链接就下载：不用记命令，把 t.me 消息链接丢过来即可
       const links = extractTelegramLinks(text);
       if (links.length) {

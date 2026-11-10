@@ -147,6 +147,21 @@ import {
 } from "../server/src/tg/mediapath";
 import { BOT_LOG_TEXT_LIMIT, botIdText, summarizeInbound } from "../server/src/tg/botlog";
 import {
+  botSourceUrl,
+  cachedBotMessage,
+  classifyShareNotice,
+  clearShareTitle,
+  forgetBotMessage,
+  parseBotSource,
+  planBotSaveName,
+  rememberBotMessage,
+  rememberShareTitle,
+  resolveBotMedia,
+  setBotMediaClientProvider,
+  setBotMessageResolver,
+  takeShareTitle,
+} from "../server/src/tg/botmedia";
+import {
   buildStrmNfoText,
   collectStrmFiles,
   ensureStrmNfo,
@@ -4327,6 +4342,7 @@ async function main(): Promise<void> {
     ["strm NFO 批量补齐用例", () => strmNfoChecks()],
     ["媒体来源目录用例", () => libraryRootChecks()],
     ["机器人入站日志用例", () => botLogChecks()],
+    ["机器人直接收文件用例", () => botMediaChecks()],
   ];
   for (const [name, run] of suites) {
     try {
@@ -4632,6 +4648,168 @@ function botLogChecks(): void {
     assert.equal(empty.chatId, null);
     assert.equal(empty.entities.length, 0);
     assert.equal(summarizeInbound({ id: {}, message: 42, entities: "oops" }).text, "");
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* 机器人直接收到文件（1.3.18）                                        */
+/* ------------------------------------------------------------------ */
+
+const SHARE_HEADER =
+  "📁 蓝衣戴眼镜的妹子\n\n📖 内容统计：\n　• 消息数：1 条\n　• 视频数：1 个\n" +
+  "　• 总大小：1001.62 MB\n\n📅 创建时间：2026-11-08 22:39\n✏️ 最后更新：2026-11-08 22:43\n\n" +
+  "🔗 分享链接：\nhttps://t.me/epan?start=s_OLCw9llAwgVu\n\n⏳ 开始发送内容...";
+const SHARE_FOOTER = "✅ 文件夹内容发送完成\n\n共发送 1 条消息";
+const SHARE_VIDEO = {
+  kind: "video" as const,
+  fileName: "抖音爆火换妻圈出猛瓜❤️蓝衣戴眼镜的妹子遭人做局❤️三人里头眼镜妹最浪另外两对夫妻带的「老婆」全是外卖鸡.mp4",
+  mimeType: "video/mp4",
+};
+
+async function botMediaChecks(): Promise<void> {
+  check("分享机器人状态卡片：标题与完成通知分别认出来", () => {
+    assert.deepEqual(classifyShareNotice(SHARE_HEADER), {
+      kind: "share-header",
+      title: "蓝衣戴眼镜的妹子",
+    });
+    assert.deepEqual(classifyShareNotice(SHARE_FOOTER), { kind: "share-footer", title: null });
+    assert.deepEqual(classifyShareNotice("共发送 12 条消息"), { kind: "share-footer", title: null });
+  });
+
+  check("分享卡片：普通链接 / 命令 / 用户文字不误判", () => {
+    assert.equal(classifyShareNotice("https://t.me/abc/123"), null);
+    assert.equal(classifyShareNotice("/dl https://t.me/abc/123"), null);
+    assert.equal(classifyShareNotice("这个视频不错，帮我下一下"), null);
+    assert.equal(classifyShareNotice(""), null);
+    assert.equal(classifyShareNotice("   "), null);
+  });
+
+  check("回归：日志里那三条消息现在各归各位", () => {
+    // ① 标题卡片（fwd_from 只有 channelId、没有 channelPost，走不到 forward 分支）
+    const header = summarizeInbound({
+      id: bigInt(502),
+      chatId: bigInt("1642895766"),
+      message: SHARE_HEADER,
+      fwdFrom: { fromId: { className: "PeerChannel", channelId: bigInt("8881040004") } },
+    });
+    assert.equal(header.text, SHARE_HEADER);
+    assert.equal(classifyShareNotice(header.text)?.title, "蓝衣戴眼镜的妹子");
+
+    // ② 无文字但自带 MessageMediaDocument 的视频：以前被 empty-text 直接丢掉
+    const video = {
+      id: bigInt(503),
+      message: "",
+      media: {
+        className: "MessageMediaDocument",
+        document: {
+          className: "Document",
+          id: bigInt("999"),
+          size: bigInt("1050260000"),
+          mimeType: "video/mp4",
+          attributes: [
+            { className: "DocumentAttributeFilename", fileName: SHARE_VIDEO.fileName },
+            { className: "DocumentAttributeVideo" },
+          ],
+        },
+      },
+    };
+    const info = extractMedia(video);
+    assert.ok(info, "无文字视频必须能提取出媒体");
+    assert.equal(info.kind, "video");
+    assert.equal(info.fileName, SHARE_VIDEO.fileName);
+    assert.equal(info.size, 1050260000, "gramjs long 大小也要能转成数字");
+
+    // ③ 完成通知：静默，不再刷 bot-unparsed
+    assert.equal(classifyShareNotice(summarizeInbound({ id: bigInt(504), message: SHARE_FOOTER }).text)?.kind, "share-footer");
+  });
+
+  check("机器人媒体定位串：往返、负数 chatId、脏值拒绝", () => {
+    const ref = { chatId: "1642895766", messageId: 503 };
+    assert.equal(botSourceUrl(ref), "tgbot:1642895766:503");
+    assert.deepEqual(parseBotSource(botSourceUrl(ref)), ref);
+    assert.deepEqual(parseBotSource("tgbot:-100123:12"), { chatId: "-100123", messageId: 12 });
+    for (const bad of [null, "", "tgbot:x:1", "tgbot:123:0", "t.me/abc/1", "tgbot:1:99999999999999999999"]) {
+      assert.equal(parseBotSource(bad), null, String(bad));
+    }
+  });
+
+  check("分享标题缓存：多次读取不清、完成后清掉", () => {
+    rememberShareTitle("c1", "蓝衣戴眼镜的妹子");
+    assert.equal(takeShareTitle("c1"), "蓝衣戴眼镜的妹子");
+    assert.equal(takeShareTitle("c1"), "蓝衣戴眼镜的妹子");
+    clearShareTitle("c1");
+    assert.equal(takeShareTitle("c1"), null);
+    rememberShareTitle("c2", "   ");
+    assert.equal(takeShareTitle("c2"), null);
+  });
+
+  check("机器人文件命名：有分享标题就按标题归档", () => {
+    const plan = planBotSaveName("蓝衣戴眼镜的妹子", SHARE_VIDEO, {
+      sourceDir: "telegram",
+      looseFolder: true,
+    });
+    assert.equal(plan.saveDir, "telegram/蓝衣戴眼镜的妹子");
+    assert.equal(plan.series, "蓝衣戴眼镜的妹子");
+    assert.equal(plan.saveName, "蓝衣戴眼镜的妹子.mp4");
+  });
+
+  check("机器人文件命名：没标题时按原文件名归档，不把扩展名糊进剧名", () => {
+    const plan = planBotSaveName("", { kind: "video", fileName: "美人局S01E04.mp4", mimeType: "video/mp4" }, {
+      sourceDir: "telegram",
+      looseFolder: true,
+    });
+    assert.equal(plan.saveDir, "telegram/美人局S01E04");
+    assert.equal(plan.series, "美人局S01E04");
+    assert.equal(plan.saveName, "美人局S01E04.mp4");
+  });
+
+  check("机器人文件命名：原始文件名里的非法字符逐段清掉", () => {
+    const plan = planBotSaveName("", { kind: "video", fileName: "a/b:c*d?.mp4", mimeType: "video/mp4" }, {
+      sourceDir: "影视",
+      looseFolder: true,
+    });
+    assert.ok(!/[/\\:*?"<>|]/.test(plan.saveName), plan.saveName);
+    assert.ok(!/[/\\:*?"<>|]/.test(plan.saveDir.replace("影视/", "")), plan.saveDir);
+    assert.ok(plan.saveName.endsWith(".mp4"));
+  });
+
+  check("机器人消息缓存：写入、命中、删除", () => {
+    const ref = { chatId: "c3", messageId: 9 };
+    forgetBotMessage(ref);
+    assert.equal(cachedBotMessage(ref), null);
+    rememberBotMessage(ref, { id: 9, media: { className: "MessageMediaDocument" } });
+    assert.equal((cachedBotMessage(ref) as { id: number }).id, 9);
+    forgetBotMessage(ref);
+    assert.equal(cachedBotMessage(ref), null);
+  });
+
+  await checkAsync("机器人媒体解析：缓存优先、无缓存才回源、bot 离线返回 null", async () => {
+    const ref = { chatId: "c9", messageId: 77 };
+    forgetBotMessage(ref);
+    let calls = 0;
+    setBotMediaClientProvider(() => ({ tag: "bot-client" }));
+    setBotMessageResolver(async () => {
+      calls += 1;
+      return { id: 77, media: { className: "from-network" } };
+    });
+
+    const fetched = await resolveBotMedia(ref);
+    assert.ok(fetched, "回源应当拿到消息");
+    assert.equal(calls, 1);
+    assert.equal((fetched!.message as { media: { className: string } }).media.className, "from-network");
+
+    rememberBotMessage(ref, { id: 77, media: { className: "from-cache" } });
+    const cached = await resolveBotMedia(ref);
+    assert.ok(cached);
+    assert.equal(calls, 1, "命中缓存时不应该再回源");
+    assert.equal((cached!.message as { media: { className: string } }).media.className, "from-cache");
+
+    setBotMediaClientProvider(() => null);
+    assert.equal(await resolveBotMedia(ref), null, "bot 离线时不能假装能下载");
+
+    setBotMediaClientProvider(null);
+    setBotMessageResolver(null);
+    forgetBotMessage(ref);
   });
 }
 
