@@ -7,7 +7,7 @@ import { fetchMessageGroup } from "./media";
 import { channelEntityKey, channelMessageLink } from "./entity";
 import { enqueueGroup } from "./enqueue";
 import { downloader } from "./downloader";
-import { resolveM3u8Input, isHttpUrl } from "./m3u8";
+import { resolveM3u8Input, isHttpUrl, hostOf } from "./m3u8";
 import { joinRel } from "./mediadir";
 import { isCommentLink, parseTelegramLink, type ParsedLink } from "./link";
 import { resolveDiscussionGroup } from "./discussion";
@@ -416,7 +416,8 @@ export async function enqueueM3u8(input: string): Promise<M3u8Result> {
   db.prepare("UPDATE downloads SET message_id = ? WHERE id = ?").run(id, id);
   downloader.enqueue([id]);
 
-  logger.info({ id, title: safeTitle, url: target.m3u8Url }, "已入队 m3u8 下载任务");
+  // 只记页面主机：直链常带 auth_key / 签名，不能落进日志
+  logger.info({ id, title: safeTitle, host: hostOf(input) }, "已入队 m3u8 下载任务");
   return { ok: true, title: safeTitle, saveDir, link: input, queued: 1, id };
 }
 

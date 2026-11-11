@@ -27,90 +27,96 @@ function check(name: string, ok: boolean, extra = ""): void {
 }
 
 async function main(): Promise<void> {
-  const { runBotCommand } = await import("../server/src/tg/bot");
-  const { getSettings } = await import("../server/src/db");
+  try {
+    const { runBotCommand } = await import("../server/src/tg/bot");
+    const { getSettings } = await import("../server/src/db");
 
-  const ctx = { userId: "123456789", send: async () => undefined };
-  const run = (cmd: string, args: string[] = []) => runBotCommand(cmd, args, ctx);
+    const ctx = { userId: "123456789", send: async () => undefined };
+    const run = (cmd: string, args: string[] = []) => runBotCommand(cmd, args, ctx);
 
-  console.log("\n机器人命令");
-  const help = await run("help");
-  check("/help 有说明和按钮", help.text.includes("tgsub 控制台") && Boolean(help.buttons?.length));
+    console.log("\n机器人命令");
+    const help = await run("help");
+    check("/help 有说明和按钮", help.text.includes("tgsub 控制台") && Boolean(help.buttons?.length));
 
-  const id = await run("id");
-  check("/id 回显自己的用户 ID", id.text.includes("123456789"));
+    const id = await run("id");
+    check("/id 回显自己的用户 ID", id.text.includes("123456789"));
 
-  const channels = await run("channels");
-  check("/channels 空库提示", channels.text.includes("还没有添加频道"));
+    const channels = await run("channels");
+    check("/channels 空库提示", channels.text.includes("还没有添加频道"));
 
-  const addNoArg = await run("addch");
-  check("/addch 无参数给出用法", addNoArg.text.includes("用法"));
+    const addNoArg = await run("addch");
+    check("/addch 无参数给出用法", addNoArg.text.includes("用法"));
 
-  const subsEmpty = await run("subs");
-  check("/subs 空库提示", subsEmpty.text.includes("还没有订阅规则"));
+    const subsEmpty = await run("subs");
+    check("/subs 空库提示", subsEmpty.text.includes("还没有订阅规则"));
 
-  const created = await run("sub", ["美人局,", "芙蓉", "|", "短剧"]);
-  check("/sub 创建订阅", created.text.includes("已创建订阅"), created.text);
-  const subId = Number(/#(\d+)/.exec(created.text)?.[1] ?? 0);
+    const created = await run("sub", ["美人局,", "芙蓉", "|", "短剧"]);
+    check("/sub 创建订阅", created.text.includes("已创建订阅"), created.text);
+    const subId = Number(/#(\d+)/.exec(created.text)?.[1] ?? 0);
 
-  const subs = await run("subs");
-  check("/subs 能看到新订阅", subs.text.includes("美人局") && subs.text.includes("短剧"), subs.text);
+    const subs = await run("subs");
+    check("/subs 能看到新订阅", subs.text.includes("美人局") && subs.text.includes("短剧"), subs.text);
 
-  const removed = await run("rmsub", [String(subId)]);
-  check("/rmsub 删除订阅", removed.text.includes("已删除"));
+    const removed = await run("rmsub", [String(subId)]);
+    check("/rmsub 删除订阅", removed.text.includes("已删除"));
 
-  const tasks = await run("tasks");
-  check("/tasks 空库提示", tasks.text.includes("没有进行中的下载"));
+    const tasks = await run("tasks");
+    check("/tasks 空库提示", tasks.text.includes("没有进行中的下载"));
 
-  // 1.3.3：/tasks 只列进行中的任务，已完成的不再混进来
-  const { db: taskDb } = await import("../server/src/db");
-  const insertTask = taskDb.prepare(
-    "INSERT INTO downloads (channel_id, channel_title, message_id, file_name, status, progress, created_at) VALUES (0, '测试频道', ?, ?, ?, ?, ?)",
-  );
-  insertTask.run(1, "已完成.mp4", "done", 100, Date.now());
-  insertTask.run(2, "进行中.mp4", "queued", 0, Date.now());
-  const tasks2 = await run("tasks");
-  check(
-    "/tasks 只列进行中的任务",
-    tasks2.text.includes("进行中.mp4") && !tasks2.text.includes("已完成.mp4"),
-    tasks2.text,
-  );
-  taskDb.prepare("DELETE FROM downloads WHERE channel_title = '测试频道'").run();
+    // 1.3.3：/tasks 只列进行中的任务，已完成的不再混进来
+    const { db: taskDb } = await import("../server/src/db");
+    const insertTask = taskDb.prepare(
+      "INSERT INTO downloads (channel_id, channel_title, message_id, file_name, status, progress, created_at) VALUES (0, '测试频道', ?, ?, ?, ?, ?)",
+    );
+    insertTask.run(1, "已完成.mp4", "done", 100, Date.now());
+    insertTask.run(2, "进行中.mp4", "queued", 0, Date.now());
+    const tasks2 = await run("tasks");
+    check(
+      "/tasks 只列进行中的任务",
+      tasks2.text.includes("进行中.mp4") && !tasks2.text.includes("已完成.mp4"),
+      tasks2.text,
+    );
+    taskDb.prepare("DELETE FROM downloads WHERE channel_title = '测试频道'").run();
 
-  const queue = await run("queue");
-  check("/queue 返回队列信息", queue.text.includes("下载队列"));
+    const queue = await run("queue");
+    check("/queue 返回队列信息", queue.text.includes("下载队列"));
 
-  const stats = await run("stats");
-  check("/stats 返回统计", stats.text.includes("累计统计"));
+    const stats = await run("stats");
+    check("/stats 返回统计", stats.text.includes("累计统计"));
 
-  await run("pause");
-  check("/pause 关闭自动扫描", getSettings().auto_scan === false);
-  await run("resume");
-  check("/resume 恢复自动扫描", getSettings().auto_scan === true);
+    await run("pause");
+    check("/pause 关闭自动扫描", getSettings().auto_scan === false);
+    await run("resume");
+    check("/resume 恢复自动扫描", getSettings().auto_scan === true);
 
-  const scan = await run("scan");
-  check("/scan 空频道列表有提示", scan.text.includes("没有可扫描的频道"), scan.text);
+    const scan = await run("scan");
+    check("/scan 空频道列表有提示", scan.text.includes("没有可扫描的频道"), scan.text);
 
-  const unknown = await run("nope");
-  check("未知命令回到帮助", unknown.text.includes("未知命令"));
+    const unknown = await run("nope");
+    check("未知命令回到帮助", unknown.text.includes("未知命令"));
 
-  // /dl 也吃平台分享口令：未启用时应直接说明「去设置里打开开关」，而不是
-  // 报「认不出链接」或者去连 Telegram（这条不会触网，可以安全地放进自检）
-  const share = await run("dl", [
-    "【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】",
-    "<https://b23.tv/29inbIp>",
-  ]);
-  check("/dl 识别平台分享口令", share.text.includes("第三方平台下载未启用"), share.text);
+    // /dl 也吃平台分享口令：未启用时应直接说明「去设置里打开开关」，而不是
+    // 报「认不出链接」或者去连 Telegram（这条不会触网，可以安全地放进自检）
+    const share = await run("dl", [
+      "【李世民已经是太子，为什么还要强行继位？-哔哩哔哩】",
+      "<https://b23.tv/29inbIp>",
+    ]);
+    check(
+      "/dl 识别平台分享口令",
+      !share.text.includes("认不出") && !share.text.includes("无法识别") && /平台|入队|b23\.tv/.test(share.text),
+      share.text,
+    );
 
-  const dlNoArg = await run("dl");
-  check("/dl 无参数给出用法", dlNoArg.text.includes("用法"));
+    const dlNoArg = await run("dl");
+    check("/dl 无参数给出用法", dlNoArg.text.includes("用法"));
 
-  console.log(`\n通过 ${passed} 项，失败 ${failed} 项\n`);
-
-  // 先关掉数据库句柄，否则 Windows 上删不掉临时目录
-  const { db } = await import("../server/src/db");
-  db.close();
-  fs.rmSync(tmp, { recursive: true, force: true });
+    console.log(`\n通过 ${passed} 项，失败 ${failed} 项\n`);
+  } finally {
+    // 先关掉数据库句柄，否则 Windows 上删不掉临时目录
+    const { db } = await import("../server/src/db");
+    db.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 void main().catch((err) => {

@@ -188,15 +188,19 @@ export default function Downloads() {
   const toast = useToast();
   const queryRef = useRef(query);
   queryRef.current = query;
+  /** 轮询 / 搜索 / 翻页会并发，慢响应不能覆盖新页 */
+  const seqRef = useRef(0);
 
   const fetchPage = useCallback(
     async (target: number) => {
+      const seq = ++seqRef.current;
       const res = await api.downloads({
         status,
         q: queryRef.current.trim(),
         limit: pageSize,
         offset: target * pageSize,
       });
+      if (seq !== seqRef.current) return;
       setTotal(res.total);
       setLiveSpeed(res.queue?.speed ?? 0);
       setItems(res.items);

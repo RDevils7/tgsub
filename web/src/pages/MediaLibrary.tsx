@@ -4,6 +4,7 @@ import { api } from "../api";
 import type { MediaEpisode, MediaHwInfo, MediaLibraryResponse, MediaSeries, MediaSeriesResponse } from "../types";
 import { Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { VideoPlayer } from "../components/VideoPlayer";
+import { safeStorageGet, safeStorageSet, safeStorageRemove } from "../utils";
 import {
   IconAlert,
   IconCheck,
@@ -262,18 +263,18 @@ function LibrarySkeleton() {
 
 export default function MediaLibrary() {
   const toast = useToast();
-  const [dir, setDir] = useState<string>(() => localStorage.getItem(DIR_STORAGE_KEY) ?? "");
+  const [dir, setDir] = useState<string>(() => safeStorageGet(DIR_STORAGE_KEY));
   const [listing, setListing] = useState<MediaLibraryResponse | null>(null);
   const [seriesView, setSeriesView] = useState<MediaSeriesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<SortKey>(() => (localStorage.getItem(SORT_STORAGE_KEY) as SortKey) || "updated");
-  const [epView, setEpView] = useState<EpView>(() => (localStorage.getItem(EPVIEW_STORAGE_KEY) === "list" ? "list" : "grid"));
+  const [sort, setSort] = useState<SortKey>(() => (safeStorageGet(SORT_STORAGE_KEY) as SortKey) || "updated");
+  const [epView, setEpView] = useState<EpView>(() => (safeStorageGet(EPVIEW_STORAGE_KEY) === "list" ? "list" : "grid"));
   // 未设置过：浏览器自己能解 HEVC 就默认直连，否则交给服务端显卡转码
   const [hevc, setHevc] = useState(() => {
-    const saved = localStorage.getItem(HEVC_STORAGE_KEY);
+    const saved = safeStorageGet(HEVC_STORAGE_KEY);
     if (saved === "0" || saved === "1") return saved === "1";
     return browserCanPlayHevc();
   });
@@ -340,7 +341,7 @@ export default function MediaLibrary() {
         setSeriesView(null);
         if (res.dir) {
           setDir(res.dir);
-          localStorage.setItem(DIR_STORAGE_KEY, res.dir);
+          safeStorageSet(DIR_STORAGE_KEY, res.dir);
         }
         // 选中目录后自动给所有缺 NFO 的 strm 补单集 NFO。
         // 纯本地写盘（不解析直链、不抽帧、不回源），后台跑完再轻提示，不阻塞首屏。
@@ -380,7 +381,7 @@ export default function MediaLibrary() {
         // 只自动回落一次，别把真正的网络故障也悄悄吞掉。
         if (dir && (status === 403 || status === 404) && !rootFallbackTried.current) {
           rootFallbackTried.current = true;
-          localStorage.removeItem(DIR_STORAGE_KEY);
+          safeStorageRemove(DIR_STORAGE_KEY);
           toastRef.current.push("上次记住的目录已不可用，已回到下载目录", "info");
           setDir("");
           return;
@@ -455,12 +456,12 @@ export default function MediaLibrary() {
 
   const changeSort = (next: SortKey) => {
     setSort(next);
-    localStorage.setItem(SORT_STORAGE_KEY, next);
+    safeStorageSet(SORT_STORAGE_KEY, next);
   };
 
   const changeEpView = (next: EpView) => {
     setEpView(next);
-    localStorage.setItem(EPVIEW_STORAGE_KEY, next);
+    safeStorageSet(EPVIEW_STORAGE_KEY, next);
   };
 
   /**
@@ -470,7 +471,7 @@ export default function MediaLibrary() {
   const changeHevc = (next: boolean) => {
     hevcRef.current = next;
     setHevc(next);
-    localStorage.setItem(HEVC_STORAGE_KEY, next ? "1" : "0");
+    safeStorageSet(HEVC_STORAGE_KEY, next ? "1" : "0");
     if (seriesView) {
       const target = seriesView.dir;
       setLoading(true);

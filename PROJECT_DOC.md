@@ -2151,6 +2151,55 @@ tgsub/
 
 ---
 
+## 全项目体检与实现层修复（dev-loop，1.3.18 后 / 未发版）
+
+用 `dev-loop` 技能跑了一轮 S0→S7 研发闭环：目标「全面体检并修 P0/P1」，
+硬边界「表结构与存量数据不动、对外接口与配置键不动、不引新依赖、不改功能行为」。
+机械扫描（`scan` / `impact` / `graph` / `blind` / `sensitive` / `quality` / `audit` / `drift`）
+加两路只读子代理复核，坐实 **4 条 P0 + 7 条低风险 P1**，共改 12 个文件。
+产物在 `.devloop/`（已写进 `.git/info/exclude`，不入库）。
+
+### 4 条 P0（会导致故障 / 数据错误 / 越权）
+
+| 现象与根因 | 最小修复 | 位置 |
+| --- | --- | --- |
+| 单条 `DELETE /api/downloads/:id?purge=1` 直接 `unlink(row.file_path)`，不校验路径；`GET /:id/file` 有白名单，删除没有 → 库里被塞绝对路径就能删库外文件 | `path.resolve` 后 `assert(isAllowedPath(abs), 403)` 再删，复用 `tg/mediatree.ts` 的现有判定 | `routes/downloads.ts:188` |
+| 看门狗把卡住的任务标成 `failed` 后，底层 Telegram 下载仍可能返回并走完收尾，把状态覆写回 `done`，失败任务凭空变成功 | `stmtDone` 加 `AND status <> 'failed'`；四处完成回写都判 `.changes`，为 0 就跳过通知与写库 | `tg/downloader.ts:90-92` |
+| 看门狗中断没有 AbortController 可用，`run()` 链尾没有 catch，异常退出时任务永久占用车道，且 `live/attempts/lastProgressAt` 等内存表不清理 | 链尾 `.catch` 记失败 + `.finally` 清 6 张内存表；看门狗留 `cancelIntent` 并 abort 平台任务 | `tg/downloader.ts:321,603,671` |
+| 媒体库 9 处裸 `localStorage` 读写：沙箱 / 隐私模式下 `getItem` 会抛异常，组件初始化即整页白屏；上传封面是唯一绕过 `request()` 的 `fetch`，漏带 `X-Tgsub-Session` 必然 401 | `web/src/utils.ts` 新增 `safeStorageGet/Set/Remove`、`parseApiText()` 纯函数；媒体库换安全读写；上传补 `credentials`、session 头与 401 清凭据 | `web/src/utils.ts:211,236`、`web/src/pages/MediaLibrary.tsx`、`web/src/api.ts` |
+
+### 7 条低风险 P1
+
+| 问题 | 修复 | 位置 |
+| --- | --- | --- |
+| 入队日志把完整 m3u8 直链落盘，`auth_key` / 签名跟着进日志 | 只记 `hostOf(input)` | `tg/direct.ts:420` |
+| `result.hasVideo` 在循环里声明却从不回写，恒为 `false`，命中类型误判 | 循环内累计、结束回写 result | `tg/enqueue.ts:197,307,398` |
+| 协议相对 URL 正则把结尾引号一起拼进 `https:` 前缀，URL 解析失败 | 拼接前剥引号 | `tg/m3u8.ts` |
+| 反代 502 / HTML 错误页不是 JSON，`JSON.parse` 抛异常导致 401 也跳不了登录 | `parseApiText()` 容错并保留 status | `web/src/api.ts` |
+| 海报上传失败后 `posterTried` 不复位，这一集永远不再自动截封面 | catch 里复位，允许重试 | `web/src/components/VideoPlayer.tsx:176` |
+| fMP4 实时流无 Content-Length，只卸载 DOM 不保证连接关闭 | 卸载时 `pause()` + `removeAttribute("src")` + `load()` | `web/src/components/VideoPlayer.tsx` |
+| 下载页轮询 / 搜索 / 翻页并发，慢响应覆盖新页 | `seqRef` 只接受最后一次请求 | `web/src/pages/Downloads.tsx:192,196,203` |
+
+另修自检脚本本身：三个断言入口都记失败数、汇总打印「失败 N 项」、`main()` 异常不再吞；
+bot 自检的分享口令断言去掉假阳性，`main` 套 `try/finally` 保证异常路径也删临时目录。
+新增 **11 条回归断言**（`scripts/selftest.ts`），先红后绿。
+
+### 边界与遗留
+
+- **没动**：`db.ts` 表结构 / 存量数据、HTTP 路径与参数、环境变量与设置 key、Dockerfile、CI、compose、依赖锁、
+  下载路由与命名结果、NFO / 封面生成、主题样式。脚本报的 `botmedia.ts:42`「动态执行」核实为正则 `.exec()`，误报不改。
+- **版本号仍是 `1.3.18`**：本轮不发版，按节奏在用户说「发版」时才统一到 `1.3.19`（8 处）并重写 README
+  「本版更新」；所以 README 这轮**不改**。工作区 `APP_VERSION` 显示 `1.3.18` 属已知且有意的不一致。
+- 其余 P1 / P2 未修项已在 `.devloop/S3-变更审计.md` 与 `S5-健康检查.md` 逐条写豁免理由。
+
+### 验证
+
+`typecheck` 0 错误 · 自检 **413 项 / 失败 0**（原 402）· bot 测试 **18 项 / 失败 0** · `build` 通过；
+统一验证门禁退出码 0（38.3s）。红阶段 11 条断言全部失败（退出码 1，证据 `.devloop/tmp-red.log`），
+实现后才转绿。
+
+---
+
 ## 版本命名与发版节奏
 
 - **已发布正式版**：`1.3.18`（镜像 `rdevils7/tgsub:v1.3.18` 与 `latest`）。

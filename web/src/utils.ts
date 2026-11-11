@@ -202,3 +202,46 @@ export function clampNumber(value: number, min: number, max: number): number {
   if (Number.isNaN(value)) return min;
   return Math.min(max, Math.max(min, value));
 }
+
+/**
+ * localStorage 在沙箱 iframe（opaque origin）、无痕模式或被策略禁用时会抛
+ * SecurityError，渲染期抛错会直接白屏。统一在这里兜住：读失败用默认值，
+ * 写失败退化成「本次页面内有效」（与 api.ts 的会话兜底是同一套约定）。
+ */
+export function safeStorageGet(key: string, fallback = ""): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function safeStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* 存不住就只在本次页面内有效 */
+  }
+}
+
+export function safeStorageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 接口响应文本：反代 502 / HTML 错误页不是 JSON，也要保留 HTTP status 供 401 判定 */
+export function parseApiText<T = unknown>(
+  text: string,
+  status: number,
+): { status: number; ok: boolean; data: T | null } {
+  const ok = status >= 200 && status < 300;
+  if (!text) return { status, ok, data: null };
+  try {
+    return { status, ok, data: JSON.parse(text) as T };
+  } catch {
+    return { status, ok, data: null };
+  }
+}

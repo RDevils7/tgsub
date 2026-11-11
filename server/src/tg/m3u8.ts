@@ -330,7 +330,8 @@ export function extractM3u8FromHtml(html: string, pageUrl: string): string | nul
   const re2 = /(["'`])\/\/([^"'`\s]+?\.m3u8(?:\?[^"'`\s]*)?)\1/gi;
   while ((mm = re2.exec(html))) {
     try {
-      push(new URL(`https:${mm[1]}${mm[2]}`).toString());
+      // mm[1] 是引号本身，不能拼进 URL：协议相对地址只取 mm[2]
+      push(new URL(`https:${mm[2]}`).toString());
     } catch {
       /* ignore */
     }

@@ -166,11 +166,15 @@ export function VideoPlayer({
 
   /** 自动 / 手动设封面共用一次保存；失败由调用方决定要不要提示 */
   const submitPoster = useCallback(
-    async (dataUrl: string, overwrite: boolean) => {
-      if (!onSavePoster) return;
+    async (dataUrl: string, overwrite: boolean): Promise<boolean> => {
+      if (!onSavePoster) return false;
       setSavingPoster(true);
       try {
-        await onSavePoster(dataUrl, overwrite);
+        return await onSavePoster(dataUrl, overwrite);
+      } catch {
+        // 失败要允许自动截取再试一次，否则这一集永远没有封面
+        posterTried.current = false;
+        return false;
       } finally {
         setSavingPoster(false);
       }
@@ -228,6 +232,13 @@ export function VideoPlayer({
       if (hideTimer.current) window.clearTimeout(hideTimer.current);
       if (seekTimer.current) window.clearTimeout(seekTimer.current);
       if (clickTimer.current) window.clearTimeout(clickTimer.current);
+      const el = videoRef.current;
+      if (el) {
+        // fMP4 实时流没有 Content-Length，只卸载 DOM 不保证连接关闭
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      }
     },
     [],
   );

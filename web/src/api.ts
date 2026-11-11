@@ -1,3 +1,4 @@
+import { parseApiText } from "./utils";
 import type {
   AppSettings,
   AuthState,
@@ -116,7 +117,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (sessionToken) headers.set("X-Tgsub-Session", sessionToken);
   const res = await fetch(`/api${path}`, { credentials: "same-origin", ...init, headers });
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
+  // 反代 502 / HTML 错误页不是 JSON：解析失败也要保留 status，401 才能正常跳登录
+  const { data } = parseApiText<{ error?: string; code?: string }>(text, res.status);
   if (!res.ok) {
     const payload = (data ?? {}) as { error?: string; code?: string };
     // 会话过期或被清掉时，任何一次接口调用都会拿到 401。
@@ -127,7 +129,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, payload.error || `请求失败 (${res.status})`, payload.code);
   }
-  return data as T;
+  return data as unknown as T;
 }
 
 export const api = {
@@ -666,12 +668,22 @@ export const api = {
     }
     const res = await fetch(`/api/metadata/image?${params.toString()}`, {
       method: "POST",
-      headers: { "Content-Type": file.type || "application/octet-stream" },
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        // 这是唯一绕过 request() 的 fetch：cookie 存不住的环境必须自己带 token
+        ...(sessionToken ? { "X-Tgsub-Session": sessionToken } : {}),
+      },
       body: file,
     });
-    const text = await res.text();
-    const data = text ? (JSON.parse(text) as { url?: string; error?: string }) : {};
-    if (!res.ok) throw new ApiError(res.status, data.error || `上传失败 (${res.status})`);
-    return data as { url: string };
+    const { data } = parseApiText<{ url?: string; error?: string }>(await res.text(), res.status);
+    if (!res.ok) {
+      if (res.status === 401) {
+        clearSessionToken();
+        window.dispatchEvent(new CustomEvent("tgsub:unauthorized"));
+      }
+      throw new ApiError(res.status, data?.error || `上传失败 (${res.status})`);
+    }
+    return { url: data?.url ?? "" };
   },
 };

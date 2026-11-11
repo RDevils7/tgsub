@@ -9,6 +9,7 @@ import { downloadFromChannelMessage, downloadFromLink } from "../tg/direct";
 import { asyncHandler, assert, clampInt, parseId } from "../lib/http";
 import { recordManual } from "../manual/history";
 import { clamp, directNote, kindOfLink, manualStatus, webNote } from "../manual/note";
+import { isAllowedPath } from "../tg/mediatree";
 
 export const downloadsRouter = Router();
 
@@ -182,7 +183,10 @@ downloadsRouter.delete(
     const row = stmtGet.get(id);
     assert(row, 404, "任务不存在");
     if (req.query.purge === "1" && row.file_path) {
-      await fs.promises.unlink(row.file_path).catch(() => undefined);
+      const abs = path.resolve(row.file_path);
+      // 与 GET /:id/file 保持一致：库外路径一律拒绝，避免误删任意文件
+      assert(isAllowedPath(abs), 403, "非法路径");
+      await fs.promises.unlink(abs).catch(() => undefined);
     }
     db.prepare("DELETE FROM downloads WHERE id = ?").run(id);
     res.json({ ok: true });

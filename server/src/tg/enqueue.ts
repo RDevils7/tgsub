@@ -393,6 +393,9 @@ const runGroup = db.transaction(
 
     // 整条消息的状态：文件全被大小限制挡掉才算「已过滤」，否则算命中
     log(skippedFiles > 0 && skippedFiles === media.length ? "filtered" : "hit");
+    // result 创建时 hasVideo 还是 false（按值拷贝），循环里改的是局部变量，
+    // 不回写的话 direct.ts 会永远误报「这条消息只有图片」
+    result.hasVideo = hasVideo;
     return result;
   },
 );

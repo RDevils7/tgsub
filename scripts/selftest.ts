@@ -3,6 +3,7 @@
  * 运行：npm run selftest
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import bigInt from "big-integer";
 import { matchText } from "../server/src/match";
@@ -169,6 +170,7 @@ import {
 } from "../server/src/tg/strmnfo";
 
 let passed = 0;
+let failed = 0;
 function check(name: string, fn: () => void) {
   try {
     fn();
@@ -177,6 +179,7 @@ function check(name: string, fn: () => void) {
   } catch (err) {
     console.error(`  \u2717 ${name}`);
     console.error(`    ${(err as Error).message}`);
+    failed += 1;
     process.exitCode = 1;
   }
 }
@@ -190,6 +193,7 @@ async function checkAsync(name: string, fn: () => Promise<void>) {
   } catch (err) {
     console.error(`  \u2717 ${name}`);
     console.error(`    ${(err as Error).message}`);
+    failed += 1;
     process.exitCode = 1;
   }
 }
@@ -697,6 +701,7 @@ async function acheck(name: string, fn: () => Promise<void>): Promise<void> {
   } catch (err) {
     console.error(`  \u2717 ${name}`);
     console.error(`    ${(err as Error).message}`);
+    failed += 1;
     process.exitCode = 1;
   }
 }
@@ -4349,10 +4354,11 @@ async function main(): Promise<void> {
       await run();
     } catch (err) {
       console.error(`  \u2717 ${name}异常: ${(err as Error).message}`);
+      failed += 1;
       process.exitCode = 1;
     }
   }
-  console.log(`\n通过 ${passed} 项自检${process.exitCode ? "（存在失败）" : "，全部正常"}\n`);
+  console.log(`\n通过 ${passed} 项自检，失败 ${failed} 项${process.exitCode ? "" : "，全部正常"}\n`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -4811,6 +4817,96 @@ async function botMediaChecks(): Promise<void> {
     setBotMessageResolver(null);
     forgetBotMessage(ref);
   });
+
+  /* ---------------- 优化轮回归（1.3.19-test）：先红后绿 ---------------- */
+  const srcOf = (rel: string): string => fs.readFileSync(path.resolve(process.cwd(), rel), "utf8");
+
+  check("P0 purge：单条删除必须先校验路径白名单", () => {
+    const src = srcOf("server/src/routes/downloads.ts");
+    const start = src.indexOf("downloadsRouter.delete(");
+    const end = src.indexOf("downloadsRouter.get(", start);
+    assert.ok(start >= 0 && end > start, "找不到 DELETE /:id 处理器");
+    const seg = src.slice(start, end);
+    assert.match(seg, /isAllowedPath\(|isUnderPath\(/);
+    assert.doesNotMatch(seg, /unlink\(row\.file_path\)/);
+  });
+
+  check("P0 看门狗：done 不覆写 failed，run 链尾要有 catch", () => {
+    const src = srcOf("server/src/tg/downloader.ts");
+    assert.match(src, /UPDATE downloads SET status = 'done'[^\n]*WHERE id = \? AND status <> 'failed'/);
+    assert.match(src, /void this\.run\(id\)[\s\S]{0,500}?\.catch\(/);
+    assert.match(src, /lastProgressAt\.delete\(id\)/);
+  });
+
+  check("P0 媒体库：localStorage 全部改走安全读写", () => {
+    assert.doesNotMatch(srcOf("web/src/pages/MediaLibrary.tsx"), /localStorage\.(getItem|setItem|removeItem)/);
+  });
+
+  check("P0 上传封面：补 session 头，非 JSON 响应不再抛 SyntaxError", () => {
+    const src = srcOf("web/src/api.ts");
+    const up = src.slice(src.indexOf("/api/metadata/image?"));
+    assert.ok(up.length > 0, "找不到上传封面请求");
+    assert.match(up.slice(0, 700), /X-Tgsub-Session/);
+    assert.match(up, /parseApiText<[^>]*>\(await res\.text\(\)/);
+  });
+
+  check("P1 m3u8：协议相对链接不把引号拼进 URL", () => {
+    const html = `<script>var u="//cdn.example.com/hls/a.m3u8";</script>`;
+    assert.equal(extractM3u8FromHtml(html, "https://page.example.com/watch"), "https://cdn.example.com/hls/a.m3u8");
+  });
+
+  check("P1 入队结果：hasVideo 在循环结束后回写", () => {
+    assert.match(srcOf("server/src/tg/enqueue.ts"), /result\.hasVideo\s*=\s*hasVideo/);
+  });
+
+  check("P1 入队日志：不落完整 m3u8 URL", () => {
+    const src = srcOf("server/src/tg/direct.ts");
+    const at = src.indexOf("已入队 m3u8 下载任务");
+    assert.ok(at > 0, "找不到 m3u8 入队日志");
+    const seg = src.slice(Math.max(0, at - 450), at + 120);
+    assert.doesNotMatch(seg, /m3u8Url/);
+    assert.match(seg, /hostOf\(/);
+  });
+
+  await checkAsync("P0 前端工具：安全存储与 API 文本解析可用", async () => {
+    const utils = (await import("../web/src/utils")) as unknown as Record<string, unknown>;
+    assert.equal(typeof utils.safeStorageGet, "function", "缺少 safeStorageGet");
+    assert.equal(typeof utils.safeStorageSet, "function", "缺少 safeStorageSet");
+    assert.equal(typeof utils.safeStorageRemove, "function", "缺少 safeStorageRemove");
+    assert.equal(typeof utils.parseApiText, "function", "缺少 parseApiText");
+    const broken = { getItem() { throw new Error("SecurityError"); }, setItem() { throw new Error("SecurityError"); }, removeItem() { throw new Error("SecurityError"); } };
+    const saved = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage?: unknown }).localStorage = broken;
+    try {
+      assert.equal((utils.safeStorageGet as (k: string, d: string) => string)("k", "fallback"), "fallback");
+      assert.doesNotThrow(() => (utils.safeStorageSet as (k: string, v: string) => void)("k", "v"));
+      assert.doesNotThrow(() => (utils.safeStorageRemove as (k: string) => void)("k"));
+      const parsed = (utils.parseApiText as (t: string, s: number) => { status: number; ok: boolean })("<html>502</html>", 502);
+      assert.equal(parsed.status, 502);
+      assert.equal(parsed.ok, false);
+    } finally {
+      (globalThis as { localStorage?: unknown }).localStorage = saved;
+    }
+  });
+
+  check("P1 播放器：海报失败可重试、卸载释放流", () => {
+    const src = srcOf("web/src/components/VideoPlayer.tsx");
+    assert.match(src, /posterTried\.current\s*=\s*false/);
+    assert.match(src, /removeAttribute\(\s*["']src["']\s*\)/);
+  });
+
+  check("P1 下载页：轮询响应带序号防乱序", () => {
+    assert.match(srcOf("web/src/pages/Downloads.tsx"), /seqRef|requestSeq/);
+  });
+
+  check("P1 自检：失败计数与汇总", () => {
+    const src = srcOf("scripts/selftest.ts");
+    assert.match(src, /let failed = 0/);
+    assert.match(src, /void main\(\)\.catch\(/);
+  });
 }
 
-void main();
+void main().catch((err) => {
+  console.error("自检异常：", err);
+  process.exitCode = 1;
+});

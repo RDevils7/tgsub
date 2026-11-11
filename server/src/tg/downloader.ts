@@ -88,7 +88,8 @@ const stmtFailStalled = db.prepare<[string, number, number]>(
   "UPDATE downloads SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
 );
 const stmtDone = db.prepare<[number, string, number, number, number]>(
-  "UPDATE downloads SET status = 'done', progress = 100, downloaded_bytes = ?, file_path = ?, file_size = ?, finished_at = ? WHERE id = ?",
+  // 看门狗已判失败的任务，底层下载若最终返回，绝不能把 failed 覆写成 done
+  "UPDATE downloads SET status = 'done', progress = 100, downloaded_bytes = ?, file_path = ?, file_size = ?, finished_at = ? WHERE id = ? AND status <> 'failed'",
 );
 const stmtResetStuck = db.prepare(
   "UPDATE downloads SET status = 'queued', progress = 0 WHERE status = 'downloading'",
@@ -596,13 +597,21 @@ class DownloadQueue {
       this.priority.delete(id);
       this.active.add(id);
       this.stallWatch.delete(id);
-      void this.run(id).finally(() => {
-        this.active.delete(id);
-        this.live.delete(id);
-        this.cancelIntent.delete(id);
-        this.stallWatch.delete(id);
-        this.pump();
-      });
+      void this.run(id)
+        .catch((err) => {
+          const reason = String((err as Error)?.message ?? err).slice(0, 300);
+          logger.error({ id, err: reason }, "下载任务异常退出，已标记失败");
+          stmtFail.run(reason, Date.now(), id);
+        })
+        .finally(() => {
+          this.active.delete(id);
+          this.live.delete(id);
+          this.cancelIntent.delete(id);
+          this.stallWatch.delete(id);
+          this.lastProgressAt.delete(id);
+          this.attempts.delete(id);
+          this.pump();
+        });
     }
   }
 
@@ -658,10 +667,14 @@ class DownloadQueue {
         logger.warn({ id, quiet }, "下载长时间没有数据回传，尝试中断并重新排队");
         this.cancelIntent.set(id, "preempt");
       } else {
+        // Telegram 车道没有 AbortController：先留下取消意图，
+        // 真正的保险是 stmtDone 的 status <> 'failed'，旧任务返回也覆写不了状态。
+        this.cancelIntent.set(id, "stop");
+        this.platformAbort.get(id)?.abort();
         stmtFailStalled.run(STALL_TEXT, Date.now(), id);
         this.active.delete(id);
         this.live.delete(id);
-        this.cancelIntent.delete(id);
+        this.stallWatch.delete(id);
         logger.error({ id, quiet }, `下载卡住已中断，任务标记为失败以释放车道：可手动重试`);
       }
     }
@@ -812,7 +825,11 @@ class DownloadQueue {
       if (row.file_size > 0 && fs.existsSync(candidate)) {
         const existing = await fs.promises.stat(candidate).catch(() => null);
         if (existing && existing.size === row.file_size) {
-          stmtDone.run(existing.size, candidate, existing.size, Date.now(), id);
+          if (!stmtDone.run(existing.size, candidate, existing.size, Date.now(), id).changes) {
+      // 已被判失败/停止：不再发完成通知，也不写后续文件名
+      logger.warn({ id }, "任务状态已终结，跳过完成回写");
+      return;
+          }
           this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id, row.channel_title);
           logger.info(
             { ...logContext, file: relPathOf(candidate), size: existing.size },
@@ -891,7 +908,11 @@ class DownloadQueue {
       }
       // 校验落地文件：0 字节说明写入被中断，不能标记成功，否则会静默留下坏文件
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
-      stmtDone.run(stat.size, targetPath, stat.size, Date.now(), id);
+      if (!stmtDone.run(stat.size, targetPath, stat.size, Date.now(), id).changes) {
+      // 已被判失败/停止：不再发完成通知，也不写后续文件名
+      logger.warn({ id }, "任务状态已终结，跳过完成回写");
+      return;
+      }
       this.notifyMessageDone(row.channel_id, row.message_id, row.grouped_id, row.channel_title);
       this.attempts.delete(id);
       logger.info(
@@ -1010,7 +1031,11 @@ class DownloadQueue {
 
       const stat = await fs.promises.stat(result.file);
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
-      stmtDone.run(stat.size, result.file, stat.size, Date.now(), id);
+      if (!stmtDone.run(stat.size, result.file, stat.size, Date.now(), id).changes) {
+      // 已被判失败/停止：不再发完成通知，也不写后续文件名
+      logger.warn({ id }, "任务状态已终结，跳过完成回写");
+      return;
+      }
       // yt-dlp 决定扩展名，回填真实文件名，列表与日志才不会显示成 .mp4
       db.prepare("UPDATE downloads SET save_name = ?, file_name = ? WHERE id = ?").run(
         path.basename(result.file),
@@ -1240,7 +1265,11 @@ class DownloadQueue {
 
       const stat = await fs.promises.stat(outFile);
       if (stat.size === 0) throw new Error("下载完成但文件为空（0 字节），已丢弃");
-      stmtDone.run(stat.size, outFile, stat.size, Date.now(), id);
+      if (!stmtDone.run(stat.size, outFile, stat.size, Date.now(), id).changes) {
+      // 已被判失败/停止：不再发完成通知，也不写后续文件名
+      logger.warn({ id }, "任务状态已终结，跳过完成回写");
+      return;
+      }
       db.prepare("UPDATE downloads SET save_name = ?, file_name = ? WHERE id = ?").run(
         path.basename(outFile),
         path.basename(outFile),
