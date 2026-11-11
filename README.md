@@ -4,11 +4,11 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.18-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.19-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
 </p>
 
-> 当前正式版 **1.3.18**（镜像 `rdevils7/tgsub:v1.3.18` / `latest`）。本页只讲**部署与使用**；配置项全集、HTTP 接口、排错细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
+> 当前正式版 **1.3.19**（镜像 `rdevils7/tgsub:v1.3.19` / `latest`）。本页只讲**部署与使用**；配置项全集、HTTP 接口、排错细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
 频道 → 定时扫描 → 关键词命中 → 下载队列 → 剧集命名 + NFO/封面 → 本地媒体库 + Web 界面
@@ -16,16 +16,16 @@
 
 ---
 
-## 本版更新（1.3.18）
+## 本版更新（1.3.19）
 
 | 改动 | 说明 |
 | --- | --- |
-| **机器人直接收文件** | 私聊里把视频 / 文件发给机器人就自动下载，**没有文字也算**；用 bot 自己的 MTProto 客户端取媒体，不受 Bot API 20MB 限制，1GB 文件照常可下 |
-| **文件夹分享机器人可用** | 识别 `📁 标题` 与 `✅ 发送完成` 状态卡片：不再报解析失败、不再刷 /help；标题记住 15 分钟，给随后推来的文件命名归档 |
-| **重启可回源、重名不覆盖** | 任务用 `tgbot:<chatId>:<messageId>` 定位，进程重启后按 access_hash 补取消息；同一分享里多个文件撞名自动加消息 ID 后缀 |
+| **A. AI 补全 NFO** | 缺简介 / 缺字段的剧集，点一次就用 AI 补齐 `tvshow.nfo` 与单集 NFO；strm 目录可批量补，**只补缺失、不覆盖已写的** |
+| **B. AI 命名兜底** | 规则 / 正则解析不出剧名、季、集时，交给 AI 兜底解析并归档，设置里可单独开关；结果照旧走改名计划确认再落盘 |
+| **C. 日志 AI 诊断** | 把失败任务的日志丢给 AI，直接给结论与下一步动作，省去自己翻日志 |
 
-- 校验：`typecheck` 0 错误、自检 **402** 项、bot 测试 **18** 项、`build` 全绿；隔离实例端到端 **6** 项（入队 → 落盘 → 查重 → 重启回源 → 重名消解）全过。
-- 1.3.17 的媒体库任意目录 / bot 入站日志 / Emby 设置三合一、1.3.16 的 strm 播放与截帧封面、1.3.15 的响应速度与 yt-dlp 精确排期、1.3.14 的自绘播放器全部保留。
+- AI 走 **OpenAI 兼容协议**（Base URL / API Key / 模型名可配），DeepSeek、通义、OpenAI 及自建兼容端点都能用；Key 加密落盘，设置页带「测试连接」。
+- 校验：`typecheck` 0 错误、自检 **413** 项、bot 测试 **18** 项、`build` 全绿；1.3.18 的机器人直接收文件、1.3.17 的媒体库任意目录 / Emby 设置三合一、1.3.16 的 strm 播放与截帧封面等全部保留。
 
 ---
 
@@ -150,7 +150,7 @@ docker compose up -d && docker compose logs -f --tail=200
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布 |
-| `v1.3.18` | 固定版本，**生产建议锁定** |
+| `v1.3.19` | 固定版本，**生产建议锁定** |
 
 push 到 `main` 只跑构建与冒烟测试、不发镜像；打 tag 才构建 amd64 + arm64 并推送。
 
@@ -173,7 +173,7 @@ curl -s http://<IP>:6789/api/health            # 查版本
 | 容器 running 但网页打不开 | `docker port tgsub` 查映射；`docker exec tgsub node -e "fetch('http://127.0.0.1:6789/api/health').then(r=>r.text()).then(console.log)"` 有 JSON 即服务正常，问题在端口 / 防火墙 / 反代（镜像内无 curl）；用 http 不是 https |
 | 忘记管理密码 | 临时 `AUTH_DISABLED: "1"` → 重设密码 → 删掉重启 |
 | 登录框刷「连接异常，延迟重连」 | 代理没生效，设置页点「联网测试」 |
-| 机器人发文件没反应 | 确认已升级到 1.3.18、bot 在线；纯图片需打开「🖼 图片下载」；任务失败看日志里的 `bot-media-*` 记录 |
+| 机器人发文件没反应 | 确认已升级到 1.3.19、bot 在线；纯图片需打开「🖼 图片下载」；任务失败看日志里的 `bot-media-*` 记录 |
 | 新集不出现在 Emby | 查地址 / API Key / 路径映射，点「测试连接」；再确认 Emby 已勾本地 NFO |
 | 评论区链接报「不在讨论组里」 | 会依次试 6 条路定位讨论组；私密群 + 账号不在群里只能先用同一账号加群 |
 | 网页视频 `403` / 一直 `Just a moment...` | Cloudflare 挑战会由无头浏览器自动过（15~30 秒）；老任务里的 `&amp;` 已自动还原，点「重试」即可 |
