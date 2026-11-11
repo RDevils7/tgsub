@@ -5,7 +5,7 @@ import { Channel } from "../types";
 import { getClient } from "./client";
 import { fetchMessageGroup } from "./media";
 import { channelEntityKey, channelMessageLink } from "./entity";
-import { enqueueGroup } from "./enqueue";
+import { enqueueGroupAi } from "./enqueue";
 import { downloader } from "./downloader";
 import { resolveM3u8Input, isHttpUrl, hostOf } from "./m3u8";
 import { joinRel } from "./mediadir";
@@ -219,7 +219,7 @@ async function enqueueFromTarget(
   includeImages?: boolean,
 ): Promise<DirectResult> {
   const messages = await fetchMessageGroup(target.entityKey, messageId, target.accessHash);
-  const result = enqueueGroup(target.channel, messages, {
+  const result = await enqueueGroupAi(target.channel, messages, {
     fresh: true,
     force: true,
     keyword: null,

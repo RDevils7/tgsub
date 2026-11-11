@@ -225,6 +225,21 @@ export interface AppSettings {
    *   off    = 只直连，完全不用代理
    */
   m3u8_proxy_mode: "auto" | "always" | "off";
+  /** 是否启用 AI 功能（补全 NFO / 智能命名 / 日志诊断等） */
+  ai_enabled: boolean;
+  /**
+   * AI 服务地址（OpenAI 兼容协议）。
+   * 填 base_url 即可通吃 DeepSeek / 通义千问 / 智谱 / OpenRouter / 本地 Ollama，
+   * 例如 https://api.openai.com/v1、https://api.deepseek.com/v1、http://localhost:11434/v1
+   */
+  ai_base_url: string;
+  /** 使用的模型名，例如 gpt-4o-mini、deepseek-chat、qwen-max */
+  ai_model: string;
+  /**
+   * AI 智能命名兜底：开启后，下载时若正则识别不出剧名但消息里有视频，
+   * 会用 AI 再试一次（仅在「正则彻底失败」时触发，不会每条都调）。
+   */
+  ai_naming: boolean;
 }
 
 /**
@@ -286,4 +301,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ytdlp_check_hours: 360, // 15 天
   m3u8_proxy: "",
   m3u8_proxy_mode: "auto",
+  ai_enabled: false,
+  ai_base_url: "https://api.openai.com/v1",
+  ai_model: "gpt-4o-mini",
+  ai_naming: false,
 };

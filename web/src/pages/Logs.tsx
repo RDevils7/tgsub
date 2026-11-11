@@ -4,7 +4,7 @@ import type { LogEntry, LogLevel } from "../types";
 import { Badge, Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { PageSizeControl, usePageSize } from "../components/PageSize";
 import { Pager, pageCountOf } from "../components/Pager";
-import { IconDownload, IconRefresh, IconSearch, IconTrash } from "../components/icons";
+import { IconDownload, IconRefresh, IconSearch, IconSpark, IconTrash } from "../components/icons";
 import { formatBytes, formatDateTime } from "../utils";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -93,6 +93,13 @@ export default function Logs() {
   const [clearing, setClearing] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [pageSize, setPageSize] = usePageSize("logs", DEFAULT_PAGE_SIZE);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<{
+    summary: string;
+    issues: Array<{ level: string; topic: string; cause: string; fix: string }>;
+    actions: string[];
+    empty?: boolean;
+  } | null>(null);
   const toast = useToast();
   /** 已加载的最早时间戳：自动刷新时只拉更新的，避免整页跳动 */
   const newestRef = useRef<number>(0);
@@ -154,6 +161,20 @@ export default function Logs() {
 
   const download = () => {
     window.open("/api/logs/download", "_blank");
+  };
+
+  const diagnose = async () => {
+    setDiagnosing(true);
+    setDiagnosis(null);
+    try {
+      const result = await api.aiDiagnose({ limit: 250 });
+      setDiagnosis(result);
+      if (result.empty) toast.push("最近没有可供诊断的警告或错误日志", "info");
+    } catch (err) {
+      toast.push((err as Error).message, "error");
+    } finally {
+      setDiagnosing(false);
+    }
   };
 
   const pageCount = useMemo(() => pageCountOf(total, pageSize), [total, pageSize]);
@@ -226,6 +247,11 @@ export default function Logs() {
             刷新
           </Button>
 
+          <Button size="sm" variant="primary" onClick={() => void diagnose()} loading={diagnosing}>
+            <IconSpark className="h-3.5 w-3.5" />
+            AI 诊断
+          </Button>
+
           <Button size="sm" onClick={download} title="下载完整日志文件">
             <IconDownload className="h-3.5 w-3.5" />
             下载
@@ -254,6 +280,61 @@ export default function Logs() {
           文件位于数据目录 logs/app.log，超过 10MB 自动轮转，重启后仍可查看
         </span>
       </div>
+
+      {/* AI 诊断结果 */}
+      {diagnosis && (
+        <div className="border-b border-white/[0.06] bg-fuchsia-500/[0.05] px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <IconSpark className="h-4 w-4 text-fuchsia-300" />
+            <span className="text-[13px] font-medium text-fuchsia-200">AI 诊断结果</span>
+          </div>
+          <p className="text-[12.5px] leading-relaxed text-slate-200">{diagnosis.summary}</p>
+          {diagnosis.issues.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {diagnosis.issues.map((issue, idx) => (
+                <div
+                  key={idx}
+                  className="rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2"
+                >
+                  <p className="text-[12.5px] font-medium text-white">
+                    {issue.topic}
+                    {issue.level && issue.level !== "info" && (
+                      <span className="ml-2 rounded bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] text-slate-400">
+                        {issue.level}
+                      </span>
+                    )}
+                  </p>
+                  {issue.cause && (
+                    <p className="mt-1 text-[12px] leading-relaxed text-slate-400">
+                      <span className="text-slate-500">可能原因：</span>
+                      {issue.cause}
+                    </p>
+                  )}
+                  {issue.fix && (
+                    <p className="mt-1 text-[12px] leading-relaxed text-ok">
+                      <span className="text-slate-500">修复建议：</span>
+                      {issue.fix}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {diagnosis.actions.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1 text-[11.5px] text-slate-500">可执行的下一步</p>
+              <ul className="space-y-1">
+                {diagnosis.actions.map((action, idx) => (
+                  <li key={idx} className="flex items-start gap-1.5 text-[12px] leading-relaxed text-slate-300">
+                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-fuchsia-400" />
+                    {action}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 日志列表 */}
       {loading && items.length === 0 ? (

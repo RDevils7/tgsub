@@ -28,6 +28,7 @@ import { systemRouter } from "./routes/system";
 import { logsRouter } from "./routes/logs";
 import { platformRouter } from "./routes/platform";
 import { manualRouter } from "./routes/manual";
+import { aiRouter } from "./routes/ai";
 import { sessionRouter } from "./routes/login";
 import { requireLogin, getAccount } from "./auth/service";
 import { hydrateFromFile } from "./lib/logstore";
@@ -115,6 +116,7 @@ app.use("/api/cache", cacheRouter);
 app.use("/api/logs", logsRouter);
 app.use("/api/platform", platformRouter);
 app.use("/api/manual", manualRouter);
+app.use("/api/ai", aiRouter);
 app.use("/api", systemRouter);
 
 app.use("/api", (_req, res) => {

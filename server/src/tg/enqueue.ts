@@ -3,6 +3,8 @@ import { Channel, Subscription } from "../types";
 import { matchText } from "../match";
 import { extractMedia, groupIdOf, messageText, type MediaInfo } from "./media";
 import { parseCaptionMeta, planFileNames } from "./naming";
+import { aiParseSeries } from "../ai/naming";
+import { isAiEnabled } from "../ai/client";
 import { channelMessageLink } from "./entity";
 import { encodeMeta, type EmbyMeta } from "./emby";
 import { joinRel } from "./mediadir";
@@ -25,6 +27,8 @@ export interface GroupEnqueueOptions {
   runId?: number | null;
   /** 是否写监控记录（默认 true） */
   writeLog?: boolean;
+  /** AI 命名兜底回填的剧名（正则失败、AI 命中后由 enqueueGroupAi 写入） */
+  seriesOverride?: string | null;
   /**
    * 是否把图片也算作可下载文件。
    * - undefined / true：图片照常下载（网页手动下载、定时扫描保持原行为，避免回归）
@@ -210,6 +214,8 @@ const runGroup = db.transaction(
           stmtLooseDirOwner.get(diskDir(base) ?? base, messageId) ? `${base}-${messageId}` : base,
         // 消息条数决定「一个文件含多集」还是「相册一集一条」
         messageCount: messages.length,
+        // 智能命名兜底：正则失败、AI 命中后回填的剧名
+        seriesOverride: opts.seriesOverride ?? null,
       },
     );
     const caption = parseCaptionMeta(sourceText);
@@ -406,4 +412,41 @@ export function enqueueGroup(
   opts: GroupEnqueueOptions,
 ): GroupEnqueueResult {
   return runGroup(channel, messages, opts);
+}
+
+/**
+ * 带 AI 命名兜底的入队（功能 B）。
+ *
+ * 与 enqueueGroup 的区别：开启 ai_naming 且正则认不出剧名、但消息里有视频时，
+ * 先让 AI 试一次剧名，回填到 runGroup 的命名规划里。AI 调用是异步的，所以本函数返回 Promise。
+ * 只在 fresh（真正要入队的）消息上跑，纯留痕回看的组不浪费额度。
+ */
+export async function enqueueGroupAi(
+  channel: Channel,
+  messages: Array<Record<string, unknown>>,
+  opts: GroupEnqueueOptions,
+): Promise<GroupEnqueueResult> {
+  let seriesOverride: string | null = opts.seriesOverride ?? null;
+  if (!seriesOverride && opts.fresh !== false && (await getSettings()).ai_naming && isAiEnabled()) {
+    const settings = getSettings();
+    const text = messages.map((m) => messageText(m)).join("\n");
+    const captionText = messages
+      .map((m) => (typeof (m as { message?: unknown }).message === "string" ? String((m as { message: string }).message) : ""))
+      .filter(Boolean)
+      .join("\n");
+    const sourceText = captionText || text;
+    const media = messages
+      .map((m) => extractMedia(m))
+      .filter((info): info is MediaInfo => info !== null);
+    // 只在「正则彻底失败（视频没有目标目录）」时才求助 AI，避免每条都调
+    const probe = planFileNames(sourceText, media, {
+      messageCount: messages.length,
+      looseFolder: settings.fallback_folder,
+    });
+    if (probe.some((n) => n.isVideo && !n.dir)) {
+      const ai = await aiParseSeries(sourceText).catch(() => null);
+      if (ai?.series) seriesOverride = ai.series;
+    }
+  }
+  return runGroup(channel, messages, { ...opts, seriesOverride });
 }

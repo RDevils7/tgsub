@@ -17,6 +17,7 @@ import PlatformPanel from "../components/PlatformPanel";
 import CollapsibleCard from "../components/CollapsibleCard";
 import AccountPanel from "../components/AccountPanel";
 import EmbySettingsPanel from "../components/EmbySettingsPanel";
+import AiSettingsPanel from "../components/AiSettingsPanel";
 import {
   IconAlert,
   IconBot,
@@ -1275,6 +1276,9 @@ export default function Settings() {
 
       {/* Emby 媒体库：媒体信息生成、入库通知与 Emby 端配置说明 */}
       <EmbySettingsPanel />
+
+      {/* AI 功能：OpenAI 兼容接入，key 加密存储，供各 AI 增强功能调用 */}
+      <AiSettingsPanel />
 
       {/* 缓存：covers 与 frames 都是可重建的缓存，可设上限自动清理 */}
       <CollapsibleCard

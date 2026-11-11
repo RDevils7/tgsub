@@ -1,11 +1,13 @@
 import { Router } from "express";
 import {
   db,
+  getAiKeyHint,
   getEmbyKeyHint,
   getSession,
   getSettings,
   setBotToken,
   setEmbyApiKey,
+  setAiApiKey,
   setPlatformCookie,
   updateSettings,
 } from "../db";
@@ -49,6 +51,11 @@ settingsRouter.get(
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
       // Emby API Key 单独加密存放，只回掩码与「有没有配置」
       emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
+      // AI API Key 同样只回掩码
+      ai: (() => {
+        const aiKey = getAiKeyHint();
+        return { apiKeySet: aiKey.set, apiKeyHint: aiKey.hint };
+      })(),
       paths: { dataDir: env.dataDir, downloadDir: env.downloadDir, dbFile: env.dbFile },
       version: APP_VERSION,
       bot: getBotState(),
@@ -137,6 +144,20 @@ settingsRouter.put(
       patch.m3u8_proxy_mode = (["auto", "always", "off"] as const).includes(mode as "auto")
         ? (mode as "auto" | "always" | "off")
         : current.m3u8_proxy_mode;
+    }
+
+    /* AI 功能（OpenAI 兼容）：开关 + 地址 + 模型，key 单独加密落盘 */
+    if (body.ai_enabled !== undefined) patch.ai_enabled = Boolean(body.ai_enabled);
+    if (typeof body.ai_base_url === "string") {
+      patch.ai_base_url = body.ai_base_url.trim().replace(/\/+$/, "");
+    }
+    if (typeof body.ai_model === "string" && body.ai_model.trim()) {
+      patch.ai_model = body.ai_model.trim();
+    }
+    if (body.ai_naming !== undefined) patch.ai_naming = Boolean(body.ai_naming);
+    // 与 Emby Key 同机制：传掩码 = 不改，传空字符串 = 清除，传明文 = 保存
+    if (typeof body.ai_api_key === "string" && body.ai_api_key !== MASK) {
+      setAiApiKey(body.ai_api_key);
     }
 
     /* 第三方平台（B站 / 小红书 / YouTube） */
@@ -239,6 +260,7 @@ settingsRouter.put(
 
     const builtin = getBuiltinApp(next.builtin_app);
     const embyKey = getEmbyKeyHint();
+    const aiKey = getAiKeyHint();
     res.json({
       settings: { ...next, api_hash: next.api_hash ? MASK : "", has_session: Boolean(getSession()) },
       credential:
@@ -246,6 +268,7 @@ settingsRouter.put(
           ? { mode: "custom", label: "自定义应用", apiId: next.api_id || null }
           : { mode: "builtin", label: builtin.label, apiId: String(builtin.apiId) },
       emby: { apiKeySet: embyKey.set, apiKeyHint: embyKey.hint },
+      ai: { apiKeySet: aiKey.set, apiKeyHint: aiKey.hint },
       bot: getBotState(),
     });
   }),

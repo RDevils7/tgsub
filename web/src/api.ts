@@ -16,6 +16,7 @@ import type {
   MediaPosterResult,
   MediaSeriesResponse,
   MediaStrmNfoResult,
+  MediaStrmAiNfoResult,
   CacheActionResult,
   CacheStats,
   BotTestResult,
@@ -271,14 +272,45 @@ export const api = {
     patch: Partial<AppSettings> & {
       bot_token?: string;
       emby_api_key?: string;
+      ai_api_key?: string;
       platform_cookie_bilibili?: string;
       platform_cookie_xiaohongshu?: string;
       platform_cookie_youtube?: string;
     },
   ) =>
-    request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState; emby?: { apiKeySet: boolean; apiKeyHint: string | null } }>("/settings", {
+    request<{ settings: AppSettings; credential?: CredentialInfo; bot?: BotState; emby?: { apiKeySet: boolean; apiKeyHint: string | null }; ai?: { apiKeySet: boolean; apiKeyHint: string | null } }>("/settings", {
       method: "PUT",
       body: JSON.stringify(patch),
+    }),
+
+  /* ------------------------------ AI 功能 ------------------------------ */
+  aiStatus: () =>
+    request<{
+      enabled: boolean;
+      configured: boolean;
+      baseUrl: string;
+      model: string;
+      apiKeySet: boolean;
+      apiKeyHint: string | null;
+    }>("/ai/status"),
+  aiTest: () =>
+    request<{ ok: boolean; model: string; latencyMs: number; error?: string }>("/ai/test", {
+      method: "POST",
+    }),
+  /**
+   * 日志智能诊断（功能 C）：把最近 warn/error/fatal 日志交给 AI 归纳原因与修复建议。
+   * 也可传 logs 数组针对某次故障诊断。
+   */
+  aiDiagnose: (opts?: { level?: string; limit?: number; logs?: unknown[] }) =>
+    request<{
+      ok: boolean;
+      empty?: boolean;
+      summary: string;
+      issues: Array<{ level: string; topic: string; cause: string; fix: string }>;
+      actions: string[];
+    }>("/ai/diagnose", {
+      method: "POST",
+      body: JSON.stringify(opts ?? {}),
     }),
 
   /* ------------------------------ 第三方平台 ------------------------------ */
@@ -377,6 +409,15 @@ export const api = {
    */
   mediaEnsureStrmNfo: (dir: string) =>
     request<MediaStrmNfoResult>("/media/strm/nfo", {
+      method: "POST",
+      body: JSON.stringify({ dir }),
+    }),
+  /**
+   * AI 补全媒体信息（功能 A）：给目录下「有 NFO 但 plot 为空」的 strm 调 AI 补简介 / 类型 / 标签。
+   * 用户改过的和有 plot 的会跳过，不会重复花额度；需先在设置页启用 AI。
+   */
+  mediaAiEnrichStrmNfo: (dir: string) =>
+    request<MediaStrmAiNfoResult>("/media/strm/ai-nfo", {
       method: "POST",
       body: JSON.stringify({ dir }),
     }),

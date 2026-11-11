@@ -259,7 +259,8 @@ jobs:
           # main、sha-<40位>、1.0.4、1.0 这些标签，Docker Hub 的 Tags 页会堆满。
           tags: |
             type=raw,value=${{ steps.ver.outputs.version }}
-            type=raw,value=latest
+            # -test 预发布标签只出 vX.Y.Z-test，绝不覆盖 latest，避免污染生产容器
+            type=raw,value=latest,enable=${{ !contains(steps.ver.outputs.version, '-test') }}
 
       - name: 构建并推送
         uses: docker/build-push-action@v6

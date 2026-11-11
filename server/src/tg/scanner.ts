@@ -6,7 +6,7 @@ import { getClient, hasSession } from "./client";
 import { downloader } from "./downloader";
 import { groupIdOf } from "./media";
 import { channelEntityKey } from "./entity";
-import { enqueueGroup } from "./enqueue";
+import { enqueueGroupAi } from "./enqueue";
 import { hitLines, hitSummaryLine } from "./hitplan";
 import { notify } from "./notify";
 
@@ -238,8 +238,8 @@ async function scanChannelOnce(
       const pendingIds: number[] = [];
 
       /** fresh=true 表示游标之外的新消息（匹配后入队），false 只为留痕回看不入队 */
-      const handleGroup = (group: GroupedMessages, fresh: boolean): void => {
-        const result = enqueueGroup(channel, group.messages, { fresh, runId });
+      const handleGroup = async (group: GroupedMessages, fresh: boolean): Promise<void> => {
+        const result = await enqueueGroupAi(channel, group.messages, { fresh, runId });
         if (result.matched) matched += 1;
         queued += result.queued;
         skipped += result.skipped;
@@ -256,8 +256,8 @@ async function scanChannelOnce(
         }
       };
 
-      for (const group of freshGroups) handleGroup(group, true);
-      for (const group of recentGroups) handleGroup(group, false);
+      for (const group of freshGroups) await handleGroup(group, true);
+      for (const group of recentGroups) await handleGroup(group, false);
       if (pendingIds.length) downloader.enqueue(pendingIds);
     }
 

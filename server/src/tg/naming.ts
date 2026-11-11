@@ -693,13 +693,18 @@ export function planFileNames(
     uniqueLooseDir?: (base: string) => string;
     /** 这批文件来自几条消息：一条=单文件，多条=相册 */
     messageCount?: number;
+    /**
+     * AI 命名兜底结果：正则彻底失败时由调用方（enqueue）调 AI 后回填，
+     * 非空的 series 直接作为剧名，跳过正则可解析逻辑（集数仍从正文/文件名正则取）。
+     */
+    seriesOverride?: string | null;
   } = {},
 ): NamedFile[] {
   const captionInfo = parseSeriesCaption(text);
   const fileMarks = media.map((item) => parseFileNameMarks(item.fileName));
 
-  // 剧名：正文优先，正文认不出就从原始文件名里找
-  const series = captionInfo?.series || pickSeriesFromFiles(fileMarks);
+  // 剧名：优先用 AI 兜底回填的 series；否则正文优先，正文认不出就从原始文件名里找
+  const series = options.seriesOverride || captionInfo?.series || pickSeriesFromFiles(fileMarks);
 
   const looseBase = series ? "" : fallbackFolderName(text);
   const loose = !series && (options.looseFolder ?? true) && Boolean(looseBase) && media.some(isVideoLike);

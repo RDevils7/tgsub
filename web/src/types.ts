@@ -297,6 +297,14 @@ export interface AppSettings {
   m3u8_proxy: string;
   /** 网页 / m3u8 下载的线路策略：auto=直连优先 / always=强制代理 / off=只直连 */
   m3u8_proxy_mode: "auto" | "always" | "off";
+  /** 是否启用 AI 功能（补全 NFO / 智能命名 / 日志诊断等） */
+  ai_enabled: boolean;
+  /** AI 服务地址（OpenAI 兼容协议），例如 https://api.openai.com/v1、https://api.deepseek.com/v1 */
+  ai_base_url: string;
+  /** 使用的模型名，例如 gpt-4o-mini、deepseek-chat、qwen-max */
+  ai_model: string;
+  /** AI 智能命名兜底：正则识别不出剧名但消息有视频时，用 AI 再试一次 */
+  ai_naming: boolean;
   has_session?: boolean;
 }
 
@@ -509,6 +517,8 @@ export interface SettingsResponse {
   bot?: BotState;
   /** Emby API Key 只回掩码 */
   emby?: { apiKeySet: boolean; apiKeyHint: string | null };
+  /** AI API Key 只回掩码 */
+  ai?: { apiKeySet: boolean; apiKeyHint: string | null };
 }
 
 /* ------------------------------ 网络与代理 ------------------------------ */
@@ -657,6 +667,22 @@ export interface MediaStrmNfoResult {
   created: number;
   /** 本来就有 NFO */
   existing: number;
+  /** 写失败（多数是媒体目录不可写） */
+  failed: number;
+  /** 撞到扫描上限，还有没扫到的 */
+  truncated: boolean;
+}
+
+/** AI 补全媒体信息（功能 A）的结果 */
+export interface MediaStrmAiNfoResult {
+  ok: boolean;
+  dir: string;
+  /** 扫到的 strm 总数 */
+  scanned: number;
+  /** 本次用 AI 补全的 NFO（含剧集 NFO） */
+  enriched: number;
+  /** 本来就有的、或已补过的、跳过的 */
+  skipped: number;
   /** 写失败（多数是媒体目录不可写） */
   failed: number;
   /** 撞到扫描上限，还有没扫到的 */

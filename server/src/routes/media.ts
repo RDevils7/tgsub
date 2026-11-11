@@ -15,6 +15,8 @@ import {
 } from "../tg/mediapath";
 import { pipeStrm } from "../tg/strmstream";
 import { ensureStrmNfo, ensureStrmNfos } from "../tg/strmnfo";
+import { enrichStrmNfos } from "../ai/nfo";
+import { isAiEnabled } from "../ai/client";
 import {
   artUrl,
   existingEpisodeThumb,
@@ -429,6 +431,24 @@ mediaRouter.post(
     const dir = resolveDir(req.body?.dir);
     assert(fs.existsSync(dir), 404, "目录不存在");
     const summary = await ensureStrmNfos(dir);
+    res.json({ ok: true, dir, ...summary });
+  }),
+);
+
+/**
+ * AI 补全媒体信息（功能 A）。
+ *
+ * 与「批量补 NFO」不同：这里只给**已经有 NFO、但 plot 为空**的 strm 调 AI 补简介 /
+ * 类型 / 标签，用户手工改过的（有 plot）和已经补过的都跳过，不会重复花额度。
+ * 纯文本 LLM，不读视频；需要先到设置页启用 AI 并配好 Key。
+ */
+mediaRouter.post(
+  "/strm/ai-nfo",
+  asyncHandler(async (req, res) => {
+    assert(isAiEnabled(), 400, "AI 未启用或未配置 API Key（设置页 → AI 功能）");
+    const dir = resolveDir(req.body?.dir);
+    assert(fs.existsSync(dir), 404, "目录不存在");
+    const summary = await enrichStrmNfos(dir);
     res.json({ ok: true, dir, ...summary });
   }),
 );

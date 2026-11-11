@@ -18,6 +18,7 @@ import {
   IconPlay,
   IconRefresh,
   IconSearch,
+  IconSpark,
   IconTv,
   IconVideo,
 } from "../components/icons";
@@ -264,6 +265,7 @@ function LibrarySkeleton() {
 export default function MediaLibrary() {
   const toast = useToast();
   const [dir, setDir] = useState<string>(() => safeStorageGet(DIR_STORAGE_KEY));
+  const [aiEnriching, setAiEnriching] = useState(false);
   const [listing, setListing] = useState<MediaLibraryResponse | null>(null);
   const [seriesView, setSeriesView] = useState<MediaSeriesResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -395,6 +397,27 @@ export default function MediaLibrary() {
       alive = false;
     };
   }, [dir, reloadToken]);
+
+  /** 用 AI 给当前目录里「有 NFO 但没简介」的 strm 补媒体信息 */
+  const aiEnrichCurrent = async () => {
+    if (!dir || aiEnriching) return;
+    setAiEnriching(true);
+    try {
+      const summary = await api.mediaAiEnrichStrmNfo(dir);
+      if (summary.enriched > 0) {
+        toastRef.current.push(`AI 已为 ${summary.enriched} 个媒体补全简介 / 类型 / 标签`, "success");
+      } else {
+        toastRef.current.push("没有需要补全的媒体（已有简介或无需处理）", "info");
+      }
+      if (summary.failed > 0) {
+        toastRef.current.push(`${summary.failed} 个写入失败，检查媒体目录写权限`, "error");
+      }
+    } catch (err) {
+      toastRef.current.push((err as Error).message, "error");
+    } finally {
+      setAiEnriching(false);
+    }
+  };
 
   const openSeries = (target: MediaSeries) => {
     // 记住是从哪个目录点进来的
@@ -622,6 +645,18 @@ export default function MediaLibrary() {
               HEVC 直连
               <span className={`h-1.5 w-1.5 rounded-full ${hevc ? "bg-amber-400" : "bg-slate-600"}`} />
             </button>
+
+            {dir && (
+              <button
+                onClick={() => void aiEnrichCurrent()}
+                disabled={aiEnriching}
+                className="flex items-center gap-1.5 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/[0.1] px-2.5 py-1.5 text-[11.5px] text-fuchsia-200 transition hover:border-fuchsia-500/50 hover:text-fuchsia-100 disabled:opacity-50"
+                title="用 AI 根据剧名补全简介 / 类型 / 标签（只补没有简介的 NFO；需先在设置页启用 AI）"
+              >
+                {aiEnriching ? <Spinner className="h-3.5 w-3.5" /> : <IconSpark className="h-3.5 w-3.5" />}
+                AI 补全简介
+              </button>
+            )}
 
             <button
               onClick={() => setBrowseOpen(true)}

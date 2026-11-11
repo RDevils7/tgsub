@@ -648,6 +648,34 @@ export function getEmbyKeyHint(): { set: boolean; hint: string | null } {
 }
 
 /* ------------------------------------------------------------------ */
+/* AI API Key：与 Emby Key / session 同级，加密落盘、接口只回掩码        */
+/* 它是第三方 AI 服务凭据，不该明文躺在库里，也不随 /api/settings 回前端  */
+/* ------------------------------------------------------------------ */
+
+export function getAiApiKey(): string {
+  const raw = getSetting("ai_api_key");
+  if (!raw) return "";
+  try {
+    return decryptSecret(raw);
+  } catch {
+    logger.warn("无法解密 AI API Key，可能 SESSION_SECRET 已变更");
+    return "";
+  }
+}
+
+export function setAiApiKey(apiKey: string): void {
+  const value = apiKey.trim();
+  setSetting("ai_api_key", value ? encryptSecret(value) : "");
+}
+
+/** 只给界面看的提示：有没有配置、末四位是什么 */
+export function getAiKeyHint(): { set: boolean; hint: string | null } {
+  const key = getAiApiKey();
+  if (!key) return { set: false, hint: null };
+  return { set: true, hint: key.length <= 6 ? "••••" : `••••${key.slice(-4)}` };
+}
+
+/* ------------------------------------------------------------------ */
 /* 第三方平台 Cookie：B站 / 小红书 / YouTube                             */
 /*                                                                     */
 /* Cookie 等同于登录态，和 session 一个级别：加密落盘、不放进            */
