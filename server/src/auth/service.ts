@@ -4,7 +4,7 @@ import { db, getSetting, setSetting } from "../db";
 import { env } from "../env";
 import { HttpError } from "../lib/http";
 import { logger } from "../logger";
-import { parseCookie, parseCookies } from "./cookie";
+import { needsCookieRepair, parseCookie, parseCookies } from "./cookie";
 import {
   confirmProblem,
   hashPassword,
@@ -206,7 +206,13 @@ export interface SessionInfo {
  * 浏览器先发哪个不由我们决定，所以这里挨个试，任一对得上就算登录 ——
  * 只认第一个的话，多出来的那份旧 cookie 会让「登录成功但马上又回登录页」反复上演。
  */
-export function currentSession(req: Request): SessionInfo | null {
+export interface SessionHit {
+  info: SessionInfo;
+  /** 通过校验的原始 token —— 补种 cookie 要用，hash 反推不回来 */
+  token: string;
+}
+
+function resolveSession(req: Request): SessionHit | null {
   const tokens = sessionTokens(req);
   if (tokens.length === 0) return null;
 
@@ -225,7 +231,8 @@ export function currentSession(req: Request): SessionInfo | null {
   }>;
 
   const now = Date.now();
-  for (const hash of hashes) {
+  for (let i = 0; i < hashes.length; i += 1) {
+    const hash = hashes[i];
     const hit = rows.find((item) => item.token_hash === hash);
     if (!hit) continue;
     if (hit.expires_at <= now) {
@@ -235,9 +242,16 @@ export function currentSession(req: Request): SessionInfo | null {
     if (now - hit.last_seen > 5 * 60 * 1000) {
       db.prepare("UPDATE login_sessions SET last_seen = ? WHERE token_hash = ?").run(now, hash);
     }
-    return { username: hit.username, createdAt: hit.created_at, expiresAt: hit.expires_at };
+    return {
+      info: { username: hit.username, createdAt: hit.created_at, expiresAt: hit.expires_at },
+      token: tokens[i],
+    };
   }
   return null;
+}
+
+export function currentSession(req: Request): SessionInfo | null {
+  return resolveSession(req)?.info ?? null;
 }
 
 export function destroySession(req: Request): void {
@@ -361,6 +375,29 @@ export function clearCookie(req: Request, res: Response): void {
 /* 中间件                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 把「只靠 X-Tgsub-Session 头进来的」会话补写回 cookie。
+ *
+ * `<img src>` / `<video src>` 这类浏览器原生发起的请求带不了自定义请求头，
+ * 只能靠 cookie。cookie 一旦丢失（会话级 cookie 关浏览器即失效、清过站点数据、
+ * 换过访问地址、被浏览器策略拦掉），前端仍能用 header 正常打开界面和拉列表，
+ * 但封面、缩略图、播放流都会被 requireLogin 挡成 401 ——
+ * 表现就是「剧集列表正常、海报全破图、视频点不开」。
+ *
+ * 在已认证的请求上，只要 cookie 与本次生效的 token 不一致就重写一次，
+ * 后续所有裸 URL 请求便会自动带上凭据。不改写凭据、不放宽任何鉴权。
+ */
+export function ensureSessionCookie(req: Request, res: Response): void {
+  if (env.authDisabled) return;
+  const hit = resolveSession(req);
+  if (!hit) return;
+  // cookie 里已经有这条生效 token 就别每次都下发 Set-Cookie
+  if (!needsCookieRepair(req.headers.cookie, COOKIE_NAME, hit.token)) return;
+  // 原本勾了「保持登录」(30 天) 就继续持久，否则仍是会话 cookie
+  const remember = hit.info.expiresAt - hit.info.createdAt > SESSION_HOURS * 60 * 60 * 1000;
+  writeCookie(req, res, hit.token, hit.info.expiresAt, remember);
+}
+
 /** 不需要登录就能访问的接口：探活、登录自身 */
 function isPublicApi(path: string): boolean {
   return path === "/health" || path === "/version" || path === "/session" || path.startsWith("/session/");
@@ -382,6 +419,7 @@ export function requireLogin(req: Request, res: Response, next: NextFunction): v
     return;
   }
   if (currentSession(req)) {
+    ensureSessionCookie(req, res);
     next();
     return;
   }

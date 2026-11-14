@@ -2200,14 +2200,53 @@ bot 自检的分享口令断言去掉假阳性，`main` 套 `try/finally` 保证
 
 ---
 
+## 1.3.20：媒体库凭据补种与视频流分段 Range
+
+线上症状：媒体库列表（剧名、集数、大小）正常，海报全破图、视频点不开；重新登录后点开视频又停在「缓冲中…」。
+封面 / 视频文件在 NAS 上均真实存在，容器日志无「目录被拒绝」，排除 404 / 403。
+
+**根因一：会话凭据通道不一致。** 前端 `request()` 会带 `X-Tgsub-Session` 头，所以列表接口正常；
+`<img src>` / `<video src>` 是浏览器原生请求，**只能带 cookie**。不勾「保持登录」时写的是会话级 cookie
+（关浏览器即失效），而 `localStorage['tgsub.session']` 与服务端会话（12 小时）都还在，于是形成「半登录」：
+界面可用、裸 URL 全被 `requireLogin` 挡成 401。
+
+- `server/src/auth/cookie.ts` 新增纯函数 `needsCookieRepair(header, name, token)`。
+- `server/src/auth/service.ts` 拆出 `resolveSession()`（返回生效的原始 token，hash 反推不回来），
+  新增 `ensureSessionCookie()`：已认证且 cookie 与生效 token 不一致时按原「保持登录」语义补写 cookie；
+  `requireLogin` 成功分支调用它。鉴权规则不变，token 不进 query、不进前端 URL。
+- `server/src/routes/login.ts` 在 `/api/session/state`（页面首屏）也补种，早于所有图片 / 播放请求。
+
+**根因二：一条 206 覆盖整份文件。** Telegram 下来的 MP4 常是 `ftyp + mdat(179MB) … moov(文件尾)` 的
+非 faststart 结构，浏览器必须靠 Range 取到尾部 `moov` 才能解第一帧。原实现遇到 `bytes=0-` 会回一条
+覆盖整份文件的 206；慢链路、反代缓冲大响应、HTTP/1.1 连接池被海报墙占满时，这条响应会一直挂着，
+表现就是「所有视频无限缓冲、又不报错」。
+
+- `server/src/lib/range.ts`（新增）：`parseRange()` 纯函数，开放式 Range 单次最多 `RANGE_CHUNK = 4 MB`；
+  显式 `end`、`bytes=-N` 后缀、不带 Range 的完整下载语义均不变。
+- `server/src/routes/media.ts` 改用该函数，`direct` 流按段回；`remux` 路径不受影响。
+- `web/src/components/VideoPlayer.tsx` 加 10 秒起播看门狗：零 `buffered` 且 `readyState < 2` 时
+  通过 `onError(reason)` 给出明确原因 +「重试播放 / 下载」，不再无限转圈；`onError` 用 ref 转发避免
+  内联回调每次渲染重置计时器。`web/src/pages/MediaLibrary.tsx` 接收并优先展示具体原因。
+
+**验证**：`typecheck` 0 错误 · 自检 **415 项 / 失败 0**（原 413，新增 cookie 补种与 Range 两条回归）·
+bot 测试 **18 项** · `build` 通过。真实文件（179 MB 非 faststart）本地实例 + 无头浏览器回归：
+`bytes=0-` → `206 Content-Range: bytes 0-4194303/179437862`，浏览器接续请求 `524288-`、`4718592-`；
+正常网络 57 ms、2 Mbps 限速 4.4 s 均出画面；不带 Range 的「下载」仍是完整 200。
+隔离实例端到端：只带 header 调 `/session/state` 返回 `Set-Cookie`，之后仅带 cookie 的裸 URL 请求
+`/api/media/library` = 200（无凭据对照 401）。
+
+> 前几节里出现的 `1.3.18` / `1.3.19-test` 是当时的开发快照，保留作历史记录，不代表当前版本。
+
+---
+
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.18`（镜像 `rdevils7/tgsub:v1.3.18` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.19-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.20`（镜像 `rdevils7/tgsub:v1.3.20` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.21-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.19-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.19`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.19` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.20-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.21-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.21`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.21` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.22-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

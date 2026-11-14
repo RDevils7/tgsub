@@ -8,6 +8,7 @@ import {
   currentSession,
   destroyOtherSessions,
   destroySession,
+  ensureSessionCookie,
   getAccount,
   login,
   setupAccount,
@@ -51,6 +52,8 @@ sessionRouter.get(
     const account = getAccount();
     const session = currentSession(req);
     noStore(res);
+    // 页面第一个请求就把 cookie 补回来：后面海报 / 播放流的裸 URL 请求才带得上凭据
+    ensureSessionCookie(req, res);
     res.json({
       configured: Boolean(account),
       authenticated: Boolean(session) || env.authDisabled,

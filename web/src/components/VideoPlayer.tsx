@@ -41,6 +41,16 @@ const AUTONEXT_KEY = "tgsub.media.autonext";
 const RESTART_DELAY = 280;
 /** 控制条自动隐藏延时 */
 const IDLE_HIDE = 2800;
+/**
+ * 起播看门狗：这么久还没收到任何可解码数据就不再无限转圈。
+ * 裸 URL（<img>/<video>）只能带 cookie，会话丢失、反代缓冲大文件、
+ * Range 被中间设备拦掉时，浏览器既拿不到数据也不报 error，界面会永远停在「缓冲中…」。
+ */
+const STALL_TIMEOUT = 10_000;
+const STALL_HINT =
+  "视频数据一直没到：10 秒内浏览器没收到任何可解码的字节。常见原因是登录状态失效" +
+  "（退出后重新登录并勾选「保持登录」）、反向代理缓冲了大文件，或 Range 请求被中间设备拦截。" +
+  "可以点「重试播放」，或点左下角「下载」用本地播放器看。";
 
 function readVolume(): number {
   try {
@@ -71,7 +81,8 @@ export interface VideoPlayerProps {
   /** 顶部小标签，例如「显卡转码 · HEVC」 */
   badge?: string | null;
   poster?: string | null;
-  onError: () => void;
+  /** 播放失败；带 reason 时优先展示更具体的排查提示 */
+  onError: (reason?: string) => void;
   hasPrev: boolean;
   hasNext: boolean;
   onPrev: () => void;
@@ -150,6 +161,44 @@ export function VideoPlayer({
     if (!seekable || appliedStart <= 0) return src;
     return `${src}${src.includes("?") ? "&" : "?"}start=${appliedStart.toFixed(2)}`;
   }, [src, seekable, appliedStart]);
+
+  /**
+   * 起播看门狗：切集 / 重新起流时重置。只要一个字节都没到，就交给上层显示
+   * 明确的原因和「重试播放 / 下载」，而不是把用户困在无限转圈里。
+   * onError 用 ref 转发：上层常写成内联箭头函数，直接进依赖会每次渲染都重置计时器。
+   */
+  const stallTimer = useRef<number | null>(null);
+  const stallFired = useRef(false);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  const clearStallTimer = useCallback(() => {
+    if (stallTimer.current !== null) {
+      window.clearTimeout(stallTimer.current);
+      stallTimer.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    stallFired.current = false;
+    clearStallTimer();
+    stallTimer.current = window.setTimeout(() => {
+      stallTimer.current = null;
+      if (stallFired.current) return;
+      const el = videoRef.current;
+      if (!el || el.readyState >= 2) return;
+      let hasData = false;
+      try {
+        hasData = el.buffered.length > 0;
+      } catch {
+        /* 元素已卸载，忽略 */
+      }
+      if (hasData) return; // 在收数据，只是还没攒够一帧
+      stallFired.current = true;
+      onErrorRef.current(STALL_HINT);
+    }, STALL_TIMEOUT);
+    return clearStallTimer;
+  }, [streamSrc, restartKey, clearStallTimer]);
 
   /* --------------------------- 视频元素生命周期 --------------------------- */
 
@@ -480,6 +529,7 @@ export function VideoPlayer({
           holdPos.current = false;
           setSeeking(false);
           setBuffering(false);
+          clearStallTimer();
         }}
         onWaiting={() => setBuffering(true)}
         onPlaying={() => setBuffering(false)}
@@ -518,7 +568,7 @@ export function VideoPlayer({
           setShowControls(true);
           if (autonext && hasNext) onNext();
         }}
-        onError={onError}
+        onError={() => onError()}
       />
 
       {/* 顶部：模式标签 */}

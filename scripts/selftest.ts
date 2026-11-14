@@ -103,7 +103,8 @@ import {
   validId,
 } from "../server/src/tg/discussionplan";
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
-import { parseCookie, parseCookies } from "../server/src/auth/cookie";
+import { needsCookieRepair, parseCookie, parseCookies } from "../server/src/auth/cookie";
+import { parseRange, RANGE_CHUNK } from "../server/src/lib/range";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
@@ -2658,6 +2659,30 @@ async function loginChecks(): Promise<void> {
     assert.ok(confirmProblem("abcdefgh", "abcdefgi"));
   });
 
+  /**
+   * 回归「视频一直缓冲中」：非 faststart MP4 的 moov 在文件尾，
+   * 开放式 Range 必须分段回，让浏览器能立刻发下一段请求去取尾部索引，
+   * 而不是一条 206 覆盖整份文件、把连接挂死。
+   */
+  check("媒体流 Range：开放式请求按段截断，尾部与显式区间照办", () => {
+    const size = 179_437_862;
+    assert.deepEqual(parseRange("bytes=0-", size), { start: 0, end: RANGE_CHUNK - 1 });
+    assert.deepEqual(parseRange("bytes=32768-", size), { start: 32768, end: 32768 + RANGE_CHUNK - 1 });
+    // 浏览器读 moov 时发的起点必须原样生效
+    assert.deepEqual(parseRange("bytes=179044352-", size), { start: 179044352, end: size - 1 });
+    // 明确给了 end 的不截断
+    assert.deepEqual(parseRange("bytes=0-1023", size), { start: 0, end: 1023 });
+    // 后缀写法取文件尾，浏览器拿 moov 也常用这个
+    assert.deepEqual(parseRange("bytes=-500", size), { start: size - 500, end: size - 1 });
+    assert.deepEqual(parseRange("bytes=-", size), null);
+    assert.deepEqual(parseRange("bytes=abc-", size), null);
+    assert.deepEqual(parseRange("garbage", size), null);
+    // 越界起点交给路由回 416
+    assert.deepEqual(parseRange("bytes=999999999-", size), { start: size, end: size - 1 });
+    // 小文件：一段就够了，不能算出超过文件末尾的 end
+    assert.deepEqual(parseRange("bytes=0-", 1024), { start: 0, end: 1023 });
+  });
+
   check("Cookie 解析：同名子串、引号、空值、编码", () => {
     assert.equal(parseCookie("a=1; tgsub_sid=abc-123", "tgsub_sid"), "abc-123");
     assert.equal(parseCookie(undefined, "tgsub_sid"), "");
@@ -2686,6 +2711,27 @@ async function loginChecks(): Promise<void> {
     // 空值不计入（浏览器偶尔会带 name= 的空 cookie）
     assert.equal(parseCookies("tgsub_sid=; tgsub_sid=ok", "tgsub_sid").length, 1);
     assert.deepEqual(parseCookies(null, "tgsub_sid"), []);
+  });
+
+  /**
+   * 回归「海报破图 + 视频打不开」：cookie 丢了但 X-Tgsub-Session 头还有效时，
+   * 界面和列表能正常开，<img> / <video> 这类带不了自定义头的请求却全被挡成 401。
+   * 补种判断必须在「没有生效会话」时保持安静，别给未登录请求乱写 cookie。
+   */
+  check("会话 cookie 补种：仅在 header 兜底且 cookie 失效时重写", () => {
+    assert.equal(needsCookieRepair(undefined, "tgsub_sid", "tok-1"), true);
+    assert.equal(needsCookieRepair("", "tgsub_sid", "tok-1"), true);
+    // cookie 已经是生效的那条 → 不重复下发 Set-Cookie
+    assert.equal(needsCookieRepair("theme=dark; tgsub_sid=tok-1", "tgsub_sid", "tok-1"), false);
+    // 旧 cookie / 换了访问地址留下的残留 → 必须重写
+    assert.equal(needsCookieRepair("tgsub_sid=old", "tgsub_sid", "tok-1"), true);
+    // 多个同名 cookie 里只要含生效 token 就不重写
+    assert.equal(needsCookieRepair("tgsub_sid=old; tgsub_sid=tok-1", "tgsub_sid", "tok-1"), false);
+    // 没有通过校验的会话：一律不动 cookie
+    assert.equal(needsCookieRepair(undefined, "tgsub_sid", null), false);
+    assert.equal(needsCookieRepair("tgsub_sid=old", "tgsub_sid", ""), false);
+    // URL 编码过的 cookie 值要和 header 里的原始 token 对得上
+    assert.equal(needsCookieRepair("tgsub_sid=a%2Db", "tgsub_sid", "a-b"), false);
   });
 }
 

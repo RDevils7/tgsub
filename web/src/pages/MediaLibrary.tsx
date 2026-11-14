@@ -1535,7 +1535,7 @@ function PlayerDialog({
             hasNext={hasNext}
             onPrev={onPrev}
             onNext={onNext}
-            onError={() => setFailed(errorCopy())}
+            onError={(reason) => setFailed(reason || errorCopy())}
           />
         )}
 

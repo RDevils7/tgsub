@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Router } from "express";
 import { asyncHandler, assert } from "../lib/http";
+import { parseRange } from "../lib/range";
 import { env } from "../env";
 import { logger } from "../logger";
 import { ffmpegInfo, hwCapability } from "../tg/ffmpeg";
@@ -282,33 +283,12 @@ const MIME_BY_EXT: Record<string, string> = {
   ".wmv": "video/x-ms-wmv",
 };
 
-/** 解析 `bytes=start-end`；返回 null 表示这个头用不了（按整段发） */
-function parseRange(header: string, size: number): { start: number; end: number } | null {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!match) return null;
-  const [, rawStart, rawEnd] = match;
-  if (!rawStart && !rawEnd) return null;
-  let start: number;
-  let end: number;
-  if (!rawStart) {
-    // bytes=-500 表示最后 500 字节
-    const tail = Number(rawEnd);
-    if (!Number.isFinite(tail) || tail <= 0) return null;
-    start = Math.max(0, size - tail);
-    end = size - 1;
-  } else {
-    start = Number(rawStart);
-    end = rawEnd ? Number(rawEnd) : size - 1;
-  }
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  if (start >= size || start < 0) return { start: size, end: size - 1 };
-  return { start, end: Math.min(end, size - 1) };
-}
-
 /**
  * 播放本地视频。
  *
- * - 默认（direct）：按 Range 直出原文件，能拖进度条，mp4 / webm 走这条
+ * - 默认（direct）：按 Range 直出原文件，能拖进度条，mp4 / webm 走这条。
+ *   开放式 Range 按 4MB 分段回（见 lib/range.ts），非 faststart（moov 在文件尾）
+ *   的 MP4 才能立刻拿到尾部索引，不会被一条覆盖整份文件的响应拖死。
  * - `mode=remux`：容器不对但编码能解（mkv / ts 里的 h264），
  *   用 ffmpeg 把流换封装成 fragmented MP4 吐出来。这条路没有 Content-Length，
  *   也拖不了进度条 —— 实时转封装就是这个特性，界面上会说明。

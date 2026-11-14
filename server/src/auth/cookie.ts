@@ -38,3 +38,15 @@ export function parseCookies(header: string | undefined | null, name: string): s
 export function parseCookie(header: string | undefined | null, name: string): string {
   return parseCookies(header, name)[0] ?? "";
 }
+
+/**
+ * 是否需要把 token 补写回 cookie（纯函数，便于自检）。
+ *
+ * `<img>` / `<video>` 这类请求只能带 cookie，带不了自定义 session 头。
+ * token 为 null 表示本次请求根本没有通过校验的会话，不能动 cookie；
+ * cookie 里已经有这条生效 token 时也不用重复下发 Set-Cookie。
+ */
+export function needsCookieRepair(header: string | undefined | null, name: string, token: string | null): boolean {
+  if (!token) return false;
+  return !parseCookies(header, name).includes(token);
+}
