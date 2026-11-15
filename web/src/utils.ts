@@ -245,3 +245,45 @@ export function parseApiText<T = unknown>(
     return { status, ok, data: null };
   }
 }
+
+export interface StallProbe {
+  /** 带会话头探测播放地址的响应状态；null = 超时 / 网络失败 / 实时流未探测 */
+  streamStatus: number | null;
+  /** 带会话头探测 /session/state 的登录态；null = 没拿到 */
+  stateAuthenticated: boolean | null;
+  /** 是否已尝试重新同步会话 cookie */
+  cookieSynced: boolean;
+  /** 是不是原文件直出（非 remux / transcode 实时流） */
+  direct: boolean;
+  /** 看门狗等待秒数 */
+  waitedSec: number;
+}
+
+/**
+ * 起播看门狗的失败分诊：把「猜原因」换成实测证据。
+ *
+ * 裸 URL（`<img>` / `<video>`）只能带 cookie，带不了自定义会话头；反代缓冲大响应、
+ * Range 被拦、非 faststart 的尾部 moov 取不到，都会表现成「一直缓冲中」且不触发 error。
+ * 这里按 /session/state 与播放地址的探测结果给出可读结论，纯函数便于自检。
+ */
+export function describeStall(p: StallProbe): string {
+  const head = `视频数据一直没到：浏览器在 ${p.waitedSec} 秒内没收到任何可解码的字节。`;
+  const tail = "可以点「重试播放」，或点左下角「下载」用本地播放器看。";
+  if (p.stateAuthenticated === false) {
+    return `${head}探测显示登录状态已失效（/session/state 未认证）：请退出后重新登录，并勾选「保持登录」。${tail}`;
+  }
+  if (p.streamStatus === 401) {
+    return `${head}播放请求被登录校验挡回（HTTP 401）：裸 URL 只带 cookie，cookie 没种上或已过期。` +
+      `${p.cookieSynced ? "已自动重新同步一次登录状态，" : "请退出后重新登录并勾选「保持登录」，"}${tail}`;
+  }
+  if (p.streamStatus !== null && p.streamStatus >= 400) {
+    return `${head}播放地址返回 HTTP ${p.streamStatus}（不是视频数据）：文件可能被移动、目录不在允许范围，或中间设备改写了响应。${tail}`;
+  }
+  if (p.streamStatus === null) {
+    return `${head}带会话头探测播放地址也超时/失败：请求被挂起，常见原因是反向代理缓冲了大响应、` +
+      `Range 请求被中间设备拦截，或 NAS 磁盘正忙。${tail}`;
+  }
+  return `${head}带会话头探测播放接口正常（HTTP ${p.streamStatus}），但浏览器原生 <video> 请求没拿到数据：` +
+    `通常是会话 cookie 没种上或被拦${p.direct ? "、或非 faststart 文件的尾部索引没取到" : "（实时流起流偏慢也可能）"}。` +
+    `${p.cookieSynced ? "已自动重新同步登录状态，" : "请退出后重新登录并勾选「保持登录」，"}${tail}`;
+}

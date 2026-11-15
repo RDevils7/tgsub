@@ -644,8 +644,12 @@ export interface MediaEpisode {
   videoCodec: string | null;
   /** direct = 原生播放（可拖进度条），remux = 服务端换封装，transcode = 显卡转码，unsupported = 播不了 */
   playMode: "direct" | "remux" | "transcode" | "unsupported";
+  /** MP4 的 moov 在文件尾（非 faststart）：服务端已改走实时换封装，避免 Range 直出卡死 */
+  compatStream?: boolean;
   /** 播放地址（已按 playMode 选好模式） */
   streamUrl: string;
+  /** 下载原文件的地址：永远是 direct 完整 200，不受播放兼容降级影响 */
+  downloadUrl?: string;
   /** 缩略图地址（下载时生成的图或服务端抽帧，取不到图时为 null） */
   thumbUrl: string | null;
   /** .strm 链接文件：播放走服务端转发，封面由播放器在播放时截取并落在同级目录 */

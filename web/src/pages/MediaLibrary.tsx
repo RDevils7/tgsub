@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, syncSessionCookie } from "../api";
 import type { MediaEpisode, MediaHwInfo, MediaLibraryResponse, MediaSeries, MediaSeriesResponse } from "../types";
 import { Button, EmptyState, Modal, Spinner, useToast } from "../components/ui";
 import { VideoPlayer } from "../components/VideoPlayer";
@@ -1377,11 +1377,32 @@ function PlayerDialog({
   const [failed, setFailed] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [poster, setPoster] = useState(episode.thumbUrl);
+  const [cookieReady, setCookieReady] = useState(false);
+  /** 直出没拿到数据时自动切到兼容通道（mode=remux），只降一次 */
+  const [compatMode, setCompatMode] = useState(false);
 
   useEffect(() => {
     setFailed(null);
     setRetryKey(0);
     setPoster(episode.thumbUrl);
+    setCompatMode(false);
+  }, [episode.path]);
+
+  /**
+   * 播放器的 `<video>` / 海报 `<img>` 是裸 URL，只能带 cookie，带不了自定义会话头。
+   * 挂载前先带 header 调一次 /session/state（服务端会补种 cookie），
+   * 再让这些请求发出去；syncSessionCookie 自带 3 秒超时，不会把播放器卡住。
+   */
+  useEffect(() => {
+    let alive = true;
+    setCookieReady(false);
+    void syncSessionCookie().then(() => {
+      if (alive) setCookieReady(true);
+    });
+    return () => {
+      alive = false;
+    };
+    // 只在切集时补种：同一集的重试 / 兼容降级不该再挡 3 秒，cookie 也不会凭空消失
   }, [episode.path]);
 
   /**
@@ -1429,8 +1450,26 @@ function PlayerDialog({
 
   const remux = episode.playMode === "remux";
   const transcode = episode.playMode === "transcode";
+  /** 兼容降级后走的是同一条 fMP4 实时流，进度条语义跟着变 */
+  const effectiveRemux = remux || compatMode;
   /** 实时流（换封装 / 转码）：没有 Content-Length，跳转只能重开一路流 —— 见 VideoPlayer */
-  const seekable = remux || transcode;
+  const seekable = effectiveRemux || transcode;
+
+  /**
+   * 直出始终没拿到数据时自动降级：把播放地址的 mode=direct 换成 mode=remux。
+   * 服务端已按 moov 位置预先判断，这里只兜住「判成 faststart 但链路仍然卡」的情况。
+   * 下载按钮继续用原始 streamUrl（不带 Range 的完整 200），不受影响。
+   */
+  const streamSrc = useMemo(() => {
+    if (!compatMode) return episode.streamUrl;
+    try {
+      const u = new URL(episode.streamUrl, window.location.origin);
+      u.searchParams.set("mode", "remux");
+      return `${u.pathname}${u.search}`;
+    } catch {
+      return episode.streamUrl;
+    }
+  }, [compatMode, episode.streamUrl]);
 
   const errorCopy = () => {
     const codec = episode.videoCodec?.toUpperCase() ?? "";
@@ -1462,7 +1501,7 @@ function PlayerDialog({
         episode.durationSec ? formatDuration(episode.durationSec) : null,
         resolutionLabel(episode.height),
         episode.videoCodec?.toUpperCase() ?? null,
-        transcode ? "显卡转码" : remux ? "实时换封装" : null,
+        transcode ? "显卡转码" : effectiveRemux ? "实时换封装" : null,
       ]
         .filter(Boolean)
         .join(" · ")}
@@ -1470,7 +1509,7 @@ function PlayerDialog({
       footer={
         <>
           <a
-            href={episode.streamUrl}
+            href={episode.downloadUrl ?? episode.streamUrl}
             download={episode.name}
             className="btn-ghost mr-auto flex items-center gap-1.5 text-[12.5px]"
             title="下载这个文件（原文件，不转码）"
@@ -1507,10 +1546,14 @@ function PlayerDialog({
               重试播放
             </Button>
           </div>
+        ) : !cookieReady ? (
+          <div className="flex aspect-video w-full items-center justify-center rounded-2xl bg-black text-[12.5px] text-slate-400 ring-1 ring-white/[0.06]">
+            正在准备播放…
+          </div>
         ) : (
           <VideoPlayer
             key={`${episode.path}#${retryKey}`}
-            src={episode.streamUrl}
+            src={streamSrc}
             seekable={seekable}
             durationSec={episode.durationSec}
             poster={poster}
@@ -1519,8 +1562,8 @@ function PlayerDialog({
                 ? "链接播放"
                 : transcode
                   ? "显卡转码"
-                  : remux
-                    ? "实时换封装"
+                  : effectiveRemux
+                    ? episode.compatStream || compatMode ? "兼容播放" : "实时换封装"
                     : episode.trial
                       ? "HEVC 直连"
                       : "原文件直出",
@@ -1529,13 +1572,28 @@ function PlayerDialog({
               .filter(Boolean)
               .join(" · ")}
             preload={episode.isStrm ? "metadata" : "auto"}
+            stallFallback={!compatMode && episode.playMode === "direct"}
             autoPoster={Boolean(episode.isStrm && !poster)}
             onSavePoster={episode.isStrm ? savePoster : undefined}
             hasPrev={hasPrev}
             hasNext={hasNext}
             onPrev={onPrev}
             onNext={onNext}
-            onError={(reason) => setFailed(reason || errorCopy())}
+            onError={(reason) => {
+              /**
+               * 直出始终拿不到数据时，先自动切一次兼容通道（fMP4 实时换封装），
+               * 不直接把用户丢到错误页。服务端已按 moov 位置预判过，这里是兜底：
+               * 覆盖「判成 faststart、但这条链路上 Range 仍然被卡住」的情况。
+               */
+              if (!compatMode && episode.playMode === "direct") {
+                setCompatMode(true);
+                setFailed(null);
+                setRetryKey((n) => n + 1);
+                toast.push("直出没拿到视频数据，已自动切换到兼容播放", "info");
+                return;
+              }
+              setFailed(reason || errorCopy());
+            }}
           />
         )}
 
@@ -1550,8 +1608,11 @@ function PlayerDialog({
                 "这种流没有总长度，进度条是自绘的：拖动它、或在上方输入框里填「秒 / 分:秒」回车，都会让服务端从那一秒重新起一路流，等 1~3 秒。"
               : episode.trial
                 ? "HEVC 直连：靠这台浏览器的解码器播；黑屏或报错说明它解不了，可在工具栏关掉「HEVC 直连」改走显卡转码。进度条可以直接拖。"
-                : remux
-                  ? "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放；跳转同样是从目标秒重新起一段流，等 1 秒左右。"
+                : effectiveRemux
+                  ? episode.compatStream || compatMode
+                    ? "这个 MP4 的索引（moov）在文件尾，浏览器直出要先跳到尾部取索引，部分网络环境会把这次请求卡住（一直缓冲且没有报错）。" +
+                      "服务端已改成实时换封装成 MP4 边下边播；跳转是从目标秒重新起一段流，等 1 秒左右。"
+                    : "这个文件是 MKV / TS 这类容器，服务端正在实时换封装成 MP4 播放；跳转同样是从目标秒重新起一段流，等 1 秒左右。"
                   : "原文件直出（支持 Range），拖动进度条和「跳到指定秒」都是瞬时的。"}
             <span className="ml-1 text-slate-600">{episode.name}</span>
           </p>

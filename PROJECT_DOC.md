@@ -2239,14 +2239,57 @@ bot 测试 **18 项** · `build` 通过。真实文件（179 MB 非 faststart）
 
 ---
 
+## 1.3.21：非 faststart MP4 改走兼容播放通道
+
+1.3.20 上线后用户实测三项：`/api/session/state` → `authenticated:true`（cookie 正常）、
+「可以下载」、「重试播放无效」。下载按钮与 `<video src>` 共用 `episode.streamUrl`，
+因此差异被精确锁定为「有没有 `Range` 请求头」：不带 Range 的完整 200 通，带 Range 的零字节、
+`readyState < 2`、连 `error` 都不触发。
+
+排除项：编码 `avc1`(H.264) + `mp4a`(AAC)；顶层原子
+`ftyp(32) + free(8) + mdat(401641950)@40 + moov@401641990(430623)` 声明正常、文件未损坏；
+系统代理 bypass 含 `192.168.*`；海报墙图片全 `loading="lazy"` 且缩略图侧车齐全（不现场抽帧），
+排除连接池占满；生产日志升级后 0 warn/error。用户浏览器实际是 **Brave**（此前一直找成 Edge/Chrome）。
+
+**决定性复现**：把这份真实 402 MB 文件拉到本地，隔离实例 + 无头 Edge CDP 走 `mode=direct`
+→ 633 ms `loadedmetadata` / 777 ms 出画面 / `readyState 4`。后端分段 Range 无 bug，
+差异在生产链路（容器端口映射 / NAS 网络 / 浏览器）。
+
+**关键推理**：`<video>` 无论文件是否 faststart，首个请求必带 `Range: bytes=0-`；
+「下载能用」证明不带 Range 的 200 是通的。所以 faststart 化未必能救（Range 照样发），
+只有走 **不带 Range 的 fMP4 实时换封装** 才能确定绕开。本地 `mode=remux` 验证：
+响应 `200 + Transfer-Encoding: chunked`（无 `Content-Length` / `Content-Range`），
+浏览器 122 ms 拿到首块并正常播放。生产镜像内置系统 ffmpeg `/usr/bin/ffmpeg`。
+
+- `server/src/lib/mp4atoms.ts`（新增）：`topLevelBoxes()` / `faststartFromHead()` 纯函数
+  （`ftyp`+`mdat` 在前 → `false`；`moov` 在前 → `true`；信息不足 → `null`），
+  `needsRemuxForFaststart()` 只读 1 MB 文件头、按 `size+mtime` 缓存（上限 500）、异常保守返回 `false`。
+- `server/src/tg/medialib.ts`：`buildEpisode` 对 `baseMode === "direct"` 的非 strm 文件判定，
+  命中改 `playMode = "remux"`；`LibraryEpisode` 加 `compatStream`。
+- `server/src/routes/media.ts`：`decorateEpisode` 新增 **`downloadUrl`（固定 `mode=direct`）**——
+  必须，否则播放改 remux 后「下载」会拿到无总长度的 fMP4 流，破坏已确认可用的下载。
+- 前端：`MediaEpisode` 加 `compatStream?` / `downloadUrl?`；`EpisodePlayer` 加 `compatMode`
+  自动降级（看门狗触发把 `mode=direct` 换成 `mode=remux`，只降一次），`effectiveRemux`
+  统一 badge / `seekable` / 说明文案；`VideoPlayer` 加 `stallFallback`，能降级时跳过分诊立刻交还控制权。
+- 另含上一轮未发布的加固：`syncSessionCookie()`（挂载播放器前补种 cookie）、
+  `describeStall()` 分诊、看门狗 10 s → 15 s。
+
+**验证**：`typecheck` 0 错误 · 自检 **417 项 / 失败 0** · bot **18 项** · `build` 通过。
+隔离实例 `/api/media/series`：402 MB 文件 → `playMode:"remux"`, `compatStream:true`,
+`durationSec:396.23`；人造 faststart 头样本 → `playMode:"direct"`（不误伤）。
+下载 URL `200 + Content-Length:402072613 + Accept-Ranges:bytes`；播放 URL `200 + chunked`。
+真实浏览器 remux：122 ms 首块、`readyState 4`、`playing`、无 `error`。
+
+---
+
 ## 版本命名与发版节奏
 
-- **已发布正式版**：`1.3.20`（镜像 `rdevils7/tgsub:v1.3.20` 与 `latest`）。
-- **未发布的改动一律记成 `1.3.21-test`**：不管中间改了多少轮、多少个功能，
+- **已发布正式版**：`1.3.21`（镜像 `rdevils7/tgsub:v1.3.21` 与 `latest`）。
+- **未发布的改动一律记成 `1.3.22-test`**：不管中间改了多少轮、多少个功能，
   在用户明确说「提交 / 发版」之前，工作区版本号始终是这个值，**不单独升小版本、不 commit、不 push、不打 tag**。
-  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.21-test`，便于一眼区分 NAS 上跑的正式镜像。
-- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.21`），重写 README「本版更新」，
-  再 commit → push main → 打 `v1.3.21` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.22-test`。
+  设置页底部、`/api/health`、镜像内 `APP_VERSION` 都会显示 `1.3.22-test`，便于一眼区分 NAS 上跑的正式镜像。
+- **正式发版时**：把所有版本号里的 `-test` 去掉（变成 `1.3.22`），重写 README「本版更新」，
+  再 commit → push main → 打 `v1.3.22` 标签 → 等 CI → 核验镜像。之后下一批未提交改动顺延为 `1.3.23-test`。
 - 版本号出现的位置：三个 `package.json`、`package-lock.json`（顶层 + `packages[""]` + `server` + `web` 共 4 处）、
   `server/src/version.ts`、`Dockerfile` 的 `ARG APP_VERSION`、README 徽章。
   `package-lock.json` 里同名的依赖版本（如 `@img/sharp-libvips-*` 的 `1.3.4`、`parseurl` 的 `1.3.3`）不要动。

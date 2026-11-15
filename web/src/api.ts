@@ -112,6 +112,35 @@ export function clearSessionToken(): void {
   }
 }
 
+/** 供播放器诊断用：读当前会话 token（<img>/<video> 带不了自定义头） */
+export function getSessionToken(): string {
+  return sessionToken;
+}
+
+/**
+ * 主动把会话补回 cookie。
+ *
+ * `<img src>` / `<video src>` 是浏览器原生请求，只能带 cookie；而界面里的接口
+ * 走 `X-Tgsub-Session` 头。服务端在 `/api/session/state` 上会顺手补种 cookie，
+ * 所以打开播放器前带 header 调一次，就能让随后的裸 URL 请求带上凭据。
+ * 失败也不能挡住播放器：3 秒超时兜底，真实原因交给起播看门狗去探测。
+ */
+export async function syncSessionCookie(): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    await fetch("/api/session/state", {
+      credentials: "same-origin",
+      headers: sessionToken ? { "X-Tgsub-Session": sessionToken } : {},
+      signal: controller.signal,
+    });
+  } catch {
+    /* 网络慢 / 被拦：不阻塞播放器 */
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");

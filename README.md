@@ -4,11 +4,11 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.20-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.21-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
 </p>
 
-> 当前正式版 **1.3.20**（镜像 `rdevils7/tgsub:v1.3.20` / `latest`）。本页只讲**部署与使用**；配置项全集、HTTP 接口、排错细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
+> 当前正式版 **1.3.21**（镜像 `rdevils7/tgsub:v1.3.21` / `latest`）。本页只讲**部署与使用**；配置项全集、HTTP 接口、排错细节见 [PROJECT_DOC.md](PROJECT_DOC.md)。
 
 ```
 频道 → 定时扫描 → 关键词命中 → 下载队列 → 剧集命名 + NFO/封面 → 本地媒体库 + Web 界面
@@ -16,18 +16,20 @@
 
 ---
 
-## 本版更新（1.3.20）
+## 本版更新（1.3.21）
 
-修复媒体库「海报全破图 / 视频打不开 / 一直缓冲中」这一组线上问题。
+彻底解决媒体库「视频一直缓冲中 / 海报破图」这一组线上问题，并补上播放失败时的自动兜底。
 
 | 改动 | 说明 |
 | --- | --- |
-| **会话 cookie 自动补种** | 界面和列表走 `X-Tgsub-Session` 请求头，但 `<img>` / `<video>` 这类裸 URL 只能带 cookie。cookie 丢了（会话级 cookie 关浏览器即失效等）就会出现「列表正常、海报全破图、视频 401」。现在已认证请求会把生效会话补写回 cookie，首屏 `/session/state` 也提前补一次；**不放宽任何鉴权**，token 不进 URL |
-| **视频流分段 Range** | Telegram 下来的 MP4 常是「`mdat` 在前、`moov` 在文件尾」的非 faststart 文件，浏览器要靠 Range 取尾部索引才能解第一帧。原来 `bytes=0-` 一条 206 覆盖整份文件，慢链路或反代缓冲时会一直挂着；现在开放式 Range 单次最多回 **4 MB**，浏览器立刻能请求下一段并取到 `moov`。显式 `end`、`bytes=-N` 后缀与不带 Range 的「下载」按钮语义不变 |
-| **起播看门狗** | 10 秒内一个可解码字节都没到，不再无限转圈，直接给出具体原因（登录失效 / 反代缓冲 / Range 被拦）以及「重试播放」「下载」入口 |
+| **非 faststart MP4 自动走兼容通道** | Telegram 下来的 MP4 大多是「`mdat` 几百 MB 在前、`moov` 索引在文件尾」。`<video>` 必须靠 Range 跳到尾部取索引才能解第一帧；部分链路（NAS 端口映射、反代缓冲、浏览器对 206 的处理差异）会把这条请求挂死，表现就是「海报正常、视频永远缓冲、连 `error` 都不触发」。现在列表接口只读 1 MB 文件头判断原子顺序，命中就自动用 ffmpeg `-c copy` 实时换封装成 fragmented MP4（`empty_moov`）：从头就能边收边解，**不需要任何 Range 或尾部 seek**。faststart 文件仍走原生 Range 直出，拖进度条瞬时生效 |
+| **起播失败自动降级** | 万一文件被判成 faststart 但链路上 Range 仍被卡住，看门狗触发后自动把 `mode=direct` 切成 `mode=remux` 再试一次（只降一次、有提示），不再把用户丢在错误页 |
+| **下载固定拿原文件** | 播放改走兼容通道后，「下载」按钮单独固定为 `mode=direct` 的完整 200（带 `Content-Length`），不会变成没有总长度的 fMP4 流 |
+| **会话 cookie 补种 + 分诊** | 打开播放器前先带会话头调一次 `/session/state` 补种 cookie；看门狗放宽到 15 秒，触发后实测登录态与播放地址状态码，给出具体原因而不是「可能是 XXX」 |
 
-- 校验：`typecheck` 0 错误、自检 **415** 项、bot 测试 **18** 项、`build` 全绿；用真实 179 MB 非 faststart 文件做无头浏览器回归，正常网络与 2 Mbps 限速都能起播，`bytes=0-` 返回 `206 Content-Range: bytes 0-4194303/179437862`。
-- 1.3.19 的 AI 功能 A/B/C（补全 NFO / 命名兜底 / 日志诊断）、1.3.18 的机器人直接收文件等全部保留。
+- 兼容通道下进度条改为「从目标秒重新起一段流」（等 1 秒左右）；时长仍来自服务端 ffprobe，不会变成 `Infinity`。
+- 校验：`typecheck` 0 错误、自检 **417** 项、bot 测试 **18** 项、`build` 全绿；用真实的 **402 MB** 非 faststart 文件做端到端验证：列表判成 `remux`、播放 122 ms 出首块并正常出画面、下载仍是 `Content-Length: 402072613` 的完整原文件；人造 faststart 样本仍判 `direct`（不误伤）。
+- 1.3.20 的会话 cookie 自动补种、开放式 Range 单次 4 MB 分段、起播看门狗，以及 1.3.19 的 AI 功能 A/B/C（补全 NFO / 命名兜底 / 日志诊断）等全部保留。
 
 ---
 
@@ -152,7 +154,7 @@ docker compose up -d && docker compose logs -f --tail=200
 | 标签 | 含义 |
 | --- | --- |
 | `latest` | 最新一次 `v*` 发布 |
-| `v1.3.20` | 固定版本，**生产建议锁定** |
+| `v1.3.21` | 固定版本，**生产建议锁定** |
 
 push 到 `main` 只跑构建与冒烟测试、不发镜像；打 tag 才构建 amd64 + arm64 并推送。
 
@@ -175,8 +177,9 @@ curl -s http://<IP>:6789/api/health            # 查版本
 | 容器 running 但网页打不开 | `docker port tgsub` 查映射；`docker exec tgsub node -e "fetch('http://127.0.0.1:6789/api/health').then(r=>r.text()).then(console.log)"` 有 JSON 即服务正常，问题在端口 / 防火墙 / 反代（镜像内无 curl）；用 http 不是 https |
 | 忘记管理密码 | 临时 `AUTH_DISABLED: "1"` → 重设密码 → 删掉重启 |
 | 登录框刷「连接异常，延迟重连」 | 代理没生效，设置页点「联网测试」 |
-| 机器人发文件没反应 | 确认已升级到 1.3.20、bot 在线；纯图片需打开「🖼 图片下载」；任务失败看日志里的 `bot-media-*` 记录 |
-| 海报全破图 / 视频点不开 | 退出登录后重新登录并**勾选「保持登录」**；1.3.20 起已认证请求会自动补种会话 cookie，播放器 10 秒没数据会给出明确原因 |
+| 机器人发文件没反应 | 确认已升级到 1.3.21、bot 在线；纯图片需打开「🖼 图片下载」；任务失败看日志里的 `bot-media-*` 记录 |
+| 海报全破图 / 视频点不开（401） | 退出登录后重新登录并**勾选「保持登录」**；1.3.20 起已认证请求会自动补种会话 cookie |
+| 视频一直「缓冲中…」/ 看门狗报错 | 1.3.21 起非 faststart MP4 自动改走实时换封装（badge 显示「兼容播放」），不再依赖 Range 取尾部索引；仍卡住会先自动降级、再给出实测原因。左下角「下载」始终是完整原文件，可先用本地播放器看 |
 | 新集不出现在 Emby | 查地址 / API Key / 路径映射，点「测试连接」；再确认 Emby 已勾本地 NFO |
 | 评论区链接报「不在讨论组里」 | 会依次试 6 条路定位讨论组；私密群 + 账号不在群里只能先用同一账号加群 |
 | 网页视频 `403` / 一直 `Just a moment...` | Cloudflare 挑战会由无头浏览器自动过（15~30 秒）；老任务里的 `&amp;` 已自动还原，点「重试」即可 |

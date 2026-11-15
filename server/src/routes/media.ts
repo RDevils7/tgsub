@@ -81,6 +81,12 @@ function decorateEpisode(episode: LibraryEpisode) {
   return {
     ...episode,
     streamUrl: streamUrl(episode.path, episode.playMode),
+    /**
+     * 「下载」永远拿原文件：不受播放模式影响。播放地址对非 faststart MP4 会带
+     * mode=remux（无 Content-Length 的实时流），拿它下载会得到一个没有总长度、
+     * 也不适合本地播放器的 fMP4 流。这里固定走 direct 的完整 200。
+     */
+    downloadUrl: streamUrl(episode.path, "direct"),
     thumbUrl: episode.isStrm && !localPoster ? null : thumbUrl(episode.path, episode.updatedAt || undefined),
     /**
      * 「试播」= 这一集是 HEVC，本来浏览器解不了，靠用户打开「直连」才变成直出/换封装。

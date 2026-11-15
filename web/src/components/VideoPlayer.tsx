@@ -15,7 +15,8 @@ import {
   IconVolumeMute,
 } from "./icons";
 import { Spinner } from "./ui";
-import { formatClock, parseSeekText } from "../utils";
+import { describeStall, formatClock, parseSeekText } from "../utils";
+import { getSessionToken } from "../api";
 
 /**
  * 媒体库播放器。
@@ -42,15 +43,19 @@ const RESTART_DELAY = 280;
 /** 控制条自动隐藏延时 */
 const IDLE_HIDE = 2800;
 /**
- * 起播看门狗：这么久还没收到任何可解码数据就不再无限转圈。
- * 裸 URL（<img>/<video>）只能带 cookie，会话丢失、反代缓冲大文件、
- * Range 被中间设备拦掉时，浏览器既拿不到数据也不报 error，界面会永远停在「缓冲中…」。
+ * 起播看门狗：这么久还没收到任何可解码数据就转入链路探测，再给出具体原因。
+ * 400MB 级的非 faststart MP4 要跨段取尾部 moov，NAS 上可能十几秒才出第一帧，
+ * 10 秒太容易误杀，放宽到 15 秒。
  */
-const STALL_TIMEOUT = 10_000;
-const STALL_HINT =
-  "视频数据一直没到：10 秒内浏览器没收到任何可解码的字节。常见原因是登录状态失效" +
-  "（退出后重新登录并勾选「保持登录」）、反向代理缓冲了大文件，或 Range 请求被中间设备拦截。" +
-  "可以点「重试播放」，或点左下角「下载」用本地播放器看。";
+const STALL_TIMEOUT = 15_000;
+/** 分诊时探测登录态 / 播放地址的超时（毫秒） */
+const STALL_PROBE_TIMEOUT = 5_000;
+
+function timeoutSignal(ms: number): AbortSignal {
+  const controller = new AbortController();
+  window.setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
 
 function readVolume(): number {
   try {
@@ -83,6 +88,11 @@ export interface VideoPlayerProps {
   poster?: string | null;
   /** 播放失败；带 reason 时优先展示更具体的排查提示 */
   onError: (reason?: string) => void;
+  /**
+   * 上层还能自动切到兼容通道时设为 true：起播看门狗触发后立刻交还控制权，
+   * 不再做分诊探测（那段探测的结果用户看不到，只会多等最多 10 秒）。
+   */
+  stallFallback?: boolean;
   hasPrev: boolean;
   hasNext: boolean;
   onPrev: () => void;
@@ -106,6 +116,7 @@ export function VideoPlayer({
   badge,
   poster,
   onError,
+  stallFallback = false,
   hasPrev,
   hasNext,
   onPrev,
@@ -163,14 +174,16 @@ export function VideoPlayer({
   }, [src, seekable, appliedStart]);
 
   /**
-   * 起播看门狗：切集 / 重新起流时重置。只要一个字节都没到，就交给上层显示
-   * 明确的原因和「重试播放 / 下载」，而不是把用户困在无限转圈里。
+   * 起播看门狗：切集 / 重新起流时重置。只要一个字节都没到，先实测链路再交给上层显示
+   * 具体原因和「重试播放 / 下载」，而不是甩一句「可能是 XXX」让用户猜。
    * onError 用 ref 转发：上层常写成内联箭头函数，直接进依赖会每次渲染都重置计时器。
    */
   const stallTimer = useRef<number | null>(null);
   const stallFired = useRef(false);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const stallFallbackRef = useRef(stallFallback);
+  stallFallbackRef.current = stallFallback;
 
   const clearStallTimer = useCallback(() => {
     if (stallTimer.current !== null) {
@@ -178,6 +191,54 @@ export function VideoPlayer({
       stallTimer.current = null;
     }
   }, []);
+
+  /** 分诊：带会话头分别探测登录态与播放地址，把「猜」换成实测状态码 */
+  const runStallDiagnosis = useCallback(async () => {
+    const token = getSessionToken();
+    const authHeaders: Record<string, string> = token ? { "X-Tgsub-Session": token } : {};
+    let stateAuthenticated: boolean | null = null;
+    let cookieSynced = false;
+    try {
+      const state = await fetch("/api/session/state", {
+        credentials: "same-origin",
+        headers: authHeaders,
+        signal: timeoutSignal(STALL_PROBE_TIMEOUT),
+      });
+      const body = (await state.json().catch(() => null)) as { authenticated?: boolean } | null;
+      stateAuthenticated = body?.authenticated ?? null;
+      // /state 带 header 时服务端会补种 cookie，后续裸 URL 才能带凭据
+      cookieSynced = state.ok;
+    } catch {
+      /* 没拿到就留 null，文案如实说明 */
+    }
+
+    // 实时流没有 Content-Length，探测会一直等首块数据，别再凑这个热闹
+    const direct = !/mode=(remux|transcode)/.test(streamSrc);
+    let streamStatus: number | null = null;
+    if (direct) {
+      try {
+        const probe = await fetch(streamSrc, {
+          credentials: "same-origin",
+          headers: { ...authHeaders, Range: "bytes=0-1" },
+          signal: timeoutSignal(STALL_PROBE_TIMEOUT),
+        });
+        streamStatus = probe.status;
+        // 只要响应头，别把整份文件读进内存
+        void probe.body?.cancel().catch(() => {});
+      } catch {
+        streamStatus = null;
+      }
+    }
+    onErrorRef.current(
+      describeStall({
+        streamStatus,
+        stateAuthenticated,
+        cookieSynced,
+        direct,
+        waitedSec: Math.round(STALL_TIMEOUT / 1000),
+      }),
+    );
+  }, [streamSrc]);
 
   useEffect(() => {
     stallFired.current = false;
@@ -195,10 +256,15 @@ export function VideoPlayer({
       }
       if (hasData) return; // 在收数据，只是还没攒够一帧
       stallFired.current = true;
-      onErrorRef.current(STALL_HINT);
+      // 上层还能自动切兼容通道：直接交还控制权，别让用户干等分诊探测
+      if (stallFallbackRef.current) {
+        onErrorRef.current();
+        return;
+      }
+      void runStallDiagnosis();
     }, STALL_TIMEOUT);
     return clearStallTimer;
-  }, [streamSrc, restartKey, clearStallTimer]);
+  }, [streamSrc, restartKey, clearStallTimer, runStallDiagnosis]);
 
   /* --------------------------- 视频元素生命周期 --------------------------- */
 

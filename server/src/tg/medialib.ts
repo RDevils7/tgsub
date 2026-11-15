@@ -5,6 +5,7 @@ import { db, getSettings } from "../db";
 import { env } from "../env";
 import { logger } from "../logger";
 import { mapLimit } from "../lib/async";
+import { needsRemuxForFaststart } from "../lib/mp4atoms";
 import { captureStill, probeVideo, type VideoProbe } from "./ffmpeg";
 import { DEFAULT_SOURCE_DIRS, DIR_KEYS, DIR_LABEL, parseDirSetting, type DirKey } from "./mediadir";
 import { isStrmFile, isVideoFile } from "./mediapath";
@@ -340,6 +341,11 @@ export interface LibraryEpisode {
   /** 编码名（h264 / hevc …），界面用来解释「为什么播不了」 */
   videoCodec: string | null;
   playMode: PlayMode;
+  /**
+   * MP4 的 moov 在文件尾（非 faststart）：Range 直出时浏览器要先跳到尾部取索引，
+   * 部分链路会把这条请求挂死（无限缓冲且没有 error）。true 表示已改走实时换封装。
+   */
+  compatStream: boolean;
   /** 这是一个 .strm 链接文件：播放走服务端转发，探测/抽帧一律跳过 */
   isStrm: boolean;
 }
@@ -507,6 +513,18 @@ async function buildEpisode(file: string, opts: PlayOptions = {}): Promise<Libra
   const meta = await readEpisodeMeta(file);
   const ep = info.episode;
   const fallback = ep !== null ? `第 ${ep} 集` : path.basename(file, path.extname(file));
+  const baseMode: PlayMode = strm ? "direct" : playModeOf(file, probe, opts);
+  /**
+   * 非 faststart 的 MP4（ftyp + mdat 在前、moov 在文件尾）改走实时换封装：
+   * 浏览器必须先拿到尾部 moov 才能解第一帧，而这条 Range 请求在部分链路上会
+   * 一直挂着 —— 表现为「海报正常、视频永远缓冲中、连 error 都不触发」。
+   * fragmented MP4 带 empty_moov，从头就能边收边解，不依赖任何 Range / 尾部 seek。
+   * 只读 1MB 文件头、结果按 size+mtime 缓存，列表几十集也不会拖慢。
+   */
+  const compatStream =
+    !strm && baseMode === "direct"
+      ? await needsRemuxForFaststart(file).catch(() => false)
+      : false;
   return {
     path: file,
     name: path.basename(file),
@@ -520,8 +538,8 @@ async function buildEpisode(file: string, opts: PlayOptions = {}): Promise<Libra
     width: probe?.width ?? null,
     height: probe?.height ?? null,
     videoCodec: probe?.videoCodec ?? null,
-    // 复用 direct：浏览器的 Range 请求由服务端透传，拖动进度条与跳秒都原生可用
-    playMode: strm ? "direct" : playModeOf(file, probe, opts),
+    playMode: compatStream ? "remux" : baseMode,
+    compatStream,
     isStrm: strm,
   };
 }

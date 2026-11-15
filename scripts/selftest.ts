@@ -105,6 +105,7 @@ import {
 import { confirmProblem, hashPassword, passwordProblem, usernameProblem, verifyPassword } from "../server/src/auth/password";
 import { needsCookieRepair, parseCookie, parseCookies } from "../server/src/auth/cookie";
 import { parseRange, RANGE_CHUNK } from "../server/src/lib/range";
+import { ATOM_SCAN_BYTES, faststartFromHead, topLevelBoxes } from "../server/src/lib/mp4atoms";
 import { dirMapOf, mergeOrigins, originOf, originOfRelPath } from "../server/src/tg/origin";
 import { isUnder, planTransfer, replacePrefix } from "../server/src/tg/transferplan";
 import { normalizeSortKey, normalizeSortOrder, sortFiles, sortFolders } from "../server/src/tg/mediasort";
@@ -135,7 +136,7 @@ import {
   type NfoFields,
 } from "../server/src/tg/nfo";
 import { nfoTraceOf } from "../server/src/tg/nfotrace";
-import { formatClock, parseSeekText } from "../web/src/utils";
+import { describeStall, formatClock, parseSeekText } from "../web/src/utils";
 import { mapLimit } from "../server/src/lib/async";
 import {
   decodePosterDataUrl,
@@ -2683,6 +2684,35 @@ async function loginChecks(): Promise<void> {
     assert.deepEqual(parseRange("bytes=0-", 1024), { start: 0, end: 1023 });
   });
 
+  /**
+   * 回归「非 faststart MP4 无限缓冲」：moov 在文件尾时，列表接口必须把它判成
+   * 走实时换封装（不依赖 Range / 尾部 seek），faststart 的仍保持 Range 直出。
+   */
+  check("MP4 原子布局：非 faststart 改走兼容通道，faststart 保持直出", () => {
+    const box = (type: string, size = 8): Buffer => {
+      const b = Buffer.alloc(size);
+      b.writeUInt32BE(size, 0);
+      b.write(type, 4, 4, "latin1");
+      return b;
+    };
+    // 真实 402MB 文件的头：ftyp(32) + free(8) + mdat(401641950)，moov 在文件尾
+    const notFast = Buffer.concat([box("ftyp", 32), box("free"), box("mdat", 40)]);
+    notFast.writeUInt32BE(401_641_950, 40);
+    assert.equal(faststartFromHead(notFast), false);
+    assert.deepEqual(topLevelBoxes(notFast).map((b) => b.type), ["ftyp", "free", "mdat"]);
+
+    const fast = Buffer.concat([box("ftyp", 32), box("moov", 120), box("mdat", 64)]);
+    assert.equal(faststartFromHead(fast), true);
+
+    // 不是 MP4 / 头部信息不足：不强行改判，保持直出 + 前端兜底
+    assert.equal(faststartFromHead(box("abcd")), null);
+    assert.equal(faststartFromHead(box("ftyp", 32)), null);
+    assert.equal(faststartFromHead(Buffer.alloc(0)), null);
+    // 截断的 box 不能解析出幽灵 atom
+    assert.deepEqual(topLevelBoxes(Buffer.from([0, 0, 0, 32, 102, 116])), []);
+    assert.ok(ATOM_SCAN_BYTES >= 64 * 1024);
+  });
+
   check("Cookie 解析：同名子串、引号、空值、编码", () => {
     assert.equal(parseCookie("a=1; tgsub_sid=abc-123", "tgsub_sid"), "abc-123");
     assert.equal(parseCookie(undefined, "tgsub_sid"), "");
@@ -4943,6 +4973,24 @@ async function botMediaChecks(): Promise<void> {
 
   check("P1 下载页：轮询响应带序号防乱序", () => {
     assert.match(srcOf("web/src/pages/Downloads.tsx"), /seqRef|requestSeq/);
+  });
+
+  check("P1 起播看门狗：失败原因按实测状态码分诊", () => {
+    const base = {
+      streamStatus: 206 as number | null,
+      stateAuthenticated: true as boolean | null,
+      cookieSynced: true,
+      direct: true,
+      waitedSec: 15,
+    };
+    assert.match(describeStall(base), /HTTP 206/);
+    assert.match(describeStall({ ...base, stateAuthenticated: false }), /登录状态已失效/);
+    assert.match(describeStall({ ...base, streamStatus: 401 }), /HTTP 401/);
+    assert.match(describeStall({ ...base, streamStatus: 500 }), /HTTP 500/);
+    assert.match(describeStall({ ...base, streamStatus: null }), /超时/);
+    assert.match(describeStall({ ...base, direct: false }), /实时流/);
+    assert.match(srcOf("web/src/components/VideoPlayer.tsx"), /runStallDiagnosis/);
+    assert.match(srcOf("web/src/pages/MediaLibrary.tsx"), /syncSessionCookie/);
   });
 
   check("P1 自检：失败计数与汇总", () => {
