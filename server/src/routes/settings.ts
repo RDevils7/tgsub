@@ -155,6 +155,7 @@ settingsRouter.put(
       patch.ai_model = body.ai_model.trim();
     }
     if (body.ai_naming !== undefined) patch.ai_naming = Boolean(body.ai_naming);
+    if (body.ai_autodiagnose !== undefined) patch.ai_autodiagnose = Boolean(body.ai_autodiagnose);
     // 与 Emby Key 同机制：传掩码 = 不改，传空字符串 = 清除，传明文 = 保存
     if (typeof body.ai_api_key === "string" && body.ai_api_key !== MASK) {
       setAiApiKey(body.ai_api_key);

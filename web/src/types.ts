@@ -305,6 +305,8 @@ export interface AppSettings {
   ai_model: string;
   /** AI 智能命名兜底：正则识别不出剧名但消息有视频时，用 AI 再试一次 */
   ai_naming: boolean;
+  /** AI 故障自动报告：检测到异常时自动结合日志与运行状态生成问题报告 */
+  ai_autodiagnose: boolean;
   has_session?: boolean;
 }
 

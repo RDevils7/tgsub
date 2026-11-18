@@ -240,6 +240,12 @@ export interface AppSettings {
    * 会用 AI 再试一次（仅在「正则彻底失败」时触发，不会每条都调）。
    */
   ai_naming: boolean;
+  /**
+   * AI 故障自动报告：开启后，检测到异常（会话失效 / 机器人离线 / 报错突增 /
+   * 磁盘不足等）时，内置 AI 会自动结合日志与运行状态生成一份问题报告
+   * （同一组信号 30 分钟内不重复生成，避免刷额度）。
+   */
+  ai_autodiagnose: boolean;
 }
 
 /**
@@ -305,4 +311,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ai_base_url: "https://api.openai.com/v1",
   ai_model: "gpt-4o-mini",
   ai_naming: false,
+  ai_autodiagnose: true,
 };

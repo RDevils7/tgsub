@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { asyncHandler, assert } from "../lib/http";
 import { resolveAiConfig, testAiConnection, isAiEnabled, callAIJson } from "../ai/client";
+import { generateProblemReport, readLatestReport, collectDiagnosticBundle } from "../ai/report";
 import { getAiKeyHint } from "../db";
 import { queryLogs, type LogEntry } from "../lib/logstore";
 
@@ -30,6 +31,55 @@ aiRouter.post(
     assert(isAiEnabled(), 400, "AI 未启用或未配置 API Key（设置页 → AI 功能）");
     const result = await testAiConnection();
     res.json(result);
+  }),
+);
+
+/**
+ * 快速体检（不调用 AI，零成本）：返回当前检测到的异常信号与关键状态。
+ * 便于前端/外部脚本先看一眼有没有问题，再决定是否生成完整 AI 报告。
+ */
+aiRouter.get(
+  "/report/signals",
+  asyncHandler(async (_req, res) => {
+    const bundle = await collectDiagnosticBundle();
+    res.json({
+      ok: true,
+      generatedAt: bundle.generatedAt,
+      signals: bundle.signals,
+      summary: {
+        sessionState: bundle.telegram.sessionState,
+        botRunning: bundle.telegram.bot.running,
+        queue: bundle.queue,
+        disk: bundle.disk,
+        tools: bundle.tools,
+      },
+    });
+  }),
+);
+
+/**
+ * 生成 AI 故障报告（功能 C 增强）。
+ *
+ * 让内置 AI 结合「日志 + 容器/运行状态」产出一份结构化问题报告（含根因排序、
+ * 建议修改的文件/函数、验证步骤），写到 DATA_DIR/reports/，并直接返回给调用方。
+ * 其他智能体可以拿这份报告去定位和改代码。
+ */
+aiRouter.post(
+  "/report",
+  asyncHandler(async (req, res) => {
+    assert(isAiEnabled(), 400, "AI 未启用或未配置 API Key（设置页 → AI 功能）");
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 200) : "手动生成";
+    const report = await generateProblemReport({ reason });
+    res.json({ ok: true, report });
+  }),
+);
+
+/** 读取最近一次生成的 AI 故障报告 */
+aiRouter.get(
+  "/report/latest",
+  asyncHandler(async (_req, res) => {
+    const report = await readLatestReport();
+    res.json({ ok: true, report });
   }),
 );
 

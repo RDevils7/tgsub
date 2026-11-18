@@ -35,6 +35,7 @@ import { hydrateFromFile } from "./lib/logstore";
 import { requestCacheTrim } from "./cache";
 import { startYtdlpAutoUpdate } from "./platform/updater";
 import { hwCapability } from "./tg/ffmpeg";
+import { startAiDiagnoseWatchdog } from "./ai/report";
 
 const app = express();
 app.disable("x-powered-by");
@@ -247,6 +248,9 @@ startAuthWatchdog();
 // 稍微延后一点启动：先让用户账号的连接稳定下来，避免两个连接同时握手。
 setTimeout(() => void startBot(), 8000).unref();
 startBotWatchdog();
+
+// AI 故障自动报告：开启 ai_autodiagnose 后，检测到异常会结合日志+状态自动出报告
+startAiDiagnoseWatchdog();
 
 // 启动后按上限收拾一次缓存：上一次进程可能是被强杀的，没来得及清理
 setTimeout(() => requestCacheTrim(0), 4000).unref();

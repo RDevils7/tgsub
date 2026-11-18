@@ -16,7 +16,7 @@ import { IconEye, IconEyeOff, IconSpark } from "./icons";
  * 永远不回明文；留空保存 = 不改动，单独「清除密钥」才清掉。
  */
 
-type Draft = Pick<AppSettings, "ai_enabled" | "ai_base_url" | "ai_model" | "ai_naming">;
+type Draft = Pick<AppSettings, "ai_enabled" | "ai_base_url" | "ai_model" | "ai_naming" | "ai_autodiagnose">;
 
 export default function AiSettingsPanel() {
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -39,6 +39,7 @@ export default function AiSettingsPanel() {
         ai_base_url: res.settings.ai_base_url,
         ai_model: res.settings.ai_model,
         ai_naming: res.settings.ai_naming,
+        ai_autodiagnose: res.settings.ai_autodiagnose,
       });
       setKeySet(status.apiKeySet);
       setKeyHint(status.apiKeyHint);
@@ -64,6 +65,7 @@ export default function AiSettingsPanel() {
         ai_base_url: draft.ai_base_url,
         ai_model: draft.ai_model,
         ai_naming: draft.ai_naming,
+        ai_autodiagnose: draft.ai_autodiagnose,
       };
       // 只有填了新 key 才带上；留空 = 不改（保留已存的）
       if (apiKey.trim()) body.ai_api_key = apiKey.trim();
@@ -177,6 +179,16 @@ export default function AiSettingsPanel() {
               </p>
             </div>
             <Toggle checked={draft?.ai_naming ?? false} onChange={(next) => patch("ai_naming", next)} />
+          </div>
+
+          <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
+            <div>
+              <p className="text-[13px] text-slate-200">故障自动报告</p>
+              <p className="text-[11.5px] text-slate-500">
+                检测到异常（会话失效 / 机器人离线 / 报错突增 / 磁盘不足等）时，自动结合日志与运行状态生成问题报告，供排查与修复（同一组信号 30 分钟内不重复生成）
+              </p>
+            </div>
+            <Toggle checked={draft?.ai_autodiagnose ?? false} onChange={(next) => patch("ai_autodiagnose", next)} />
           </div>
         </section>
 
