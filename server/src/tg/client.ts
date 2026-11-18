@@ -340,6 +340,56 @@ const RECONNECT_RESET_MS = 45_000;
 /** 连续掉线到这个次数，说明不是偶发抖动，日志里直接给出排查方向 */
 const RECONNECT_HINT_AFTER = 5;
 
+/* ------------------------------------------------------------------ */
+/* 链路冷却：连不上 Telegram 时整体停手一段时间，避免高频重连触发风控     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 连续重连到这个次数、期间一次「心跳健康」都没有，就判定链路不可用，
+ * 停止自动重连并进入冷却：隔一段时间才再试一次。
+ *
+ * 背景：这台机器经代理（mihomo）出网，出口节点会按延迟自动切换，MTProto 长连接
+ * 因此频繁 TIMEOUT。若不停手、每几十秒重连一次，Telegram 会把这个 authKey 当成
+ * 异常连接（AUTH_KEY_DUPLICATED / 风控），所以必须主动降频。
+ *
+ * 冷却时长按指数翻倍：默认 5 → 10 → 20 → 40 → 60（封顶）分钟；
+ * 只要有一次心跳成功（连接真正恢复）就立即清零。
+ * 可用环境变量覆盖：TG_COOLDOWN_BASE_MIN / TG_COOLDOWN_MAX_MIN。
+ */
+const COOLDOWN_BASE_MIN = Math.max(1, Number(process.env.TG_COOLDOWN_BASE_MIN || "5") || 5);
+const COOLDOWN_MAX_MIN = Math.max(COOLDOWN_BASE_MIN, Number(process.env.TG_COOLDOWN_MAX_MIN || "60") || 60);
+const LINK_COOLDOWN_BASE_MS = COOLDOWN_BASE_MIN * 60_000;
+const LINK_COOLDOWN_MAX_MS = COOLDOWN_MAX_MIN * 60_000;
+/** 连续重连到这个次数就进入冷却（strikes 在「心跳健康」时会被清零） */
+const LINK_COOLDOWN_AFTER_STRIKES = 6;
+
+let linkCooldownUntil = 0;
+let linkCooldownLevel = 0;
+
+/** 当前是否处于「停手冷却期」：冷却期内不发起任何重连/重建尝试 */
+export function isLinkCoolingDown(): boolean {
+  return Date.now() < linkCooldownUntil;
+}
+
+/** 冷却剩余毫秒 */
+export function linkCooldownRemainingMs(): number {
+  return Math.max(0, linkCooldownUntil - Date.now());
+}
+
+/** 进入（或加深）一次冷却，返回本次冷却的毫秒数 */
+function enterLinkCooldown(): number {
+  const ms = Math.min(LINK_COOLDOWN_BASE_MS * 2 ** linkCooldownLevel, LINK_COOLDOWN_MAX_MS);
+  linkCooldownLevel += 1;
+  linkCooldownUntil = Date.now() + ms;
+  return ms;
+}
+
+/** 手动重试 / 登录成功 / 心跳恢复时清除冷却 */
+export function clearLinkCooldown(): void {
+  linkCooldownUntil = 0;
+  linkCooldownLevel = 0;
+}
+
 /**
  * 「心跳还新鲜」的判定窗口。
  *
@@ -363,6 +413,9 @@ let lastProbeOkAt = 0;
 /** 心跳成功即调用，作为「连接确实可用」的唯一判据 */
 export function markProbeHealthy(): void {
   lastProbeOkAt = Date.now();
+  // 连接确实恢复：立刻退出冷却并重置冷却等级
+  linkCooldownUntil = 0;
+  linkCooldownLevel = 0;
 }
 
 /** @internal 导出仅为自检脚本能构造假 sender 验证重连闸门，业务代码请勿直接调用 */
@@ -379,8 +432,24 @@ export function hardenReconnect(client: TelegramClient): void {
   let lastAt = 0;
   let skipped = 0;
   let skipNoticeLogged = false;
+  let stopped = false;
+
+  // 断开/判死时调用：彻底停掉这个 sender 的重连。
+  // 否则 client.disconnect() 之后那个 setTimeout 到点仍会调用 _sender.reconnect()，
+  // 把一条已经废弃的连接无限重连下去（线上 1000+ 条「连接异常，延迟重连」就是这么来的）。
+  (sender as Record<string, unknown>).__tgsubStopReconnect = () => {
+    stopped = true;
+    if (pending) {
+      clearTimeout(pending);
+      pending = null;
+    }
+    sender.isReconnecting = false;
+  };
 
   sender.reconnect = () => {
+    if (stopped) return;
+    // 冷却期内不发起任何重连：高频重连会被 Telegram 视为异常连接，抬高风控风险。
+    if (isLinkCoolingDown()) return;
     if (pending) return;
     const now = Date.now();
 
@@ -405,7 +474,10 @@ export function hardenReconnect(client: TelegramClient): void {
       return;
     }
 
-    const stable = lastAt > 0 && now - lastAt > RECONNECT_RESET_MS;
+    // 只有「时间够久」且「这段时间心跳确实成功过」才算稳定，
+    // 否则链路一直不通、退避却被 45 秒一刀清零，永远只等 4/8/12 秒。
+    const stable =
+      lastAt > 0 && now - lastAt > RECONNECT_RESET_MS && sinceHealthy < PROBE_HEALTHY_WINDOW_MS;
     if (stable) {
       if (strikes > 0) {
         logger.info({ fp: keyFingerprint(client), strikes }, "连接已稳定一段时间，重连退避计数清零");
@@ -414,6 +486,21 @@ export function hardenReconnect(client: TelegramClient): void {
     }
     lastAt = now;
     strikes += 1;
+    if (strikes >= LINK_COOLDOWN_AFTER_STRIKES) {
+      // 连续多次重连都没有一次健康心跳：不再几十秒一撞，整体进入冷却，
+      // 隔一段时间才试一次，降低 Telegram 风控风险。
+      const cooldownMs = enterLinkCooldown();
+      if (pending) {
+        clearTimeout(pending);
+        pending = null;
+      }
+      sender.isReconnecting = false;
+      logger.error(
+        { fp: keyFingerprint(client), strikes, cooldownMin: Math.round(cooldownMs / 60000) },
+        "Telegram 连接持续失败，进入冷却：暂停重连，稍后自动重试（降低风控风险）",
+      );
+      return;
+    }
     const delay = Math.min(RECONNECT_BASE_DELAY_MS * strikes, RECONNECT_MAX_DELAY_MS);
     // 连续掉线说明不是偶发抖动。把「该查什么」直接写进字段，日志页一眼能看到
     const hint =
@@ -475,6 +562,21 @@ async function connectTelegram(client: TelegramClient): Promise<void> {
   await client.connect();
   hardenReconnect(client);
   hardenDcSwitch(client);
+
+  // 断开连接时一并停掉重连定时器，避免「已废弃连接」被无限重连。
+  const meta = client as unknown as {
+    __tgsubDisconnectWrapped?: boolean;
+    disconnect: () => Promise<void>;
+  };
+  if (!meta.__tgsubDisconnectWrapped) {
+    meta.__tgsubDisconnectWrapped = true;
+    const rawDisconnect = client.disconnect.bind(client);
+    meta.disconnect = async () => {
+      const s = (client as unknown as { _sender?: Record<string, unknown> })._sender;
+      (s?.__tgsubStopReconnect as (() => void) | undefined)?.();
+      return rawDisconnect();
+    };
+  }
 }
 
 export function isConfigured(): boolean {
@@ -488,6 +590,13 @@ export async function getClient(opts: { force?: boolean } = {}): Promise<Telegra
     throw new TgError("NOT_CONFIGURED", "尚未配置 Telegram API ID / API Hash");
   }
   if (activeClient?.connected) return activeClient;
+  // 冷却期内不再尝试新建连接：快速失败，避免扫描/页面请求去强行重连而抬高风控。
+  if (!opts.force && isLinkCoolingDown()) {
+    throw new TgError(
+      "NETWORK",
+      `Telegram 链路暂不可用，正在冷却（还剩约 ${Math.ceil(linkCooldownRemainingMs() / 60000)} 分钟），到时自动重试`,
+    );
+  }
   if (activeClient) {
     // 连接掉了：先给 gramjs 的 autoReconnect 一点时间，不要急着重连。
     // 旧 socket 在服务器端还没释放时新建连接 = 同 authKey 双连接 = key 被作废。
@@ -613,9 +722,14 @@ export async function getClient(opts: { force?: boolean } = {}): Promise<Telegra
  * 2. 取证——一旦真的失效，日志里会带上「什么时刻、哪个 authKey、原始错误码」，
  *    避免再出现「只知道要重新扫码，不知道为什么」的情况。
  */
+/** 可自愈错误码需要连续这么多轮心跳确认，才真正判死（每轮 45 秒） */
+const DEAD_CONFIRM_ROUNDS = 3;
+
 export function startAuthWatchdog(): NodeJS.Timeout {
   let lastSig = "";
   let lastConnected: boolean | null = null;
+  let deadStreak = 0;
+  let lastDeadCode: string | null = null;
 
   // 连接状态监视：只读 client.connected，不发任何请求。
   // 掉线/恢复都留一条日志 —— 下次若再出现「莫名其妙失效」，
@@ -639,8 +753,28 @@ export function startAuthWatchdog(): NodeJS.Timeout {
   const check = async (): Promise<void> => {
     const client = activeClient;
     if (!client) return;
+    // session 已判死：不探测、不重连，等用户重新登录（避免无谓的登录风控）
+    if (getSessionMeta().state === "dead") return;
+
     if (!client.connected) {
-      logger.warn({ fp: keyFingerprint(client) }, "认证心跳跳过：连接当前不可用");
+      // 冷却期内整体停手，不发任何请求；到点后只尝试重建一次
+      if (isLinkCoolingDown()) {
+        logger.debug(
+          { fp: keyFingerprint(client), remainMs: linkCooldownRemainingMs() },
+          "链路冷却中，暂不重连",
+        );
+        return;
+      }
+      logger.warn({ fp: keyFingerprint(client) }, "认证心跳：连接不可用，尝试重建连接");
+      try {
+        await getClient();
+      } catch (err) {
+        const cooldownMs = isLinkCoolingDown() ? linkCooldownRemainingMs() : enterLinkCooldown();
+        logger.warn(
+          { err: errText(err), cooldownMin: Math.round(cooldownMs / 60000) },
+          "认证心跳：重建连接失败，进入冷却，稍后再试",
+        );
+      }
       return;
     }
     const fp = keyFingerprint(client);
@@ -654,6 +788,8 @@ export function startAuthWatchdog(): NodeJS.Timeout {
           lastSig = sig;
         }
         if (probe.ok) {
+          deadStreak = 0;
+          lastDeadCode = null;
           // 记下「连接确实可用」的时刻：ping 超时触发的重连要靠它来判断是否误判
           markProbeHealthy();
           return;
@@ -662,7 +798,22 @@ export function startAuthWatchdog(): NodeJS.Timeout {
           await sleep(3000);
           continue;
         }
-        invalidateSession(`心跳检测判定失效（${probe.code}）`);
+
+        const code = probe.code ?? "UNKNOWN";
+        // AUTH_KEY_DUPLICATED 这类「可自愈」错误，多半是重连撞车 / 代理抖动造成的短暂冲突。
+        // 必须连续多轮都命中同一个码才判死，避免一次网络抖动就把 session 作废、逼用户重新扫码。
+        if (RETRYABLE_SESSION_ERRORS.has(code)) {
+          deadStreak = lastDeadCode === code ? deadStreak + 1 : 1;
+          lastDeadCode = code;
+          if (deadStreak < DEAD_CONFIRM_ROUNDS) {
+            logger.warn(
+              { fp, code, deadStreak, need: DEAD_CONFIRM_ROUNDS },
+              "认证心跳：命中可自愈错误码，暂不判死，下一轮再确认",
+            );
+            return;
+          }
+        }
+        invalidateSession(`心跳检测判定失效（${code}）`);
         return;
       } catch (err) {
         // 网络异常不代表失效
@@ -794,6 +945,7 @@ export async function getAuthState(opts: { fresh?: boolean } = {}): Promise<Auth
  */
 export async function retrySession(): Promise<AuthState> {
   await disconnectClient();
+  clearLinkCooldown();
   markSessionValid();
   probeCache = null;
   lastError = null;
@@ -813,6 +965,7 @@ export async function retrySession(): Promise<AuthState> {
  */
 export async function resetSessionForRelogin(): Promise<void> {
   await disconnectClient();
+  clearLinkCooldown();
   clearSession();
   probeCache = null;
   cachedMe = null;
@@ -1025,6 +1178,7 @@ async function finalizeLogin(client: TelegramClient, source: string): Promise<vo
   setSession(session);
   recordRelogin();
   activeClient = client;
+  clearLinkCooldown();
   pending = null;
   lastError = null;
   probeCache = null;

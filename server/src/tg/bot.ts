@@ -354,6 +354,53 @@ export async function stopBot(): Promise<void> {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 看门狗：机器人静默掉线后自动重启                                     */
+/* ------------------------------------------------------------------ */
+
+let botWatchdog: NodeJS.Timeout | null = null;
+let lastBotAutoRestartAt = 0;
+let botAutoRestartAttempts = 0;
+
+/** token 失效 / 机器人被冻结这类「重试也没用」的配置问题，看门狗不应空转 */
+function isFatalBotConfigError(msg: string | null): boolean {
+  if (!msg) return false;
+  return /Bot Token|被冻结|冻结|USER_DEACTIVATED|ACCESS_TOKEN/i.test(msg);
+}
+
+/**
+ * 每 60 秒巡检一次：机器人开着、有 token、但连接掉了（gramjs connectionRetries 耗尽后
+ * 没有任何回调，bot.connected 变 false 却无人知晓），就按指数退避自动重启。
+ * 没有这个看门狗时，一次网络抖动会让机器人静默离线且永不恢复、连一条日志都没有。
+ */
+export function startBotWatchdog(): void {
+  if (botWatchdog) return;
+  botWatchdog = setInterval(() => {
+    if (!getSettings().bot_enabled) return;
+    if (starting) return;
+    if (bot && bot.connected) {
+      botAutoRestartAttempts = 0;
+      return;
+    }
+    if (!getBotToken()) return;
+    if (isFatalBotConfigError(lastError)) return;
+    const waitMs = Math.min(30, 2 ** Math.min(botAutoRestartAttempts, 5)) * 60_000;
+    if (Date.now() - lastBotAutoRestartAt < waitMs) return;
+    lastBotAutoRestartAt = Date.now();
+    botAutoRestartAttempts += 1;
+    logger.warn({ attempts: botAutoRestartAttempts }, "机器人连接已断开，尝试自动重启");
+    void startBot();
+  }, 60_000);
+  botWatchdog.unref?.();
+}
+
+export function stopBotWatchdog(): void {
+  if (botWatchdog) {
+    clearInterval(botWatchdog);
+    botWatchdog = null;
+  }
+}
+
 /** 设置变更后重建连接（token / 开关改动都需要重新授权） */
 export async function restartBot(): Promise<void> {
   await stopBot();

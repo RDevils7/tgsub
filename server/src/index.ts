@@ -13,7 +13,7 @@ import { TgError, disconnectClient, handleDeadSessionError, isConfigured, startA
 import { downloader } from "./tg/downloader";
 import { repairLegacyArtifacts } from "./tg/legacy";
 import { startScheduler } from "./tg/scanner";
-import { startBot, stopBot } from "./tg/bot";
+import { startBot, startBotWatchdog, stopBot, stopBotWatchdog } from "./tg/bot";
 import { authRouter } from "./routes/auth";
 import { channelsRouter } from "./routes/channels";
 import { subscriptionsRouter } from "./routes/subscriptions";
@@ -246,6 +246,7 @@ startAuthWatchdog();
 // 机器人用独立 authKey（bot token 授权），可以和用户账号同时在线。
 // 稍微延后一点启动：先让用户账号的连接稳定下来，避免两个连接同时握手。
 setTimeout(() => void startBot(), 8000).unref();
+startBotWatchdog();
 
 // 启动后按上限收拾一次缓存：上一次进程可能是被强杀的，没来得及清理
 setTimeout(() => requestCacheTrim(0), 4000).unref();
@@ -263,6 +264,7 @@ async function shutdown(signal: string) {
   clearInterval(scheduler);
   stopYtdlpUpdate();
   downloader.stop();
+  stopBotWatchdog();
   await stopBot().catch(() => undefined);
 
   // 必须先优雅断开 Telegram：否则进程退出时 TCP 被硬切断，
