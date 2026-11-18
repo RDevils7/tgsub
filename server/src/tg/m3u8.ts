@@ -61,6 +61,12 @@ export interface M3u8Target {
   cookies?: string;
   /** 解析阶段实际走通的线路 */
   route: NetRoute;
+  /** 网页 <meta> 原始标题（og:title / twitter:title），可能比 <title> 更干净 */
+  pageTitle?: string;
+  /** 网页描述（og:description / description），供 AI 整理简介 */
+  pageDescription?: string;
+  /** 站点名（og:site_name），用于判断标题是否只是站名 */
+  siteName?: string;
 }
 
 /**
@@ -244,6 +250,42 @@ function titleFromHtml(html: string): string | null {
   if (!m) return null;
   const cleaned = cleanTitle(m[1]);
   return sanitizeName(cleaned) || null;
+}
+
+export interface PageMeta {
+  pageTitle?: string;
+  pageDescription?: string;
+  siteName?: string;
+}
+
+/**
+ * 从网页 <meta> 里取标题 / 描述 / 站点名。
+ * og:title 往往比 <title>（带「- 站名」后缀）更干净，供 AI 或命名兜底复用。
+ */
+export function metaFromHtml(html: string): PageMeta {
+  const out: PageMeta = {};
+  const metas = String(html ?? "").match(/<meta\b[^>]*>/gi) ?? [];
+  const attr = (tag: string, name: string): string => {
+    const re = new RegExp(`${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i");
+    const m = re.exec(tag);
+    if (!m) return "";
+    const v = m[2] ?? m[3] ?? m[4] ?? "";
+    return v ? decodeHtmlEntities(v).replace(/\s+/g, " ").trim() : "";
+  };
+  for (const tag of metas) {
+    const key = (attr(tag, "property") || attr(tag, "name") || "").toLowerCase();
+    const content = attr(tag, "content");
+    if (!content) continue;
+    if (!out.pageTitle && (key === "og:title" || key === "twitter:title")) out.pageTitle = content;
+    if (
+      !out.pageDescription &&
+      (key === "og:description" || key === "description" || key === "twitter:description")
+    ) {
+      out.pageDescription = content;
+    }
+    if (!out.siteName && (key === "og:site_name" || key === "application-name")) out.siteName = content;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -497,14 +539,19 @@ async function resolveViaRoute(
       }
     }
     if (found) {
+      const meta = metaFromHtml(html);
+      const pageTitle = meta.pageTitle ? sanitizeName(cleanTitle(meta.pageTitle)) : titleFromHtml(html);
       return {
         m3u8Url: found,
-        title: titleFromHtml(html) || titleFromUrl(found),
+        title: pageTitle || titleFromUrl(found),
         referer: pageUrl,
         origin: originOf(pageUrl),
         // 页面响应头里下发的会话 Cookie：m3u8 能解析出来、下载却 403，差的多半就是它
         cookies: pageCookies || undefined,
         route,
+        pageTitle: meta.pageTitle,
+        pageDescription: meta.pageDescription,
+        siteName: meta.siteName,
       };
     }
   }
@@ -519,6 +566,7 @@ async function resolveViaRoute(
         title: viaBrowser.title || titleFromHtml(html) || titleFromUrl(pageUrl),
         // 静态抓页面时拿到的会话 + 浏览器里跑完挑战拿到的 cf_clearance，两边都别丢
         cookies: mergeCookieHeaders(pageCookies, viaBrowser.cookies) || undefined,
+        pageTitle: viaBrowser.pageTitle || viaBrowser.title || undefined,
       };
     }
   } catch (e) {

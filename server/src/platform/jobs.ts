@@ -10,6 +10,8 @@ import { PlatformLink } from "./detect";
 import { platformName, platformUsesProxy, probePlatform, PlatformProbe, PlaylistEntry } from "./ytdlp";
 import { downloader } from "../tg/downloader";
 import { joinRel, platformDirKey, sanitizeRelDir } from "../tg/mediadir";
+import { isAiEnabled } from "../ai/client";
+import { aiGenerateMediaInfo, titleLooksUnreliable, sanitizeAiTitle } from "../ai/mediainfo";
 
 /**
  * 第三方链接入队。
@@ -284,6 +286,22 @@ export async function enqueuePlatformLink(link: PlatformLink, mode?: PlaylistMod
   // 链接直接交给 yt-dlp：短链由它自己重定向，本层保持纯函数
   const cookie = getPlatformCookie(link.platform);
   const probe = await probePlatform(link.url, link.platform, cookie);
+
+  // AI 整理标题 / 简介：平台标题不可靠（站点名、未命名、只有编号）时让 AI 重整
+  if (getSettings().ai_naming && isAiEnabled() && titleLooksUnreliable(probe.title, { url: link.url })) {
+    const ai = await aiGenerateMediaInfo({
+      url: link.url,
+      pageTitle: probe.title,
+      pageDescription: probe.description,
+      platform: platformName(link.platform),
+      guessedName: probe.title,
+    });
+    if (ai) {
+      probe.title = sanitizeAiTitle(ai.title) || probe.title;
+      if (ai.plot && probe.description.trim().length < 4) probe.description = ai.plot;
+      logger.info({ platform: link.platform, title: probe.title }, "AI 已整理平台链接的标题与媒体信息");
+    }
+  }
 
   if (probe.playlist && !mode) {
     return {

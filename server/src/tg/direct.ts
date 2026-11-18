@@ -16,6 +16,8 @@ import { extractMedia } from "./media";
 import { parseCaptionMeta } from "./naming";
 import { encodeMeta } from "./emby";
 import { botSourceUrl, planBotSaveName, type BotMediaRef } from "./botmedia";
+import { isAiEnabled } from "../ai/client";
+import { aiGenerateMediaInfo, titleLooksUnreliable, sanitizeAiTitle } from "../ai/mediainfo";
 
 // 机器人与旧代码从 direct 导入这两个纯函数，保持导出位置不变
 export { parseTelegramLink, extractTelegramLinks, commentIdOf, isCommentLink } from "./link";
@@ -367,7 +369,32 @@ export interface M3u8Result {
  */
 export async function enqueueM3u8(input: string): Promise<M3u8Result> {
   const target = await resolveM3u8Input(input);
-  const safeTitle = target.title || "video";
+  let safeTitle = target.title || "video";
+  let plot = "";
+  let tags: string[] = [];
+
+  /**
+   * 手动给网页 / m3u8 链接时，自动标题常是「站名 / 域名 / 无意义串」。
+   * 开启 AI 智能命名且标题不可靠时，让 AI 读网页标题、描述、站点名，重整出
+   * 干净的作品名 + 简介 + 标签（失败就沿用原解析结果，绝不影响下载）。
+   */
+  if (getSettings().ai_naming && isAiEnabled() && titleLooksUnreliable(safeTitle, { url: input, siteName: target.siteName })) {
+    const ai = await aiGenerateMediaInfo({
+      url: input,
+      pageTitle: target.pageTitle ?? target.title,
+      pageDescription: target.pageDescription,
+      siteName: target.siteName,
+      guessedName: safeTitle,
+      platform: "m3u8",
+    });
+    if (ai) {
+      safeTitle = sanitizeAiTitle(ai.title) || safeTitle;
+      plot = ai.plot ?? "";
+      tags = ai.tags ?? [];
+      logger.info({ title: safeTitle, tagCount: tags.length }, "AI 已整理手动链接的标题与媒体信息");
+    }
+  }
+
   // 来源目录可配（默认 m3u8/），标题是它下面的剧集目录
   const saveDir = joinRel(getSettings().dir_m3u8, safeTitle) || safeTitle;
   const saveName = `${safeTitle}.mp4`;
@@ -379,8 +406,8 @@ export async function enqueueM3u8(input: string): Promise<M3u8Result> {
     season: 1,
     episode: 1,
     firstLine: safeTitle,
-    plot: "",
-    tags: [],
+    plot,
+    tags,
     studio: "m3u8",
     link: input,
     airedAt: Date.now(),

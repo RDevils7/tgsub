@@ -4,6 +4,7 @@ import { matchText } from "../match";
 import { extractMedia, groupIdOf, messageText, type MediaInfo } from "./media";
 import { parseCaptionMeta, planFileNames } from "./naming";
 import { aiParseSeries } from "../ai/naming";
+import { aiGenerateMediaInfo } from "../ai/mediainfo";
 import { isAiEnabled } from "../ai/client";
 import { channelMessageLink } from "./entity";
 import { encodeMeta, type EmbyMeta } from "./emby";
@@ -29,6 +30,10 @@ export interface GroupEnqueueOptions {
   writeLog?: boolean;
   /** AI 命名兜底回填的剧名（正则失败、AI 命中后由 enqueueGroupAi 写入） */
   seriesOverride?: string | null;
+  /** AI 整理出的简介（覆盖 parseCaptionMeta 的 plot） */
+  plotOverride?: string;
+  /** AI 整理出的标签（覆盖 parseCaptionMeta 的 tags） */
+  tagsOverride?: string[];
   /**
    * 是否把图片也算作可下载文件。
    * - undefined / true：图片照常下载（网页手动下载、定时扫描保持原行为，避免回归）
@@ -330,8 +335,8 @@ const runGroup = db.transaction(
           season: named.season ?? 1,
           episode: named.episode ?? null,
           firstLine: caption.firstLine,
-          plot: caption.plot,
-          tags: caption.tags,
+          plot: opts.plotOverride ?? caption.plot,
+          tags: opts.tagsOverride ?? caption.tags,
           studio: channel.title,
           link: channelLink(Number(msg.id)),
           airedAt,
@@ -427,8 +432,11 @@ export async function enqueueGroupAi(
   opts: GroupEnqueueOptions,
 ): Promise<GroupEnqueueResult> {
   let seriesOverride: string | null = opts.seriesOverride ?? null;
-  if (!seriesOverride && opts.fresh !== false && (await getSettings()).ai_naming && isAiEnabled()) {
-    const settings = getSettings();
+  let plotOverride: string | undefined;
+  let tagsOverride: string[] | undefined;
+
+  const settings = getSettings();
+  if (opts.fresh !== false && settings.ai_naming && isAiEnabled()) {
     const text = messages.map((m) => messageText(m)).join("\n");
     const captionText = messages
       .map((m) => (typeof (m as { message?: unknown }).message === "string" ? String((m as { message: string }).message) : ""))
@@ -438,15 +446,47 @@ export async function enqueueGroupAi(
     const media = messages
       .map((m) => extractMedia(m))
       .filter((info): info is MediaInfo => info !== null);
-    // 只在「正则彻底失败（视频没有目标目录）」时才求助 AI，避免每条都调
+    // 正则命名是否彻底失败（视频没有目标目录）——失败才需要 AI 兜底剧名
     const probe = planFileNames(sourceText, media, {
       messageCount: messages.length,
       looseFolder: settings.fallback_folder,
     });
-    if (probe.some((n) => n.isVideo && !n.dir)) {
-      const ai = await aiParseSeries(sourceText).catch(() => null);
-      if (ai?.series) seriesOverride = ai.series;
+    const needName = !seriesOverride && probe.some((n) => n.isVideo && !n.dir);
+
+    /**
+     * 是否需要 AI 生成媒体信息（简介 / 标签）：
+     * 正文有一定长度、不是纯链接、且解析出的 plot / tags 不完整时才做，
+     * 避免每条消息都白花额度。
+     */
+    const cap = parseCaptionMeta(sourceText);
+    const needMeta =
+      sourceText.trim().length >= 8 &&
+      !/^https?:\/\/\S+$/i.test(sourceText.trim()) &&
+      (!cap.plot || cap.tags.length === 0);
+
+    if (needName || needMeta) {
+      const info = await aiGenerateMediaInfo({
+        caption: sourceText,
+        guessedName: seriesOverride ?? null,
+        platform: "telegram",
+      }).catch(() => null);
+      if (info) {
+        if (needName && (info.series || info.title)) seriesOverride = info.series || info.title;
+        if (needMeta) {
+          if (info.plot && !cap.plot) plotOverride = info.plot;
+          if (info.tags && info.tags.length) {
+            tagsOverride = cap.tags.length
+              ? Array.from(new Set([...cap.tags, ...info.tags])).slice(0, 8)
+              : info.tags;
+          }
+        }
+      }
+      // 命名仍在兜底：专用剧名解析器再试一次（AI 媒体信息没给出剧名时）
+      if (needName && !seriesOverride) {
+        const aiSeries = await aiParseSeries(sourceText).catch(() => null);
+        if (aiSeries?.series) seriesOverride = aiSeries.series;
+      }
     }
   }
-  return runGroup(channel, messages, { ...opts, seriesOverride });
+  return runGroup(channel, messages, { ...opts, seriesOverride, plotOverride, tagsOverride });
 }

@@ -171,9 +171,9 @@ export default function AiSettingsPanel() {
 
           <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-3">
             <div>
-              <p className="text-[13px] text-slate-200">AI 智能命名兜底</p>
+              <p className="text-[13px] text-slate-200">AI 智能命名与媒体信息整理</p>
               <p className="text-[11.5px] text-slate-500">
-                下载时若正则识别不出剧名但消息有视频，用 AI 再试一次。仅在「正则彻底失败」时触发，不会每条都调
+                手动链接或消息里识别不出可靠标题/剧名时用 AI 重整：读取网页标题、描述、站点名或分享文案，生成干净的作品名、简介与标签（失败不影响下载）
               </p>
             </div>
             <Toggle checked={draft?.ai_naming ?? false} onChange={(next) => patch("ai_naming", next)} />
