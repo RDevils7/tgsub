@@ -360,43 +360,12 @@ mediaRouter.get(
     }
 
     if (wanted === "remux") {
-      await pipeRemux(file, res, probe?.videoCodec ?? null, startSec);
+      await pipeRemux(file, req, res, probe?.videoCodec ?? null, startSec, stat, mime);
       return;
     }
 
-    const total = stat.size;
-    res.setHeader("Content-Type", mime);
-    res.setHeader("Accept-Ranges", "bytes");
-
-    const range = req.headers.range;
-    if (range) {
-      const parsed = parseRange(range, total);
-      if (!parsed) {
-        res.status(416).setHeader("Content-Range", `bytes */${total}`);
-        res.end();
-        return;
-      }
-      const { start, end } = parsed;
-      if (start >= total) {
-        res.status(416).setHeader("Content-Range", `bytes */${total}`);
-        res.end();
-        return;
-      }
-      res.status(206);
-      res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
-      res.setHeader("Content-Length", String(end - start + 1));
-      const stream = fs.createReadStream(file, { start, end });
-      res.on("close", () => stream.destroy());
-      stream.on("error", () => res.destroy());
-      stream.pipe(res);
-      return;
-    }
-
-    res.setHeader("Content-Length", String(total));
-    const stream = fs.createReadStream(file);
-    res.on("close", () => stream.destroy());
-    stream.on("error", () => res.destroy());
-    stream.pipe(res);
+    // 直连：按 Range 原样直出原文件（浏览器能放、可拖进度条）
+    pipeDirect(file, req, res, stat, mime);
   }),
 );
 
@@ -498,19 +467,88 @@ mediaRouter.post(
   }),
 );
 
-/** ffmpeg 换封装成 fMP4 直接管道输出；客户端断开就 kill，别留僵尸进程 */
+/** 直连：按 Range 原样直出原文件（浏览器能放、可拖进度条） */
+function pipeDirect(
+  file: string,
+  req: import("express").Request,
+  res: import("express").Response,
+  stat: fs.Stats,
+  mime: string,
+): void {
+  const total = stat.size;
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Accept-Ranges", "bytes");
+  // 让 Nginx / 反代不要缓冲大响应，实时流与大文件的首块要尽快到达浏览器
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const range = req.headers.range;
+  if (range) {
+    const parsed = parseRange(range, total);
+    if (!parsed) {
+      res.status(416).setHeader("Content-Range", `bytes */${total}`);
+      res.end();
+      return;
+    }
+    const { start, end } = parsed;
+    if (start >= total) {
+      res.status(416).setHeader("Content-Range", `bytes */${total}`);
+      res.end();
+      return;
+    }
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${total}`);
+    res.setHeader("Content-Length", String(end - start + 1));
+    const stream = fs.createReadStream(file, { start, end });
+    res.on("close", () => stream.destroy());
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
+    return;
+  }
+
+  res.setHeader("Content-Length", String(total));
+  const stream = fs.createReadStream(file);
+  res.on("close", () => stream.destroy());
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
+}
+
+/**
+ * 换封装首字节超时。
+ *
+ * 某些环境（特定 ffmpeg 静态构建 / 磁盘 / 管道）里 remux 可能长时间一个字节都不吐，
+ * 浏览器表现就是「一直缓冲、15 秒后报『没收到可解码字节』」。与其把整条播放判死，
+ * 超时后回退到直连 Range 播放（Chrome / Edge 对本地文件可靠）。
+ */
+const REMUX_FIRST_BYTE_MS = 6000;
+
+/**
+ * ffmpeg 换封装成 fMP4 直接管道输出；客户端断开就 kill，别留僵尸进程。
+ * 首字节超时 / ffmpeg 无输出退出 / 没有 ffmpeg 时，一律回退为直连播放。
+ */
 async function pipeRemux(
   file: string,
+  req: import("express").Request,
   res: import("express").Response,
   videoCodec: string | null = null,
   startSec = 0,
+  stat?: fs.Stats,
+  mime = "video/mp4",
 ): Promise<void> {
+  const fallback = (): void => {
+    if (!stat) {
+      if (!res.headersSent && !res.writableEnded) {
+        res.status(500).json({ ok: false, error: "换封装失败，且无法获取文件大小，无法回退直连" });
+      }
+      return;
+    }
+    logger.warn({ file }, "换封装不可用，回退为直连播放");
+    pipeDirect(file, req, res, stat, mime);
+  };
+
   const info = await ffmpegInfo();
   if (!info.available || !info.ffmpeg) {
-    res.status(503).json({
-      ok: false,
-      error: `这个格式浏览器播不了，需要 ffmpeg 换封装，但服务端没有可用的 ffmpeg（${info.error ?? "未安装"}）。`,
-    });
+    // 没有可用 ffmpeg：能直连播就别挡着
+    fallback();
     return;
   }
 
@@ -540,7 +578,71 @@ async function pipeRemux(
     "pipe:1",
   ];
 
-  await pipeFfmpeg(info.ffmpeg, args, file, res, "换封装");
+  let stderr = "";
+  const child = spawn(info.ffmpeg, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let started = false;
+  let decided = false;
+  const onResClose = (): void => {
+    if (!child.killed) child.kill("SIGKILL");
+  };
+  res.on("close", onResClose);
+
+  const timer = setTimeout(() => {
+    if (started || decided) return;
+    decided = true;
+    logger.warn({ file, ms: REMUX_FIRST_BYTE_MS }, "换封装首字节超时，回退为直连播放");
+    res.off("close", onResClose);
+    child.kill("SIGKILL");
+    fallback();
+  }, REMUX_FIRST_BYTE_MS);
+  timer.unref?.();
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (!started) {
+      started = true;
+      if (!decided) {
+        decided = true;
+        clearTimeout(timer);
+      }
+      res.status(200);
+      res.setHeader("Content-Type", "video/mp4");
+      // 实时换封装没有确定长度，也不能 Range
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.write(chunk);
+    } else {
+      res.write(chunk);
+    }
+  });
+  child.stdout.on("end", () => {
+    if (started) res.end();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr = (stderr + chunk.toString("utf8")).slice(-4000);
+  });
+  child.on("error", (err) => {
+    if (decided) return;
+    decided = true;
+    clearTimeout(timer);
+    logger.warn({ err: err.message, file }, "ffmpeg 换封装启动失败");
+    res.off("close", onResClose);
+    fallback();
+  });
+  child.on("close", (code) => {
+    if (!started && !decided) {
+      // ffmpeg 没吐任何数据就退出：回退直连，别把响应挂死
+      decided = true;
+      clearTimeout(timer);
+      logger.warn({ code, file, stderr: stderr.slice(-300) }, "ffmpeg 换封装无输出退出，回退为直连播放");
+      res.off("close", onResClose);
+      fallback();
+      return;
+    }
+    if (started && code !== null && code !== 0) {
+      logger.warn({ code, file, stderr: stderr.slice(-300) }, "ffmpeg 换封装异常退出");
+      if (!res.writableEnded) res.destroy();
+    }
+  });
 }
 
 /**
