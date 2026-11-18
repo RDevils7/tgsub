@@ -4,7 +4,7 @@
 
 <p>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.22-2496ED.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.24-2496ED.svg">
   <img alt="Node" src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg">
 </p>
 
@@ -38,6 +38,7 @@ services:
     image: rdevils7/tgsub:latest
     container_name: tgsub
     restart: unless-stopped
+    devices: ["/dev/dri:/dev/dri"]   # 硬件转码；无核显 / 无 /dev/dri 的机器请删掉此行
     ports: ["6789:6789"]
     environment:
       TZ: Asia/Shanghai
@@ -95,7 +96,7 @@ docker compose stop                            # 优雅停止
 ```
 
 - 备份：`docker compose stop` 后打包 `./data` 即可（恢复时保持 `SESSION_SECRET` 不变）。
-- 镜像标签：`latest` 为最新正式版；生产建议锁定具体版本，如 `v1.3.22`。
+- 镜像标签：`latest` 为最新正式版；生产建议锁定具体版本，如 `v1.3.24`。
 
 ## 常见问题
 
@@ -109,6 +110,26 @@ docker compose stop                            # 优雅停止
 | 视频一直缓冲 | 1.3.21+ 非 faststart MP4 自动走兼容通道；可先用「下载」取原文件 |
 
 更多见 [PROJECT_DOC.md](PROJECT_DOC.md)。
+
+## 更新日志
+
+> 每次发版同步更新本节（新的在上）。更早版本见 git 提交历史。
+
+### v1.3.24
+- **AI 媒体信息整理**：手动网页 / m3u8 链接、平台链接（B站 / 小红书 / YouTube）、转发消息或文案，在自动识别出的标题/剧名不可靠时，由 AI 读取网页标题、描述、站点名或分享文案，生成干净的作品名 + 简介 + 标签；失败不影响下载。（设置 → AI「AI 智能命名与媒体信息整理」）
+- **AI 故障报告**：内置 AI 结合日志与运行状态（会话、机器人、下载队列、工具链、磁盘、错误日志）自动生成结构化问题报告，落盘 `data/reports/`（含 `latest.json`），便于排查或交给其他智能体修复。接口 `POST /api/ai/report`、`GET /api/ai/report/latest`、`GET /api/ai/report/signals`；设置页「故障自动报告」开关（默认开，同一事件只报一次）。
+
+### v1.3.23
+- 修复媒体库视频无法播放：换封装(remux)在容器内偶发长时间零输出，导致「一直缓冲 / 15 秒后报『没收到可解码字节』」。现在 remux 6 秒内无首字节、ffmpeg 无输出退出、或无 ffmpeg 时，自动回退为直连 Range 播放。
+- 直连响应补 `X-Accel-Buffering: no`，缓解反向代理缓冲大响应。
+
+### v1.3.22
+- 链路冷却：连不上 Telegram 时整体停手一段时间（5→10→20→40→60 分钟指数退避，到点只试一次，成功即恢复），降低高频重连引发的风控。
+- 心跳对 `AUTH_KEY_DUPLICATED` 等可自愈错误改为多轮确认再判死；修复断开后重连定时器未取消导致的僵尸重连。
+- 新增机器人看门狗：静默掉线后按指数退避自动重启。
+
+### v1.3.21
+- 非 faststart MP4 自动走兼容播放通道（实时换封装 fMP4），缓解「海报正常、视频一直缓冲」；会话 cookie 自动补种。
 
 ## 说明
 
